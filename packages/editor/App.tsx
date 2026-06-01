@@ -156,6 +156,7 @@ const App: React.FC = () => {
   const updateInfo = useUpdateCheck();
   const updateToastShown = useRef(false);
   useEffect(() => {
+    if (window.location.hash) return;
     if (updateInfo?.updateAvailable && !updateInfo.dismissed && !updateToastShown.current) {
       updateToastShown.current = true;
       const t = setTimeout(() => {
