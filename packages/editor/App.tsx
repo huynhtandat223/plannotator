@@ -608,9 +608,9 @@ const App: React.FC = () => {
     return states;
   }, [getMessageStatesWithCurrent]);
 
-  const messageAnnotationEntries = React.useMemo<MessageAnnotationEntry[]>(() => {
+  const buildMessageAnnotationEntries = React.useCallback((): MessageAnnotationEntry[] => {
     if (annotateSource !== 'message' || recentMessages.length === 0) return [];
-    const states = getMessageStatesWithCurrent();
+    const states = saveCurrentMessageState();
     return recentMessages.map((msg) => {
       const state = states.get(msg.messageId) ?? createEmptyMessageState(msg);
       const linkedDocs: Map<string, LinkedDocAnnotationEntry> = new Map();
@@ -631,7 +631,7 @@ const App: React.FC = () => {
         codeAnnotations: state.codeAnnotations,
       };
     });
-  }, [annotateSource, recentMessages, getMessageStatesWithCurrent]);
+  }, [annotateSource, recentMessages, saveCurrentMessageState]);
 
   const activeMessageAnnotationCounts = React.useMemo(() => {
     const counts = new Map(cachedMessageAnnotationCounts);
@@ -650,17 +650,8 @@ const App: React.FC = () => {
   );
 
   const annotatedMessageIds = React.useMemo(
-    () => messageAnnotationEntries
-      .filter((entry) =>
-        entry.annotations.length > 0 ||
-        entry.globalAttachments.length > 0 ||
-        (entry.codeAnnotations?.length ?? 0) > 0 ||
-        (entry.linkedDocs
-          ? Array.from(entry.linkedDocs.values()).some((doc) => doc.annotations.length > 0 || doc.globalAttachments.length > 0)
-          : false)
-      )
-      .map((entry) => entry.messageId),
-    [messageAnnotationEntries]
+    () => Array.from(activeMessageAnnotationCounts.keys()),
+    [activeMessageAnnotationCounts]
   );
 
   // File browser file selection: open via linked doc system
@@ -1354,7 +1345,7 @@ const App: React.FC = () => {
         (d) => d.annotations.length > 0 || d.globalAttachments.length > 0
       );
       if (allAnnotations.length > 0 || codeAnnotations.length > 0 || globalAttachments.length > 0 || hasDocAnnotations || editorAnnotations.length > 0) {
-        body.feedback = annotationsOutput;
+        body.feedback = messageMultiSelectMode ? buildFullAnnotationsOutput() : annotationsOutput;
       }
 
       await fetch('/api/approve', {
@@ -1376,7 +1367,7 @@ const App: React.FC = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          feedback: annotationsOutput,
+          feedback: messageMultiSelectMode ? buildFullAnnotationsOutput() : annotationsOutput,
           planSave: {
             enabled: planSaveSettings.enabled,
             ...(planSaveSettings.customPath && { customPath: planSaveSettings.customPath }),
@@ -1393,9 +1384,7 @@ const App: React.FC = () => {
   const handleAnnotateFeedback = async () => {
     setIsSubmitting(true);
     try {
-      if (messageMultiSelectMode) {
-        saveCurrentMessageState();
-      }
+      const feedback = messageMultiSelectMode ? buildFullAnnotationsOutput() : annotationsOutput;
       const scopedSelectedMessageId = messageMultiSelectMode
         ? annotatedMessageIds.length === 1 ? annotatedMessageIds[0] : undefined
         : selectedMessageId ?? undefined;
@@ -1403,7 +1392,7 @@ const App: React.FC = () => {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          feedback: annotationsOutput,
+          feedback,
           annotations: allAnnotations,
           codeAnnotations,
           ...(scopedSelectedMessageId ? { selectedMessageId: scopedSelectedMessageId } : {}),
@@ -1669,15 +1658,18 @@ const App: React.FC = () => {
     // This is just a placeholder for future custom logic
   };
 
-  const annotationsOutput = useMemo(() => {
+  const buildFullAnnotationsOutput = React.useCallback((): string => {
     if (messageMultiSelectMode) {
-      let output = exportMessageAnnotations(messageAnnotationEntries);
+      let output = exportMessageAnnotations(buildMessageAnnotationEntries());
       if (editorAnnotations.length > 0) {
         output += `\n\n${exportEditorAnnotations(editorAnnotations)}`;
       }
       return output;
     }
+    return '';
+  }, [messageMultiSelectMode, buildMessageAnnotationEntries, editorAnnotations]);
 
+  const annotationsOutput = useMemo(() => {
     const docAnnotations = linkedDocHook.getDocAnnotations();
     const hasDocAnnotations = Array.from(docAnnotations.values()).some(
       (d) => d.annotations.length > 0 || d.globalAttachments.length > 0
@@ -1690,8 +1682,6 @@ const App: React.FC = () => {
       return 'User reviewed the document and has no feedback.';
     }
 
-    // Derive the conversion flag for the currently-displayed document:
-    // when viewing a linked doc, use that doc's isConverted; otherwise use the root flag.
     const activeConverted = linkedDocHook.isActive
       ? (docAnnotations.get(linkedDocHook.filepath ?? '')?.isConverted ?? false)
       : sourceConverted;
@@ -1708,8 +1698,6 @@ const App: React.FC = () => {
       : '';
 
     if (hasDocAnnotations) {
-      // Parse blocks for each linked doc's cached markdown so the exporter
-      // can attach source line numbers per annotation.
       const enriched: Map<string, LinkedDocAnnotationEntry> = new Map(docAnnotations);
       for (const [filepath, entry] of enriched) {
         if (entry.markdown) {
@@ -1728,7 +1716,7 @@ const App: React.FC = () => {
     }
 
     return output;
-  }, [messageMultiSelectMode, messageAnnotationEntries, blocks, allAnnotations, globalAttachments, linkedDocHook.getDocAnnotations, editorAnnotations, codeAnnotations, sourceConverted, annotateSource, linkedDocHook.isActive, linkedDocHook.filepath]);
+  }, [blocks, allAnnotations, globalAttachments, linkedDocHook.getDocAnnotations, editorAnnotations, codeAnnotations, sourceConverted, annotateSource, linkedDocHook.isActive, linkedDocHook.filepath]);
 
   const aiAnnotationsContext = useMemo(
     () => hasAnyAnnotations ? annotationsOutput : undefined,
@@ -1912,7 +1900,8 @@ const App: React.FC = () => {
 
   // Quick-save handlers for export dropdown and keyboard shortcut
   const handleDownloadAnnotations = () => {
-    const blob = new Blob([annotationsOutput], { type: 'text/plain' });
+    const output = messageMultiSelectMode ? buildFullAnnotationsOutput() : annotationsOutput;
+    const blob = new Blob([output], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -2563,7 +2552,8 @@ const App: React.FC = () => {
             onDeleteEditorAnnotation={deleteEditorAnnotation}
             onClose={() => setIsPanelOpen(false)}
             onQuickCopy={async () => {
-              await navigator.clipboard.writeText(wrapFeedbackForAgent(annotationsOutput));
+              const output = messageMultiSelectMode ? buildFullAnnotationsOutput() : annotationsOutput;
+              await navigator.clipboard.writeText(wrapFeedbackForAgent(output));
             }}
             onShare={canShareCurrentSession && (shareUrl || shortShareUrl) ? () => { setIsPanelOpen(false); setInitialExportTab('share'); setShowExport(true); } : undefined}
             otherFileAnnotations={otherFileAnnotations}
@@ -2642,7 +2632,7 @@ const App: React.FC = () => {
           isGeneratingShortUrl={isGeneratingShortUrl}
           shortUrlError={shortUrlError}
           onGenerateShortUrl={generateShortUrl}
-          annotationsOutput={annotationsOutput}
+          annotationsOutput={showExport && messageMultiSelectMode ? buildFullAnnotationsOutput() : annotationsOutput}
           annotationCount={allAnnotations.length + codeAnnotations.length}
           taterSprite={taterMode ? <TaterSpritePullup /> : undefined}
           sharingEnabled={canShareCurrentSession}
