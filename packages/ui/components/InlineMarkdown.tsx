@@ -486,6 +486,17 @@ export const InlineMarkdown: React.FC<{
       continue;
     }
 
+    // Keep custom autolinks literal; their contents should not
+    // recurse into markdown parsing.
+    match = remaining.match(/^<([A-Za-z][A-Za-z0-9.+-]{0,31}:[^\s<>]*)>/);
+    if (match) {
+      const content = match[1];
+      parts.push(<span key={key++}>{`<${content}>`}</span>);
+      remaining = remaining.slice(match[0].length);
+      previousChar = ">";
+      continue;
+    }
+
     // Strikethrough: ~~text~~
     match = remaining.match(/^~~([\s\S]+?)~~/);
     if (match) {
