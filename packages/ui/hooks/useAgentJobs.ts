@@ -22,7 +22,7 @@ interface UseAgentJobsReturn {
   jobs: AgentJobInfo[];
   jobLogs: Map<string, string>;
   capabilities: AgentCapabilities | null;
-  launchJob: (params: { provider?: string; command?: string[]; label?: string; engine?: string; model?: string; reasoningEffort?: string; effort?: string; fastMode?: boolean }) => Promise<AgentJobInfo | null>;
+  launchJob: (params: { provider?: string; command?: string[]; label?: string; engine?: string; model?: string; reasoningEffort?: string; effort?: string; fastMode?: boolean; reviewProfileId?: string }) => Promise<AgentJobInfo | null>;
   killJob: (id: string) => Promise<void>;
   killAll: () => Promise<void>;
 }
@@ -168,6 +168,7 @@ export function useAgentJobs(
       reasoningEffort?: string;
       effort?: string;
       fastMode?: boolean;
+      reviewProfileId?: string;
     }): Promise<AgentJobInfo | null> => {
       try {
         const res = await fetch(JOBS_URL, {

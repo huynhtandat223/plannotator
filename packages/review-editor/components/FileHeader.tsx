@@ -264,12 +264,13 @@ export const FileHeader: React.FC<FileHeaderProps> = ({
         {/* File actions: open in app (when launchable), copy path, copy file
             diff. canOpen=false in PR review without a local checkout — those
             files aren't on disk — but copy actions remain. */}
+        {/* Icon-only in the header (the picked app's name shows in the dropdown),
+            matching the plan/annotate side. */}
         <OpenInAppButton
           filePath={filePath}
           base={state?.agentCwd ?? null}
           diffText={patch}
           canOpen={!(state?.prMetadata && !state?.agentCwd) && status !== 'deleted'}
-          showLabel={!isCompact}
         />
       </div>
     </div>

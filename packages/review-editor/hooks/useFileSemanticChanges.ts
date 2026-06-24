@@ -32,7 +32,7 @@ async function fetchSemanticDiff(): Promise<SemanticDiffResponse> {
   return res.json() as Promise<SemanticDiffResponse>;
 }
 
-export function loadSemanticDiff(rawPatch: string): Promise<SemanticDiffResponse> {
+function loadSemanticDiff(rawPatch: string): Promise<SemanticDiffResponse> {
   if (cacheKey === rawPatch && cachePromise) return cachePromise;
   cacheKey = rawPatch;
 

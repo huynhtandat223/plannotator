@@ -79,32 +79,45 @@ export function buildWorkspacePromptContextLines(
   ];
 }
 
-export function buildAgentReviewUserMessageForTarget(target: AgentReviewTarget): string {
+export function buildAgentReviewUserMessageForTarget(
+  target: AgentReviewTarget,
+  contextOnly = false,
+): string {
   if (target.kind === "workspace") {
-    return buildWorkspaceReviewUserMessage(target.patch, target.workspace);
+    return buildWorkspaceReviewUserMessage(target.patch, target.workspace, contextOnly);
   }
   return buildAgentReviewUserMessage(
     target.patch,
     target.diffType,
     target.options,
     target.kind === "pr" ? target.prMetadata : undefined,
+    contextOnly,
   );
 }
 
-/** Build the dynamic user message shared by local Claude and Codex review jobs. */
+/**
+ * Build the dynamic user message shared by local Claude and Codex review jobs.
+ *
+ * `contextOnly` strips the "Review… / provide findings" framing prose and keeps
+ * only the git/PR context the agent needs to locate the changes. Used by custom
+ * review skills, which carry their own instructions and must not inherit the
+ * default review's framing. With `contextOnly` off the output is byte-identical
+ * to today's prompt.
+ */
 export function buildAgentReviewUserMessage(
   patch: string,
   diffType: DiffType,
   options?: AgentReviewUserMessageOptions,
   prMetadata?: PRMetadata,
+  contextOnly = false,
 ): string {
   if (prMetadata) {
     if (options?.prDiffScope === "full-stack") {
       return [
-        `Full-stack review of ${prMetadata.url}`,
+        contextOnly ? prMetadata.url : `Full-stack review of ${prMetadata.url}`,
         "",
         "This is a stacked PR. The diff below shows ALL accumulated changes from the repository default branch through this PR's head (not just this PR's own layer).",
-        "Review the complete diff for issues that span the stack.",
+        ...(contextOnly ? [] : ["Review the complete diff for issues that span the stack."]),
         "",
         "```diff",
         patch,
@@ -112,6 +125,9 @@ export function buildAgentReviewUserMessage(
       ].join("\n");
     }
     if (options?.hasLocalAccess) {
+      // Pure context already (where the checkout is, how to diff against the
+      // base) — no "Review… / provide findings" framing to strip, so this is
+      // identical for default and custom reviews regardless of contextOnly.
       return [
         prMetadata.url,
         "",
@@ -125,11 +141,14 @@ export function buildAgentReviewUserMessage(
 
   const instruction = getLocalDiffInstruction(diffType, options?.defaultBranch);
   if (instruction) {
+    if (contextOnly) {
+      return `Changeset: ${instruction.target}.\n${instruction.inspect}`;
+    }
     return `Review ${instruction.target}. ${instruction.inspect} Provide prioritized, actionable findings.`;
   }
 
   return [
-    "Review the following code changes and provide prioritized findings.",
+    contextOnly ? "Code changes:" : "Review the following code changes and provide prioritized findings.",
     "",
     "```diff",
     patch,
@@ -140,10 +159,12 @@ export function buildAgentReviewUserMessage(
 function buildWorkspaceReviewUserMessage(
   patch: string,
   workspace: WorkspaceReviewPromptContext,
+  contextOnly = false,
 ): string {
   return [
-    "Review the local workspace changes across multiple nested VCS repositories.",
-    "",
+    ...(contextOnly
+      ? []
+      : ["Review the local workspace changes across multiple nested VCS repositories.", ""]),
     ...buildWorkspacePromptContextLines(workspace, { includeReportingInstruction: true }),
     "",
     "```diff",

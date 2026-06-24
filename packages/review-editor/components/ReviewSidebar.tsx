@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { CodeAnnotation, type EditorAnnotation } from '@plannotator/ui/types';
+import { CodeAnnotation, type CodeAnnotationScope, type EditorAnnotation } from '@plannotator/ui/types';
 import { isCurrentUser } from '@plannotator/ui/utils/identity';
 import { EditorAnnotationCard } from '@plannotator/ui/components/EditorAnnotationCard';
 import { CopyButton } from './CopyButton';
+import { copyLocationPrefix } from '../utils/annotationDisplay';
 import { ConventionalLabelBadge } from './ConventionalLabelPicker';
 import { HighlightedCode } from './HighlightedCode';
 import { detectLanguage } from '../utils/detectLanguage';
@@ -52,7 +53,7 @@ interface ReviewSidebarProps {
   // Agent props
   agentJobs?: AgentJobInfo[];
   agentCapabilities?: AgentCapabilities | null;
-  onAgentLaunch?: (params: { provider?: string; command?: string[]; label?: string; engine?: string; model?: string; reasoningEffort?: string; effort?: string; fastMode?: boolean }) => void;
+  onAgentLaunch?: (params: { provider?: string; command?: string[]; label?: string; engine?: string; model?: string; reasoningEffort?: string; effort?: string; fastMode?: boolean; reviewProfileId?: string }) => void;
   onAgentKillJob?: (id: string) => void;
   onAgentKillAll?: () => void;
   externalAnnotations?: Array<{ source?: string }>;
@@ -86,9 +87,9 @@ const SuggestionPreview: React.FC<{ code: string; originalCode?: string; languag
   );
 };
 
-const FILE_SCOPE_FIRST = { file: 0, line: 1 } as const;
+const SCOPE_ORDER = { general: 0, file: 1, line: 2 } as const;
 
-function getAnnotationScope(annotation: CodeAnnotation): 'line' | 'file' {
+function getAnnotationScope(annotation: CodeAnnotation): CodeAnnotationScope {
   return annotation.scope ?? 'line';
 }
 
@@ -97,12 +98,12 @@ function compareCodeAnnotations(a: CodeAnnotation, b: CodeAnnotation): number {
   const bScope = getAnnotationScope(b);
 
   if (aScope !== bScope) {
-    return FILE_SCOPE_FIRST[aScope] - FILE_SCOPE_FIRST[bScope];
+    return SCOPE_ORDER[aScope] - SCOPE_ORDER[bScope];
   }
 
-  return aScope === 'file'
-    ? b.createdAt - a.createdAt
-    : a.lineStart - b.lineStart;
+  return aScope === 'line'
+    ? a.lineStart - b.lineStart
+    : b.createdAt - a.createdAt;
 }
 
 
@@ -157,13 +158,22 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
     }
   };
 
-  // Group annotations by file, optionally by PR first
-  const { groupedAnnotations, prGroups, isMultiPR } = React.useMemo(() => {
-    const prUrls = new Set(annotations.map(a => a.prUrl).filter(Boolean));
+  // Split out general (review-level) comments — they belong to no file — then
+  // group the rest by file, optionally by PR first.
+  const { generalAnnotations, groupedAnnotations, prGroups, isMultiPR } = React.useMemo(() => {
+    const general: CodeAnnotation[] = [];
+    const placed: CodeAnnotation[] = [];
+    for (const ann of annotations) {
+      if ((ann.scope ?? 'line') === 'general') general.push(ann);
+      else placed.push(ann);
+    }
+    general.sort((a, b) => b.createdAt - a.createdAt);
+
+    const prUrls = new Set(placed.map(a => a.prUrl).filter(Boolean));
     const multiPR = prUrls.size > 1;
 
     const grouped = new Map<string, CodeAnnotation[]>();
-    for (const ann of annotations) {
+    for (const ann of placed) {
       const existing = grouped.get(ann.filePath) || [];
       existing.push(ann);
       grouped.set(ann.filePath, existing);
@@ -175,7 +185,7 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
     let prs: Map<string, Map<string, CodeAnnotation[]>> | null = null;
     if (multiPR) {
       prs = new Map();
-      for (const ann of annotations) {
+      for (const ann of placed) {
         const prKey = ann.prUrl ?? '_none';
         if (!prs.has(prKey)) prs.set(prKey, new Map());
         const fileMap = prs.get(prKey)!;
@@ -190,14 +200,16 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
       }
     }
 
-    return { groupedAnnotations: grouped, prGroups: prs, isMultiPR: multiPR };
+    return { generalAnnotations: general, groupedAnnotations: grouped, prGroups: prs, isMultiPR: multiPR };
   }, [annotations]);
 
   if (!isOpen) return null;
 
   function renderAnnotationCard(annotation: CodeAnnotation) {
     const isSelected = selectedAnnotationId === annotation.id;
-    const isFileScope = getAnnotationScope(annotation) === 'file';
+    const scope = getAnnotationScope(annotation);
+    const isFileScope = scope === 'file';
+    const isGeneralScope = scope === 'general';
     return (
       <div
         key={annotation.id}
@@ -210,7 +222,11 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
       >
         <div className="flex items-center justify-between mb-1.5">
           <div className="flex items-center gap-2">
-            {isFileScope ? (
+            {isGeneralScope ? (
+              <span className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">
+                general
+              </span>
+            ) : isFileScope ? (
               <span className="text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-primary/10 text-primary">
                 file
               </span>
@@ -227,6 +243,11 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
             {annotation.conventionalLabel && (
               <ConventionalLabelBadge label={annotation.conventionalLabel} decorations={annotation.decorations} />
             )}
+            {annotation.reviewProfileLabel && (
+              <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-accent/10 text-accent/90">
+                {annotation.reviewProfileLabel}
+              </span>
+            )}
             {annotation.author && (
               <span className={`text-[10px] truncate max-w-[100px] ${isCurrentUser(annotation.author) ? 'text-muted-foreground/50' : 'text-muted-foreground/70'}`}>
                 {annotation.author}{isCurrentUser(annotation.author) && ' (me)'}
@@ -242,14 +263,14 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
             {renderInlineMarkdown(annotation.text)}
           </div>
         )}
-        {annotation.suggestedCode && (
+        {annotation.suggestedCode && !isGeneralScope && (
           <div className="mt-1.5">
             <SuggestionPreview code={annotation.suggestedCode} originalCode={annotation.originalCode} language={detectLanguage(annotation.filePath)} />
           </div>
         )}
         <div className="flex items-center justify-end gap-1 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
           {annotation.text && (
-            <CopyButton text={`${annotation.filePath}:${annotation.lineStart}${annotation.lineEnd !== annotation.lineStart ? `-${annotation.lineEnd}` : ''}\n${annotation.text}${annotation.reasoning ? `\n\nReasoning: ${annotation.reasoning}` : ''}`} variant="inline" />
+            <CopyButton text={`${copyLocationPrefix(annotation, scope)}${annotation.text}${annotation.reasoning ? `\n\nReasoning: ${annotation.reasoning}` : ''}`} variant="inline" />
           )}
           <button
             onClick={(e) => {
@@ -312,6 +333,16 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
                 </div>
               ) : (
                 <div className="p-2 space-y-4">
+                  {generalAnnotations.length > 0 && (
+                    <div>
+                      <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm px-2 py-1 text-xs font-medium text-muted-foreground">
+                        General
+                      </div>
+                      <div className="space-y-1">
+                        {generalAnnotations.map((annotation) => renderAnnotationCard(annotation))}
+                      </div>
+                    </div>
+                  )}
                   {isMultiPR && prGroups ? (
                     Array.from(prGroups.entries()).map(([prUrl, fileMap]) => {
                       const sample = fileMap.values().next().value?.[0];

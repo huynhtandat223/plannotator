@@ -87,6 +87,10 @@ export interface AgentJobHandlerOptions {
     diffScope?: string;
     /** Diff context snapshot at launch (stored on AgentJobInfo for per-job "Copy All"). */
     diffContext?: AgentJobInfo["diffContext"];
+    /** Resolved review profile id at launch time. Stored on AgentJobInfo. */
+    reviewProfileId?: string;
+    /** Resolved review profile label at launch time. Stored on AgentJobInfo. */
+    reviewProfileLabel?: string;
   } | null>;
   /**
    * Called after a job process exits with exit code 0.
@@ -132,13 +136,13 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions): AgentJob
 
   // --- Process lifecycle ---
   function spawnJob(
+    id: string,
     provider: string,
     command: string[],
     label: string,
     outputPath?: string,
-    spawnOptions?: { captureStdout?: boolean; stdinPrompt?: string; cwd?: string; prompt?: string; engine?: string; model?: string; effort?: string; reasoningEffort?: string; fastMode?: boolean; prUrl?: string; diffScope?: string; diffContext?: AgentJobInfo["diffContext"] },
+    spawnOptions?: { captureStdout?: boolean; stdinPrompt?: string; cwd?: string; prompt?: string; engine?: string; model?: string; effort?: string; reasoningEffort?: string; fastMode?: boolean; prUrl?: string; diffScope?: string; diffContext?: AgentJobInfo["diffContext"]; reviewProfileId?: string; reviewProfileLabel?: string },
   ): AgentJobInfo {
-    const id = crypto.randomUUID();
     const source = jobSource(id);
 
     const info: AgentJobInfo = {
@@ -158,6 +162,8 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions): AgentJob
       ...(spawnOptions?.prUrl && { prUrl: spawnOptions.prUrl }),
       ...(spawnOptions?.diffScope && { diffScope: spawnOptions.diffScope }),
       ...(spawnOptions?.diffContext && { diffContext: spawnOptions.diffContext }),
+      ...(spawnOptions?.reviewProfileId && { reviewProfileId: spawnOptions.reviewProfileId }),
+      ...(spawnOptions?.reviewProfileLabel && { reviewProfileLabel: spawnOptions.reviewProfileLabel }),
     };
 
     let proc: ReturnType<typeof Bun.spawn> | null = null;
@@ -299,7 +305,6 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions): AgentJob
         }
         jobOutputPaths.delete(id);
         jobOutputPaths.delete(`${id}:cwd`);
-
         broadcast({ type: "job:completed", job: { ...entry.info } });
       }).catch(() => {
         // Guard against unhandled rejection from unexpected runtime errors
@@ -429,6 +434,24 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions): AgentJob
       if (url.pathname === JOBS && req.method === "POST") {
         try {
           const body = await req.json();
+
+          // Reject unknown fields rather than silently ignoring them (per the
+          // custom-reviews spec — a typo'd field should fail loud, not no-op).
+          const KNOWN_JOB_FIELDS = new Set([
+            "provider", "command", "label",
+            "engine", "model", "reasoningEffort", "effort", "fastMode",
+            "reviewProfileId",
+          ]);
+          if (body && typeof body === "object") {
+            const unknown = Object.keys(body).filter((k) => !KNOWN_JOB_FIELDS.has(k));
+            if (unknown.length > 0) {
+              return Response.json(
+                { error: `Unknown field(s): ${unknown.join(", ")}` },
+                { status: 400 },
+              );
+            }
+          }
+
           const provider = typeof body.provider === "string" ? body.provider : "";
           let rawCommand = Array.isArray(body.command) ? body.command : [];
           let command = rawCommand.filter((c: unknown): c is string => typeof c === "string");
@@ -457,6 +480,9 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions): AgentJob
           let jobPrUrl: string | undefined;
           let jobDiffScope: string | undefined;
           let jobDiffContext: AgentJobInfo["diffContext"] | undefined;
+          let jobReviewProfileId: string | undefined;
+          let jobReviewProfileLabel: string | undefined;
+          const jobId = crypto.randomUUID();
           if (options.buildCommand) {
             // Thread config from POST body to buildCommand
             const config: Record<string, unknown> = {};
@@ -465,6 +491,7 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions): AgentJob
             if (typeof body.reasoningEffort === "string") config.reasoningEffort = body.reasoningEffort;
             if (typeof body.effort === "string") config.effort = body.effort;
             if (body.fastMode === true) config.fastMode = true;
+            if (typeof body.reviewProfileId === "string") config.reviewProfileId = body.reviewProfileId;
             const built = await options.buildCommand(provider, Object.keys(config).length > 0 ? config : undefined);
             if (built) {
               command = built.command;
@@ -482,6 +509,8 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions): AgentJob
               jobPrUrl = built.prUrl;
               jobDiffScope = built.diffScope;
               jobDiffContext = built.diffContext;
+              jobReviewProfileId = built.reviewProfileId;
+              jobReviewProfileLabel = built.reviewProfileLabel;
             }
           }
 
@@ -492,7 +521,7 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions): AgentJob
             );
           }
 
-          const job = spawnJob(provider, command, label, outputPath, {
+          const job = spawnJob(jobId, provider, command, label, outputPath, {
             captureStdout,
             stdinPrompt,
             cwd: spawnCwd,
@@ -505,6 +534,8 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions): AgentJob
             prUrl: jobPrUrl,
             diffScope: jobDiffScope,
             diffContext: jobDiffContext,
+            reviewProfileId: jobReviewProfileId,
+            reviewProfileLabel: jobReviewProfileLabel,
           });
           return Response.json({ job }, { status: 201 });
         } catch (err) {

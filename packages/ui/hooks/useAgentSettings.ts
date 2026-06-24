@@ -30,6 +30,7 @@ export type AgentEngine = 'claude' | 'codex';
 interface AgentSettingsState {
   selectedMode?: AgentMode;
   reviewEngine: AgentEngine;
+  reviewProfileId: string;
   tourEngine: AgentEngine;
   claude: ClaudeSection;
   codex: CodexSection;
@@ -40,6 +41,7 @@ interface AgentSettingsState {
 const initialState: AgentSettingsState = {
   selectedMode: 'review',
   reviewEngine: 'claude',
+  reviewProfileId: 'builtin:default',
   tourEngine: 'claude',
   claude: { model: DEFAULT_CLAUDE_MODEL, perModel: {} },
   codex: { model: DEFAULT_CODEX_MODEL, perModel: {} },
@@ -83,6 +85,7 @@ function readCookie(): AgentSettingsState {
     return {
       selectedMode: parseMode(parsed.selectedMode) ?? initialState.selectedMode,
       reviewEngine: parseEngine(parsed.reviewEngine),
+      reviewProfileId: typeof parsed.reviewProfileId === 'string' ? parsed.reviewProfileId : 'builtin:default',
       tourEngine: parseEngine(parsed.tourEngine),
       claude: {
         model: typeof parsed.claude?.model === 'string' ? parsed.claude.model : DEFAULT_CLAUDE_MODEL,
@@ -119,6 +122,10 @@ export function useAgentSettings() {
 
   const setReviewEngine = useCallback((engine: AgentEngine) => {
     setState((s) => ({ ...s, reviewEngine: engine }));
+  }, []);
+
+  const setReviewProfileId = useCallback((id: string) => {
+    setState((s) => ({ ...s, reviewProfileId: id }));
   }, []);
 
   const setTourEngine = useCallback((engine: AgentEngine) => {
@@ -217,6 +224,7 @@ export function useAgentSettings() {
   return {
     selectedMode: state.selectedMode,
     reviewEngine: state.reviewEngine,
+    reviewProfileId: state.reviewProfileId,
     tourEngine: state.tourEngine,
     claudeModel: state.claude.model,
     claudeEffort,
@@ -230,6 +238,7 @@ export function useAgentSettings() {
     tourCodexFast,
     setSelectedMode,
     setReviewEngine,
+    setReviewProfileId,
     setTourEngine,
     setClaudeModel,
     setClaudeEffort,

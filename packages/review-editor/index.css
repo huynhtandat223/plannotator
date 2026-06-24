@@ -329,25 +329,6 @@ diffs-container {
   cursor: pointer;
 }
 
-/* Sidebar accordion: compact the panel rows so they fit the narrow file tree
-   (the panel sized them via .semantic-diff-terminal, which we don't use here). */
-.semantic-diff-accordion {
-  font-family: var(--diff-font-override, var(--font-mono));
-  font-size: 0.75rem;
-  line-height: 1.4;
-  font-variant-numeric: tabular-nums;
-}
-.semantic-diff-accordion .semantic-diff-file {
-  margin: 0 0 0.5rem;
-}
-.semantic-diff-accordion .semantic-diff-file-header {
-  padding: 0 0.375rem 0.25rem;
-  margin-bottom: 0.125rem;
-}
-.semantic-diff-accordion .semantic-diff-row {
-  min-height: 1.5rem;
-  padding: 0.125rem 0.375rem;
-}
 
 .semantic-diff-retry {
   display: inline-flex;

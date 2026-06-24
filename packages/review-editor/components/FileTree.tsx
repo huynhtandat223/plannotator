@@ -10,7 +10,6 @@ import { WorktreePicker } from './WorktreePicker';
 import { getReviewSearchSideLabel, type ReviewSearchFileGroup, type ReviewSearchMatch } from '../utils/reviewSearch';
 import type { DiffFile } from '../types';
 import { OverlayScrollArea } from '@plannotator/ui/components/OverlayScrollArea';
-import { SemanticDiffAccordion } from './SemanticDiffAccordion';
 
 interface FileTreeProps {
   files: DiffFile[];
@@ -61,6 +60,9 @@ interface FileTreeProps {
   activeSearchMatchId?: string | null;
   onSelectSearchMatch?: (matchId: string) => void;
   onStepSearchMatch?: (direction: 1 | -1) => void;
+  onSelectSemanticDiff?: () => void;
+  isSemanticDiffActive?: boolean;
+  semanticDiffAvailable?: boolean;
   onSelectAllFiles?: () => void;
   isAllFilesActive?: boolean;
   scrollHighlightIndex?: number;
@@ -113,6 +115,9 @@ export const FileTree: React.FC<FileTreeProps> = ({
   activeSearchMatchId,
   onSelectSearchMatch,
   onStepSearchMatch,
+  onSelectSemanticDiff,
+  isSemanticDiffActive = false,
+  semanticDiffAvailable = false,
   onSelectAllFiles,
   isAllFilesActive = false,
   scrollHighlightIndex,
@@ -451,6 +456,19 @@ export const FileTree: React.FC<FileTreeProps> = ({
           )
         ) : (
           <>
+          {semanticDiffAvailable && onSelectSemanticDiff && (
+            <button
+              onClick={onSelectSemanticDiff}
+              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-xs transition-colors mb-0.5 ${
+                isSemanticDiffActive
+                  ? 'bg-primary/15 text-primary font-medium'
+                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+              }`}
+            >
+              <span className="w-3.5 h-3.5 flex flex-shrink-0 items-center justify-center" aria-hidden="true">∆</span>
+              <span>Semantic diff</span>
+            </button>
+          )}
           {onSelectAllFiles && (
             <button
               onClick={onSelectAllFiles}
@@ -477,7 +495,7 @@ export const FileTree: React.FC<FileTreeProps> = ({
               node={node}
               expandedFolders={expandedFolders}
               onToggleFolder={handleToggleFolder}
-              activeFileIndex={isAllFilesActive ? -1 : activeFileIndex}
+              activeFileIndex={isAllFilesActive || isSemanticDiffActive ? -1 : activeFileIndex}
               scrollHighlightIndex={isAllFilesActive ? scrollHighlightIndex : undefined}
               onSelectFile={onSelectFile}
               onDoubleClickFile={onDoubleClickFile}
@@ -493,8 +511,6 @@ export const FileTree: React.FC<FileTreeProps> = ({
         )}
       </div>
       </OverlayScrollArea>
-
-      <SemanticDiffAccordion />
 
       {/* Footer */}
       <div className="px-2 py-1.5 border-t border-border/50 text-xs text-muted-foreground">

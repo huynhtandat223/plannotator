@@ -112,6 +112,91 @@ describe("buildAgentReviewUserMessage", () => {
   });
 });
 
+describe("buildAgentReviewUserMessage — contextOnly (custom review skill)", () => {
+  test("keeps the git context but drops the review framing prose", () => {
+    const message = buildAgentReviewUserMessage(
+      patch,
+      "last-commit",
+      { defaultBranch: "origin/main" },
+      undefined,
+      true,
+    );
+
+    expect(message).toContain("the code changes introduced in the last commit");
+    expect(message).toContain("git diff HEAD~1..HEAD");
+    expect(message).not.toContain("Review the");
+    expect(message).not.toContain("Provide prioritized, actionable findings.");
+    expect(message).not.toContain(patch);
+  });
+
+  test("falls back to the inline patch without the review framing line", () => {
+    const message = buildAgentReviewUserMessage(patch, "p4-default", undefined, undefined, true);
+
+    expect(message).toContain(patch);
+    expect(message).not.toContain("Review the following code changes");
+    expect(message).not.toContain("provide prioritized findings");
+  });
+
+  test("PR full-stack drops the review line but keeps the URL and stack context", () => {
+    const prMetadata = {
+      url: "https://github.com/o/r/pull/7",
+      baseBranch: "main",
+    } as Parameters<typeof buildAgentReviewUserMessage>[3];
+    const message = buildAgentReviewUserMessage(
+      patch,
+      "branch",
+      { prDiffScope: "full-stack" },
+      prMetadata,
+      true,
+    );
+
+    expect(message).toContain("https://github.com/o/r/pull/7");
+    expect(message).toContain("This is a stacked PR.");
+    expect(message).toContain(patch);
+    expect(message).not.toContain("Full-stack review of");
+    expect(message).not.toContain("Review the complete diff");
+  });
+
+  test("PR local-access is pure context — identical for default and custom", () => {
+    const prMetadata = {
+      url: "https://github.com/o/r/pull/9",
+      baseBranch: "main",
+    } as Parameters<typeof buildAgentReviewUserMessage>[3];
+    const opts = { hasLocalAccess: true };
+
+    const dflt = buildAgentReviewUserMessage(patch, "branch", opts, prMetadata, false);
+    const custom = buildAgentReviewUserMessage(patch, "branch", opts, prMetadata, true);
+
+    // This branch carries no framing prose, only context, so stripping does
+    // nothing — the two must be byte-identical, and the diff instruction stays.
+    expect(custom).toBe(dflt);
+    expect(custom).toContain("git diff origin/main...HEAD");
+    expect(custom).not.toContain("Provide prioritized");
+  });
+
+  test("workspace drops the opening review line but keeps the path-reporting rules", () => {
+    const message = buildAgentReviewUserMessageForTarget(
+      {
+        kind: "workspace",
+        patch,
+        workspace: {
+          root: "/tmp/workspace",
+          repos: [
+            { label: "api", cwd: "/tmp/workspace/api", changed: true, vcsType: "git", gitRef: "Uncommitted changes" },
+          ],
+        },
+      },
+      true,
+    );
+
+    expect(message).not.toContain("Review the local workspace changes");
+    expect(message).toContain("must exactly match the path shown in the diff");
+    expect(message).toContain("Do not use bare repo-relative paths like `src/file.ts`");
+    expect(message).toContain("workspace root: /tmp/workspace");
+    expect(message).toContain(patch);
+  });
+});
+
 describe("getLocalDiffInstruction", () => {
   test("returns null for non-local diff types", () => {
     expect(getLocalDiffInstruction("p4-default")).toBeNull();

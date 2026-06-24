@@ -55,7 +55,8 @@
     "./source-save-node": "./source-save-node.ts",
     "./browser-paths": "./browser-paths.ts",
     "./workspace-status": "./workspace-status.ts",
-    "./open-in-apps": "./open-in-apps.ts"
+    "./open-in-apps": "./open-in-apps.ts",
+    "./review-profiles": "./review-profiles.ts"
   },
   "dependencies": {
     "@joplin/turndown-plugin-gfm": "^1.0.64",

@@ -1,4 +1,9 @@
 import { toRelativePath } from "./path-utils";
+import {
+  composeReviewPrompt,
+  type ResolvedReviewProfile,
+} from "@plannotator/shared/review-profiles";
+import { classifyFindingPlacement } from "@plannotator/shared/external-annotation";
 
 /**
  * Claude Code Review Agent — prompt, command builder, and JSONL output parser.
@@ -20,9 +25,9 @@ export type ClaudeSeverity = "important" | "nit" | "pre_existing";
 
 export interface ClaudeFinding {
   severity: ClaudeSeverity;
-  file: string;
-  line: number;
-  end_line: number;
+  file?: string | null;      // null for a general (review-level) comment
+  line?: number | null;      // null for a whole-file or general comment
+  end_line?: number | null;
   description: string;
   reasoning: string;
 }
@@ -49,9 +54,13 @@ export const CLAUDE_REVIEW_SCHEMA_JSON = JSON.stringify({
         type: "object",
         properties: {
           severity: { type: "string", enum: ["important", "nit", "pre_existing"] },
-          file: { type: "string" },
-          line: { type: "integer" },
-          end_line: { type: "integer" },
+          // Nullable, not omitted: keep every property in `required` so the
+          // schema is valid under strict structured-output validators too. A
+          // whole-file finding sets line/end_line null; a general finding also
+          // sets file null.
+          file: { type: ["string", "null"] },
+          line: { type: ["integer", "null"] },
+          end_line: { type: ["integer", "null"] },
           description: { type: "string" },
           reasoning: { type: "string" },
         },
@@ -161,6 +170,10 @@ Step 5: Deduplicate and rank
   - Within each severity, sort by file path and line number
 
 Step 6: Return structured JSON output matching the schema.
+  Place each finding by how specific it is: give file and line for a line-level
+  issue; give file and set line null for a whole-file issue; set file and line
+  null for a general, review-level note. Never invent a line you are unsure of —
+  drop to a file or general placement instead of guessing.
   If no issues are found, return an empty findings array with zeroed summary.
 
 ## Hard constraints
@@ -174,6 +187,23 @@ Step 6: Return structured JSON output matching the schema.
 - Do NOT post any comments to GitHub or GitLab
 - Do NOT use gh pr comment or any commenting tool
 - Your only output is the structured JSON findings`;
+
+// ---------------------------------------------------------------------------
+// Prompt composition
+// ---------------------------------------------------------------------------
+
+/**
+ * Compose Claude's review prompt: the immutable system prompt, the resolved
+ * profile's Custom Review Profile section (omitted for builtin:default), then
+ * the user review message. For builtin:default / no profile the output is
+ * byte-identical to today's `CLAUDE_REVIEW_PROMPT + "\n\n---\n\n" + userMessage`.
+ */
+export function composeClaudeReviewPrompt(
+  userMessage: string,
+  reviewProfile?: ResolvedReviewProfile,
+): string {
+  return composeReviewPrompt(CLAUDE_REVIEW_PROMPT, reviewProfile, userMessage);
+}
 
 // ---------------------------------------------------------------------------
 // Command builder
@@ -296,23 +326,29 @@ export function transformClaudeFindings(
   reasoning: string;
   author: string;
 }> {
-  return findings
-    .filter(f => f.file && typeof f.line === "number")
-    .map(f => ({
+  // Route every finding by what it carries — nothing is dropped. A finding
+  // with no usable file becomes a general comment; with a file but no line, a
+  // whole-file comment; otherwise a line comment.
+  return findings.map(f => {
+    const rawFile = typeof f.file === "string" ? f.file : "";
+    const filePath = rawFile
+      ? (pathTransform ? pathTransform(toRelativePath(rawFile, cwd)) : toRelativePath(rawFile, cwd))
+      : "";
+    const placement = classifyFindingPlacement(filePath, f.line, f.end_line);
+    return {
       source,
-      filePath: pathTransform
-        ? pathTransform(toRelativePath(f.file, cwd))
-        : toRelativePath(f.file, cwd),
-      lineStart: f.line,
-      lineEnd: f.end_line ?? f.line,
+      filePath: placement.filePath,
+      lineStart: placement.lineStart,
+      lineEnd: placement.lineEnd,
       type: "comment",
       side: "new",
-      scope: "line",
+      scope: placement.scope,
       text: `[${f.severity}] ${f.description}`,
       severity: f.severity,
       reasoning: f.reasoning,
       author: "Claude Code",
-    }));
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------

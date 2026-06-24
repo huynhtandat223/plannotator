@@ -117,6 +117,23 @@ function formatFileAnnotations(fileAnnotations: CodeAnnotation[], headingLevel =
   return output;
 }
 
+function renderGeneralComments(annotations: CodeAnnotation[]): string {
+  let output = '## General\n\n';
+  for (const ann of annotations) {
+    const prefix = formatConventionalPrefix(ann.conventionalLabel, ann.decorations);
+    if (ann.text) {
+      output += `${prefix}${ann.text}\n`;
+    } else if (prefix) {
+      output += `${prefix.trimEnd()}\n`;
+    }
+    if (ann.reasoning) {
+      output += `\n**Reasoning:** ${ann.reasoning}\n`;
+    }
+    output += '\n';
+  }
+  return output;
+}
+
 function groupByFile(annotations: CodeAnnotation[]): Map<string, CodeAnnotation[]> {
   const grouped = new Map<string, CodeAnnotation[]>();
   for (const ann of annotations) {
@@ -170,7 +187,13 @@ export function exportReviewFeedback(
     return '# Code Review\n\nNo feedback provided.';
   }
 
-  const prUrls = new Set(annotations.map(a => a.prUrl).filter(Boolean));
+  // General (review-level) comments belong to no file — render them in their own
+  // section and group only the rest by file.
+  const general = annotations.filter(a => (a.scope ?? 'line') === 'general');
+  const placed = annotations.filter(a => (a.scope ?? 'line') !== 'general');
+  const generalSection = general.length > 0 ? renderGeneralComments(general) : '';
+
+  const prUrls = new Set(placed.map(a => a.prUrl).filter(Boolean));
   const isMultiPR = prUrls.size > 1;
   const singlePrUrl = prUrls.size === 1 ? [...prUrls][0] : null;
   const prMismatch = singlePrUrl && prMeta && singlePrUrl !== prMeta.url;
@@ -188,7 +211,8 @@ export function exportReviewFeedback(
         `${prMeta.url}\n\n`
       : `# Code Review Feedback\n\n${diffContext ? `**Diff:** ${describeDiff(diffContext)}\n\n` : ''}`;
 
-    output += renderScopedGroups(annotations, '##');
+    output += renderScopedGroups(placed, '##');
+    output += generalSection;
     return output;
   }
 
@@ -196,7 +220,7 @@ export function exportReviewFeedback(
   let output = isMultiPR ? '# Multi-PR Review\n\n' : '# Code Review\n\n';
 
   const byPR = new Map<string, CodeAnnotation[]>();
-  for (const ann of annotations) {
+  for (const ann of placed) {
     const key = ann.prUrl ?? '_none';
     const existing = byPR.get(key) || [];
     existing.push(ann);
@@ -222,5 +246,6 @@ export function exportReviewFeedback(
     output += renderScopedGroups(prAnnotations, '###');
   }
 
+  output += generalSection;
   return output;
 }
