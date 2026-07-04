@@ -50,6 +50,7 @@ describe("parseReviewProfileByEngine", () => {
       codex: "builtin:default",
       cursor: "builtin:default",
       opencode: "builtin:default",
+      pi: "builtin:default",
     });
   });
 
@@ -59,6 +60,7 @@ describe("parseReviewProfileByEngine", () => {
       codex: "skill:security",
       cursor: "skill:security",
       opencode: "skill:security",
+      pi: "skill:security",
     });
   });
 
@@ -73,6 +75,7 @@ describe("parseReviewProfileByEngine", () => {
       codex: "skill:legacy",
       cursor: "skill:b",
       opencode: "skill:legacy",
+      pi: "skill:legacy",
     });
   });
 
@@ -84,6 +87,7 @@ describe("parseReviewProfileByEngine", () => {
       codex: "skill:x",
       cursor: "builtin:default",
       opencode: "builtin:default",
+      pi: "builtin:default",
     });
   });
 });

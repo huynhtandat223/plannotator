@@ -45,6 +45,8 @@ export interface AgentJobInfo {
   reasoningEffort?: string;
   /** Whether Codex fast mode (service_tier=fast) was enabled. */
   fastMode?: boolean;
+  /** Pi's unified reasoning level (marker engines only), e.g. "minimal", "high". */
+  thinking?: string;
   /** Human-readable label for the job. */
   label: string;
   /** Current lifecycle status. */

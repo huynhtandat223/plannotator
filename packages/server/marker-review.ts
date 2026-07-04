@@ -12,10 +12,10 @@ import {
 /**
  * Marker Review Engines — the shared machinery for review CLIs that expose NO
  * schema-validation flag, so their final review output is prose. Cursor (the
- * `agent` binary) and OpenCode (`opencode run`) are the two. Because they can't
- * be told to emit validated structured output, they are instead told to emit a
- * marker-delimited JSON block, and we extract the LAST complete block from the
- * reconstructed canonical text.
+ * `agent` binary), OpenCode (`opencode run`), and Pi (`pi --mode json`) are the
+ * three. Because they can't be told to emit validated structured output, they
+ * are instead told to emit a marker-delimited JSON block, and we extract the
+ * LAST complete block from the reconstructed canonical text.
  *
  * Everything else — the finding model (nullable file/line/end_line, classified
  * into line/whole-file/general by classifyFindingPlacement), custom review
@@ -192,9 +192,18 @@ export interface MarkerModel {
 /** One parsed stream event, opaque to the shared reducer (each engine reads it). */
 export type MarkerStreamEvent = Record<string, unknown>;
 
+/** Optional per-engine run knobs. Engines ignore fields they have no flag
+ *  for — today only Pi consumes `thinking` (its unified reasoning level). */
+export interface MarkerBuildOptions {
+  /** Pi: `--thinking off|minimal|low|medium|high|xhigh` (Pi's default is
+   *  medium; xhigh is accepted only by codex-max models — Pi errors clearly
+   *  otherwise, surfaced as a failed job). */
+  thinking?: string;
+}
+
 export interface MarkerEngine {
   /** Stable engine id — also the provider id used by the server. */
-  id: "cursor" | "opencode";
+  id: "cursor" | "opencode" | "pi";
   /** Display name for the capabilities/provider listing (e.g. "Cursor CLI"). */
   name: string;
   /** The CLI binary to spawn (NOTE: cursor's binary is `agent`). */
@@ -202,7 +211,7 @@ export interface MarkerEngine {
   /** Author string stamped on every annotation this engine produces. */
   author: string;
   /** Build the full argv (binary + flags + trailing prompt) for a review run. */
-  buildArgv: (prompt: string, model?: string, cwd?: string) => string[];
+  buildArgv: (prompt: string, model?: string, cwd?: string, opts?: MarkerBuildOptions) => string[];
   /** Pull readable text out of one parsed stream event, or null if none. */
   extractText: (event: MarkerStreamEvent) => string | null;
   /** Argv (after the binary) for model discovery, e.g. ["models"]. */
@@ -470,7 +479,173 @@ function opencodeBuildArgv(prompt: string, model?: string, cwd?: string): string
 }
 
 // ---------------------------------------------------------------------------
-// The two descriptors + registry.
+// Pi engine helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Pi `extractText`: assistant text lives on `message_end` events (the complete
+ * message for that turn) as `message.content` blocks with `type: "text"`. We
+ * deliberately do NOT also read `message_update` deltas (`text_delta` etc.) —
+ * `message_end` already carries the fully-assembled text, so summing both
+ * would double the canonical text. Non-assistant messages (the echoed user
+ * turn) and non-text content blocks (`thinking`, `toolCall`) contribute
+ * nothing here.
+ */
+function piExtractText(event: MarkerStreamEvent): string | null {
+  if (event.type !== "message_end") return null;
+  const message = event.message as { role?: unknown; content?: unknown } | undefined;
+  if (message?.role !== "assistant") return null;
+  const content = message.content;
+  if (!Array.isArray(content)) return null;
+  const text = content
+    .filter((b): b is { type?: string; text?: string } => !!b && typeof b === "object")
+    .filter((b) => b.type === "text" && typeof b.text === "string")
+    .map((b) => b.text as string)
+    .join("");
+  return text ? text : null;
+}
+
+/** Strip ANSI SGR escape sequences (color/style codes) from CLI table output. */
+function stripAnsi(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+/**
+ * Parse `pi --list-models` output into a model catalog. Unlike Cursor/OpenCode,
+ * Pi prints a HUMAN TABLE (`provider  model  context  max-out  thinking  images`),
+ * not one-model-per-recognizable-token-pattern text — so instead of matching a
+ * per-line shape, we first locate the header row (whose first two whitespace-
+ * separated columns are literally "provider" and "model") and record its column
+ * count. Only subsequent lines with that SAME column count are treated as data
+ * rows: this is what lets a non-table message (e.g. "No models available. Run
+ * `pi login`...", "No models matching \"x\"") — which has no header at all —
+ * fail closed to [] rather than being misparsed into garbage ids. On any header
+ * match, `provider` + `model` (the first two columns) become `id: "provider/id"`.
+ * Never throws; unparseable input returns [].
+ */
+function piParseModels(stdout: string): MarkerModel[] {
+  try {
+    if (!stdout) return [];
+    const lines = stripAnsi(stdout)
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+
+    const headerIndex = lines.findIndex((l) => {
+      const cols = l.split(/\s+/);
+      return cols[0]?.toLowerCase() === "provider" && cols[1]?.toLowerCase() === "model";
+    });
+    if (headerIndex === -1) return []; // no recognizable table — e.g. an error/empty message
+
+    const columnCount = lines[headerIndex].split(/\s+/).length;
+    const models: MarkerModel[] = [];
+    const seen = new Set<string>();
+    for (const line of lines.slice(headerIndex + 1)) {
+      const cols = line.split(/\s+/);
+      if (cols.length !== columnCount) continue; // not a row of this table
+      const [provider, model] = cols;
+      if (!provider || !model) continue;
+      const id = `${provider}/${model}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      models.push({ id, label: id });
+    }
+    return models;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Format one Pi `--mode json` event for the LiveLogViewer. Tool calls surface
+ * as `tool_execution_start` (name + a brief args preview); assistant text
+ * surfaces once, on `message_end` (same event `piExtractText` reads — the
+ * live log and the marker extraction agree on when a turn's text is final).
+ * Thinking/reasoning content (`message_update` with a `thinking_*` assistant
+ * event, or `type: "thinking"` content blocks) is intentionally NOT surfaced —
+ * same posture as Cursor/OpenCode, which only show finalized assistant text,
+ * never raw reasoning deltas. Everything else (session header, agent/turn
+ * lifecycle, message_start, message_update deltas, tool_execution_update/end)
+ * is noise for a live log and is skipped. Unknown event types return null.
+ */
+function piFormatLogEvent(event: MarkerStreamEvent): string | null {
+  switch (event.type) {
+    case "tool_execution_start": {
+      const name = typeof event.toolName === "string" ? event.toolName : "tool";
+      const args =
+        event.args !== undefined ? JSON.stringify(event.args).slice(0, 100) : "";
+      return `[${name}] ${args}`.trimEnd();
+    }
+    case "message_end": {
+      const text = piExtractText(event);
+      return text ? text : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * Build the `pi --mode json` command.
+ *
+ * `--no-approve` is a SECURITY requirement, not a style choice: non-interactive
+ * Pi silently applies `defaultProjectTrust` when unset, and an untrusted
+ * checkout's `.pi/settings.json` / project extensions / project skills must
+ * NEVER be allowed to load for an arbitrary review job. `--no-session` keeps
+ * the run ephemeral so background jobs don't accumulate in the user's
+ * `~/.pi/agent/sessions`. Pi has NO `--cwd`/`--workspace`/`--dir` flag (unlike
+ * Cursor's `--workspace` or OpenCode's `--dir`) — it always operates on the
+ * process's actual working directory, which is exactly the job's spawn cwd
+ * (spawnJob already spawns with the build result's `cwd`), so `cwd` is
+ * accepted only to match the shared `MarkerEngine["buildArgv"]` signature and
+ * is otherwise unused here. The prompt is the trailing positional arg after
+ * `-p`. `--model` is omitted when empty/omitted so Pi falls back to its own
+ * configured default model.
+ *
+ * SEMANTICS NOTE (do not "fix" this later): `pi --mode json` exits 0 even when
+ * the agent's own run errored or was aborted — the text-mode stopReason check
+ * in Pi's print-mode is gated on `mode === "text"`, so JSON mode never sets a
+ * non-zero exit for an in-run failure. This is fine for us: the marker
+ * pipeline is already fail-closed (a missing/invalid marker block fails the
+ * job regardless of exit code), so a silently-errored Pi run still surfaces as
+ * a failed Plannotator job. Exit 1 here means Pi itself crashed or was
+ * misconfigured (bad model, no auth, extension load failure), which is a
+ * separate, correctly-surfaced failure mode.
+ */
+function piBuildArgv(prompt: string, model?: string, cwd?: string, opts?: MarkerBuildOptions): string[] {
+  void cwd; // no cwd flag exists — spawn cwd is authoritative (see comment above)
+  const useModel = !!model && model.trim().length > 0;
+  return [
+    "pi",
+    "--mode",
+    "json",
+    "--no-session",
+    "--no-approve",
+    // Full read-only (`--tools read,grep,find,ls`) would break these jobs:
+    // the review/guide/tour prompt tells the agent to inspect the diff itself
+    // (git diff/log, gh pr view, etc. per buildAgentReviewUserMessage), which
+    // needs Bash, not just file-read tools. `--exclude-tools edit,write`
+    // instead removes only Pi's purpose-built mutation tools while keeping
+    // every inspection path (Bash included) intact. Bash itself is therefore
+    // still available here — the same residual trust level as Cursor and
+    // OpenCode, whose CLIs offer no tool-restriction flags at all and so run
+    // with Bash unrestricted too. PR jobs additionally run inside disposable
+    // worktrees, bounding the blast radius of anything Bash could still do.
+    "--exclude-tools",
+    "edit,write",
+    ...(useModel ? ["--model", model] : []),
+    // Pi's unified reasoning knob (thinking level) applies to whatever model
+    // is selected; omitted ⇒ Pi's own default (medium).
+    ...(opts?.thinking ? ["--thinking", opts.thinking] : []),
+    // Prompt is the trailing positional arg after -p.
+    "-p",
+    prompt,
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// The three descriptors + registry.
 // ---------------------------------------------------------------------------
 
 const CURSOR_ENGINE: MarkerEngine = {
@@ -497,9 +672,22 @@ const OPENCODE_ENGINE: MarkerEngine = {
   formatLogEvent: opencodeFormatLogEvent,
 };
 
-export const MARKER_ENGINES: Record<"cursor" | "opencode", MarkerEngine> = {
+const PI_ENGINE: MarkerEngine = {
+  id: "pi",
+  name: "Pi",
+  binary: "pi",
+  author: "Pi",
+  buildArgv: piBuildArgv,
+  extractText: piExtractText,
+  modelsArgv: ["--list-models"],
+  parseModels: piParseModels,
+  formatLogEvent: piFormatLogEvent,
+};
+
+export const MARKER_ENGINES: Record<"cursor" | "opencode" | "pi", MarkerEngine> = {
   cursor: CURSOR_ENGINE,
   opencode: OPENCODE_ENGINE,
+  pi: PI_ENGINE,
 };
 
 // ---------------------------------------------------------------------------
@@ -797,8 +985,9 @@ export function buildMarkerCommand(
   prompt: string,
   model?: string,
   cwd?: string,
+  opts?: MarkerBuildOptions,
 ): MarkerCommandResult {
-  return { command: engine.buildArgv(prompt, model, cwd) };
+  return { command: engine.buildArgv(prompt, model, cwd, opts) };
 }
 
 // ---------------------------------------------------------------------------

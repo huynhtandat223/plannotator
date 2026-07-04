@@ -70,6 +70,14 @@ interface ReviewSidebarProps {
   onAgentKillAll?: () => void;
   externalAnnotations?: Array<{ source?: string }>;
   onOpenJobDetail?: (jobId: string) => void;
+  onOpenGuide?: (jobId: string) => void;
+  /** Pass-through to AgentsTab — gates the sidebar's Guided Review mode on
+   *  file availability, mirroring the header's hasSearchableFiles gate on
+   *  the "Guide" badge/shortcut (see App.tsx). */
+  guideLaunchable?: boolean;
+  /** Pass-through to AgentsTab — gates each guide job card's "Open guide"
+   *  action on whether that job belongs to the current review context. */
+  canOpenGuideJob?: (job: import('@plannotator/ui/types').AgentJobInfo) => boolean;
 }
 
 const SuggestionPreview: React.FC<{ code: string; originalCode?: string; language?: string }> = ({ code, originalCode, language }) => {
@@ -163,6 +171,9 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
   onAgentKillAll,
   externalAnnotations,
   onOpenJobDetail,
+  onOpenGuide,
+  guideLaunchable,
+  canOpenGuideJob,
 }) => {
   const totalCount = annotations.length + (editorAnnotations?.length ?? 0) + (descriptionAnnotations?.length ?? 0) + (commentAnnotations?.length ?? 0);
   const [copied, setCopied] = useState(false);
@@ -542,6 +553,9 @@ export const ReviewSidebar: React.FC<ReviewSidebarProps> = /* React.memo */({
               onKillAll={onAgentKillAll ?? (() => {})}
               externalAnnotations={externalAnnotations ?? []}
               onOpenJobDetail={onOpenJobDetail}
+              onOpenGuide={onOpenGuide}
+              guideLaunchable={guideLaunchable}
+              canOpenGuideJob={canOpenGuideJob}
             />
           )}
 

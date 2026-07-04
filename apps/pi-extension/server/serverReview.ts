@@ -38,6 +38,7 @@ import {
 	getFileContentsForDiff as getFileContentsForDiffCore,
 	getSinceBaseSections,
 	isSameCwdCommitSwitch,
+	listPatchFiles,
 	parseCommitDiffType,
 	parseWorktreeDiffType,
 	resolveBaseBranch,
@@ -64,7 +65,7 @@ import { resolvePoolCwd, type WorktreePool } from "../generated/worktree-pool.js
 import { createCommitAvatarResolver } from "../generated/commit-avatars.js";
 
 import { createEditorAnnotationHandler } from "./annotations.js";
-import { createAgentJobHandler } from "./agent-jobs.js";
+import { createAgentJobHandler, whichCmd as commandExists } from "./agent-jobs.js";
 import { type AgentJobInfo, REVIEW_OUTPUT_FAILED, markJobReviewFailed } from "../generated/agent-jobs.js";
 import { createExternalAnnotationHandler } from "./external-annotations.js";
 import {
@@ -110,6 +111,7 @@ import {
 	transformClaudeFindings,
 } from "../generated/claude-review.js";
 import { createTourSession, TOUR_EMPTY_OUTPUT_ERROR } from "../generated/tour-review.js";
+import { createGuideSession, GUIDE_EMPTY_OUTPUT_ERROR } from "../generated/guide-review.js";
 import {
 	MARKER_ENGINES,
 	composeMarkerReviewPrompt,
@@ -191,6 +193,12 @@ const piCodeNavRuntime: CodeNavRuntime = {
 
 // Review ingestion completion semantics (REVIEW_OUTPUT_FAILED,
 // markJobReviewFailed) now live in the shared agent-jobs module.
+
+// Node equivalent of Bun.which(cmd) — used to pick a guide repair engine
+// (prefer whichever schema-enforced CLI is on PATH). Imported as
+// `commandExists` from agent-jobs.ts's `whichCmd` (single source of truth;
+// the other pre-existing copies in ai-runtime.ts / agent-terminal are left
+// alone — out of scope here).
 
 /** Detect if running inside WSL (Windows Subsystem for Linux) */
 function detectWSL(): boolean {
@@ -703,6 +711,7 @@ export async function startReviewServer(options: {
 		);
 	}
 	const tour = createTourSession();
+	const guide = createGuideSession();
 	const semanticDiffScratchCwd = getSemanticDiffScratchCwd();
 	function resolveSemanticDiffCwd(): string {
 		if (workspace) return workspace.root;
@@ -834,6 +843,150 @@ export async function startReviewServer(options: {
 				return built ? { ...built, prUrl: launchPrUrl, diffScope: launchDiffScope, diffContext, reviewProfileId: reviewProfile.id, reviewProfileLabel: reviewProfile.label } : built;
 			}
 
+			if (provider === "guide") {
+				// Snapshot ALL launch-relevant mutable closure state into locals
+				// before any await below — currentPatch/currentDiffType/prMeta can
+				// all be reassigned by a concurrent request (diff/base/PR switch)
+				// while this async branch is suspended, and every read below must
+				// describe the same launch, not whatever the reviewer has since
+				// switched to (mirrors review.ts buildCommand's top-of-function
+				// snapshot).
+				const launchPatch = currentPatch;
+				const launchDiffType = currentDiffType;
+				const launchPrMeta = prMeta;
+				// Snapshotted WITH the patch it describes — see the Bun server's
+				// launchLayerPatchIncomplete comment (mirrors review.ts).
+				const launchLayerPatchIncomplete = layerPatchIncomplete;
+				const launchPRDiffScope = currentPRDiffScope;
+
+				// The changed-file list is derived from the same launch-time patch
+				// snapshot as the rest of this branch — it's what the model plans
+				// section placement against at generation time. The SAME list is
+				// snapshotted onto the job (changedFilesSnapshot, below) and reused
+				// by onJobComplete to validate refs, rather than re-deriving from
+				// whatever patch/diff/base the reviewer has switched to by the time
+				// the job finishes — a mid-generation diff/base switch would
+				// otherwise invalidate every ref in an otherwise-valid guide.
+				let changedFiles = listPatchFiles(launchPatch);
+				// Very large PRs: the platform API withholds per-file patches
+				// (layerPatchIncomplete) — but the PR-mode prompt tells the agent to
+				// read the FULL local diff (git diff origin/<base>...HEAD in the
+				// checkout). The changed-files block and the validation snapshot must
+				// describe that SAME diff: derived from the partial API patch they
+				// under-list files to the model and then validation drops its valid
+				// refs (or fails the guide closed when no section survives).
+				// Recompute names+counts locally when the checkout is ready; on any
+				// failure fall back to the partial list — no worse than before.
+				// Mirrors packages/server/review.ts's guide branch.
+				// Layer scope only — full-stack launchPatch is already a local full
+				// recompute; the layer diff would drop earlier stack layers' files.
+				if (launchLayerPatchIncomplete && launchPRDiffScope !== "full-stack" && launchPrMeta?.baseBranch) {
+					const localCwd = resolvePRLocalCwd();
+					if (localCwd) {
+						try {
+							const res = await reviewRuntime.runGit(
+								["diff", "--numstat", `origin/${launchPrMeta.baseBranch}...HEAD`],
+								{ cwd: localCwd },
+							);
+							if (res.exitCode === 0) {
+								const recomputed = res.stdout
+									.split("\n")
+									.filter((line) => line.trim())
+									.map((line) => {
+										const [a, d, ...rest] = line.split("\t");
+										const raw = rest.join("\t");
+										if (!raw) return null;
+										// numstat rename forms: "src/{old => new}/f" or "old => new"
+										// — refs use post-image paths, matching what the agent sees.
+										const brace = raw.match(/^(.*)\{.* => (.*)\}(.*)$/);
+										const path = brace
+											? `${brace[1]}${brace[2]}${brace[3]}`.replace(/\/\//g, "/")
+											: raw.includes(" => ")
+												? raw.split(" => ").pop()!
+												: raw;
+										// Binary files report "-\t-\tpath" — count as 0/0.
+										return { path, additions: Number(a) || 0, deletions: Number(d) || 0 };
+									})
+									.filter((f): f is { path: string; additions: number; deletions: number } => f !== null);
+								if (recomputed.length > 0) changedFiles = recomputed;
+							}
+						} catch {
+							// keep the partial-patch list
+						}
+					}
+				}
+
+				const repairOf = typeof config?.repairOf === "string" ? config.repairOf : undefined;
+				let repair: { payload: string } | undefined;
+				let guideConfig = config;
+				if (repairOf) {
+					const payload = guide.getFailedPayload(repairOf);
+					if (!payload) {
+						throw new Error("No captured output to repair for that job — run the guide again instead.");
+					}
+					// Prefer the failed job's OWN engine, marker or not, when its
+					// binary is present on this machine: the failed job got far
+					// enough to produce capturable output, so that engine is
+					// PROVABLY runnable here — a fact no other candidate can claim.
+					// claude/codex are only a FALLBACK (in that order) when the
+					// failed engine's binary is missing, because binary presence
+					// alone means installed, not authenticated/usable — a broken
+					// claude repair would itself become the newest failed job and
+					// hijack the recovery panel next render, a doom loop. Marker
+					// engines' binary name can differ from the engine id (Cursor's
+					// CLI binary is `agent`, not `cursor`), so resolve via
+					// MARKER_ENGINES[...].binary before falling back to the engine
+					// id itself for claude/codex.
+					const failedEngine = typeof config?.engine === "string" && config.engine ? config.engine : undefined;
+					const failedEngineBinary = failedEngine
+						? MARKER_ENGINES[failedEngine as "cursor" | "opencode" | "pi"]?.binary ?? failedEngine
+						: undefined;
+					const repairEngine =
+						failedEngine && commandExists(failedEngineBinary!)
+							? failedEngine
+							: commandExists("claude")
+								? "claude"
+								: commandExists("codex")
+									? "codex"
+									: (failedEngine ?? "claude");
+					repair = { payload };
+					guideConfig = { ...config, engine: repairEngine };
+				}
+
+				const built = await guide.buildCommand({
+					cwd,
+					patch: launchPatch,
+					diffType: launchDiffType as DiffType,
+					options: userMessageOptions,
+					prMetadata: launchPrMeta,
+					changedFiles,
+					config: guideConfig,
+					...(repair && { repair }),
+				});
+				// A repair job's payload is the FAILED job's previously-captured
+				// output, not this launch's diff — its file refs were validated
+				// (and, for onJobComplete, must be re-validated) against the failed
+				// job's own recorded changed-file set. Falling back to this launch's
+				// freshly-derived `changedFiles` here would validate a repair against
+				// whatever diff/base happens to be on screen right now, reintroducing
+				// the destroy-on-switch bug this snapshot exists to prevent — just
+				// for repairs instead of the original launch. Fall back only if the
+				// failed job's set was never recorded (defensive; shouldn't happen
+				// since onJobComplete always records it before returning).
+				const changedFilesSnapshot = repairOf
+					? guide.getLaunchChangedFiles(repairOf) ?? changedFiles.map((f) => f.path)
+					: changedFiles.map((f) => f.path);
+				return {
+					...built,
+					prUrl: launchPrUrl,
+					diffScope: launchDiffScope,
+					diffContext,
+					reviewProfileId: reviewProfile.id,
+					reviewProfileLabel: reviewProfile.label,
+					changedFilesSnapshot,
+				};
+			}
+
 			// A custom review skill carries its own instructions and becomes the whole
 			// prompt; strip the default framing prose from the user message so only the
 			// git/PR context remains. The default review keeps today's message verbatim.
@@ -865,22 +1018,25 @@ export async function startReviewServer(options: {
 				return { command, stdinPrompt, prompt, cwd, label: jobLabel, captureStdout: true, model, effort, prUrl: launchPrUrl, diffScope: launchDiffScope, diffContext, reviewProfileId: reviewProfile.id, reviewProfileLabel: reviewProfile.label };
 			}
 
-			// Marker engines (Cursor, OpenCode) — one branch, same shape as Claude.
-			// Neither CLI has a schema flag, so composeMarkerReviewPrompt ALWAYS
+			// Marker engines (Cursor, OpenCode, Pi) — one branch, same shape as Claude.
+			// None of the three has a schema flag, so composeMarkerReviewPrompt ALWAYS
 			// appends the marker-block output contract (even for a custom profile —
 			// it's the only thing that makes their prose output parseable). The
 			// engine's buildArgv passes the prompt as the trailing positional arg and
-			// threads the spawn cwd (--workspace for Cursor, --dir for OpenCode).
+			// threads the spawn cwd (--workspace for Cursor, --dir for OpenCode; Pi has
+			// no cwd flag — it always uses the process's actual cwd, which spawnJob
+			// already sets from this same cwd).
 			// captureStdout is required: the marker block comes back on stdout NDJSON.
-			const markerEngine = MARKER_ENGINES[provider as "cursor" | "opencode"];
+			const markerEngine = MARKER_ENGINES[provider as "cursor" | "opencode" | "pi"];
 			if (markerEngine) {
 				const model = typeof config?.model === "string" && config.model ? config.model : undefined;
+				const thinking = typeof config?.thinking === "string" && config.thinking ? config.thinking : undefined;
 				// Per-job nonce embedded in the marker contract; recovered from job.prompt
 				// at parse time so echoed/quoted bare tags can't be mistaken for the payload.
 				const nonce = makeMarkerNonce();
 				const prompt = composeMarkerReviewPrompt(reviewProfile, userMessage, nonce);
-				const { command } = buildMarkerCommand(markerEngine, prompt, model, cwd);
-				return { command, prompt, cwd, label: jobLabel, captureStdout: true, model, prUrl: launchPrUrl, diffScope: launchDiffScope, diffContext, reviewProfileId: reviewProfile.id, reviewProfileLabel: reviewProfile.label };
+				const { command } = buildMarkerCommand(markerEngine, prompt, model, cwd, { thinking });
+				return { command, prompt, cwd, label: jobLabel, captureStdout: true, model, thinking, prUrl: launchPrUrl, diffScope: launchDiffScope, diffContext, reviewProfileId: reviewProfile.id, reviewProfileLabel: reviewProfile.label };
 			}
 
 			return null;
@@ -978,14 +1134,14 @@ export async function startReviewServer(options: {
 				return;
 			}
 
-			// --- Marker path (Cursor, OpenCode) ---
+			// --- Marker path (Cursor, OpenCode, Pi) ---
 			// FAIL-CLOSED: marker output is prompt-enforced (no schema flag), so any
 			// missing/malformed/schema/transform/insertion failure must MUTATE the job
 			// to failed — NEVER throw (agent-jobs.ts swallows throws, silently leaving
 			// an exit-0 job marked done). Mirrors the Tour fail-closed pattern below.
 			// Findings carry nullable file/line, classified into line/whole-file/
 			// general by transformMarkerFindings — nothing is dropped (same as Claude).
-			const markerEngine = MARKER_ENGINES[job.provider as "cursor" | "opencode"];
+			const markerEngine = MARKER_ENGINES[job.provider as "cursor" | "opencode" | "pi"];
 			if (markerEngine) {
 				// Recover the per-job nonce embedded in the prompt; without it no block
 				// can be trusted, so parse fails closed below.
@@ -1041,6 +1197,30 @@ export async function startReviewServer(options: {
 				}
 				return;
 			}
+
+			if (job.provider === "guide") {
+				// Validate refs against the LAUNCH-time changed-file set (snapshotted
+				// on the job at buildCommand time), not the current patch — the model
+				// planned section placement against that exact file set, and the
+				// client already degrades stale refs per-file if the reviewer has
+				// since switched diff/base/PR. Re-deriving from the current patch
+				// here would spuriously invalidate every ref in an otherwise-valid
+				// guide the moment the view changes mid-generation. Falls back to the
+				// current patch only if the snapshot is missing (defensive; should
+				// not happen in practice — see agent-jobs.ts's changedFilesSnapshot).
+				const changedFiles = meta.changedFilesSnapshot ?? listPatchFiles(currentPatch).map((f) => f.path);
+				const { summary } = await guide.onJobComplete({ job, meta, changedFiles });
+				if (summary) {
+					job.summary = summary;
+				} else {
+					// Same fail-closed precedent as Tour: an exit-0 job with empty,
+					// malformed, or fully-invalidated output must not look like a
+					// successful card that 404s on /api/guide/:id.
+					job.status = "failed";
+					job.error = GUIDE_EMPTY_OUTPUT_ERROR;
+				}
+				return;
+			}
 		},
 	});
 	const sharingEnabled =
@@ -1091,6 +1271,83 @@ export async function startReviewServer(options: {
 				const body = await parseBody(req) as { checked: boolean[] };
 				if (Array.isArray(body.checked)) tour.saveChecklist(jobId, body.checked);
 				json(res, { ok: true });
+			} catch {
+				json(res, { error: "Invalid JSON" }, 400);
+			}
+			return;
+		}
+
+		// API: Get guide result
+		if (url.pathname.match(/^\/api\/guide\/[^/]+$/) && req.method === "GET") {
+			const jobId = url.pathname.slice("/api/guide/".length);
+			const result = guide.getGuide(jobId);
+			if (!result) {
+				json(res, { error: "Guide not found" }, 404);
+				return;
+			}
+			json(res, result);
+			return;
+		}
+
+		// API: Save guide reviewed state
+		const reviewedMatch = url.pathname.match(/^\/api\/guide\/([^/]+)\/reviewed$/);
+		if (reviewedMatch && req.method === "PUT") {
+			const jobId = reviewedMatch[1];
+			try {
+				const body = await parseBody(req) as { reviewed: boolean[] };
+				if (Array.isArray(body.reviewed)) guide.saveReviewed(jobId, body.reviewed);
+				json(res, { ok: true });
+			} catch {
+				json(res, { error: "Invalid JSON" }, 400);
+			}
+			return;
+		}
+
+		// API: Get a failed guide job's captured raw output for manual repair
+		const guideOutputMatch = url.pathname.match(/^\/api\/guide\/([^/]+)\/output$/);
+		if (guideOutputMatch && req.method === "GET") {
+			const jobId = guideOutputMatch[1];
+			const payload = guide.getFailedPayload(jobId);
+			if (payload === null) {
+				json(res, { error: "No captured output" }, 404);
+				return;
+			}
+			json(res, { payload });
+			return;
+		}
+
+		// API: Manually submit corrected guide JSON for a failed job
+		const guideSubmitMatch = url.pathname.match(/^\/api\/guide\/([^/]+)\/submit$/);
+		if (guideSubmitMatch && req.method === "POST") {
+			const jobId = guideSubmitMatch[1];
+			const existingJob = agentJobs.getJob(jobId);
+			if (!existingJob) {
+				json(res, { error: "Job not found" }, 404);
+				return;
+			}
+			if (existingJob.status !== "failed" && existingJob.status !== "killed") {
+				json(res, { error: "This job already has a guide" }, 409);
+				return;
+			}
+			try {
+				const body = await parseBody(req) as { payload?: string };
+				const payload = typeof body.payload === "string" ? body.payload : "";
+				// Fallback only — submitManualOutput prefers the job's own
+				// launch-time changed-file set (guide.launchChangedFiles,
+				// recorded by onJobComplete) over this current-patch derivation.
+				const changedFiles = listPatchFiles(currentPatch).map((f) => f.path);
+				const result = guide.submitManualOutput(jobId, payload, changedFiles);
+				if ("error" in result) {
+					json(res, { error: result.error }, 400);
+					return;
+				}
+				const { sections, files } = result;
+				agentJobs.completeJobExternally(jobId, {
+					correctness: "Guide Generated",
+					explanation: `${sections} section${sections !== 1 ? "s" : ""}, ${files} file${files !== 1 ? "s" : ""} placed (manually repaired)`,
+					confidence: 1,
+				});
+				json(res, { ok: true, sections, files });
 			} catch {
 				json(res, { error: "Invalid JSON" }, 400);
 			}

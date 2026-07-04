@@ -19,6 +19,18 @@ export function CodexIcon({ className }: { className?: string }) {
   return <img src={CODEX_DATA_URI} className={className} alt="" aria-hidden="true" draggable={false} />;
 }
 
+// Pi brand mark — path data from packages/ui/components/ProviderIcons.tsx's
+// PiIcon (itself extracted from apps/marketing/public/assets/icon-pi.svg).
+// currentColor so it adapts to theme, like OpenCodeIcon below.
+export function PiIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 800 800" className={className} xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+      <path fill="currentColor" fillRule="evenodd" d="M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29ZM282.65 282.65V400H400V282.65Z" />
+      <path fill="currentColor" d="M517.36 400H634.72V634.72H517.36Z" />
+    </svg>
+  );
+}
+
 // Cursor brand mark — from packages/ui/components/icons/app/cursor.svg
 // (black rounded square + white cursor facet).
 export function CursorIcon({ className }: { className?: string }) {

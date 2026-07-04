@@ -11,6 +11,7 @@
 @source "./*.tsx";
 @source "./components/**/*.tsx";
 @source "./dock/**/*.tsx";
+@source "./utils/**/*.tsx";
 
 @import "../ui/theme.css";
 

@@ -327,13 +327,13 @@ During normal plan review, an Archive sidebar tab provides the same browsing via
 | `/api/external-annotations` | POST | Add external annotations (single or batch `{ annotations: [...] }`) |
 | `/api/external-annotations` | PATCH | Update fields on a single annotation (`?id=`) |
 | `/api/external-annotations` | DELETE | Remove by `?id=`, `?source=`, or clear all |
-| `/api/agents/capabilities` | GET | Check available agent providers (claude, codex, tour, cursor, opencode) |
+| `/api/agents/capabilities` | GET | Check available agent providers (claude, codex, tour, guide, cursor, opencode, pi) |
 | `/api/agents/review-profiles` | GET | List launchable review profiles (enabled skills + builtin default) |
 | `/api/agents/skills` | GET | List all discovered skills for the add-a-review picker (each flagged `enabled`) |
 | `/api/agents/review-skills` | POST | Enable a skill as a review (body: `{ name }`); writes `review-skills.json` |
 | `/api/agents/jobs/stream` | GET | SSE stream for real-time agent job status updates |
 | `/api/agents/jobs` | GET | Snapshot of agent jobs (polling fallback, `?since=N` for version gating) |
-| `/api/agents/jobs` | POST | Launch an agent job (body: `{ provider, command, label }`) |
+| `/api/agents/jobs` | POST | Launch an agent job (body: `{ provider, command, label, engine?, model?, effort?, reasoningEffort?, thinking?, fastMode?, reviewProfileId?, repairOf? }`) |
 | `/api/agents/jobs` | DELETE | Kill all running agent jobs |
 | `/api/agents/jobs/:id` | DELETE | Kill a specific agent job |
 | `/api/pr-diff-scope` | POST | Switch between layer and full-stack diff scope. Response includes `semanticDiff?`. |
@@ -341,6 +341,10 @@ During normal plan review, an Archive sidebar tab provides the same browsing via
 | `/api/pr-switch` | POST | Switch to a different PR in-place (body: `{ url }`). Response includes `semanticDiff?`. |
 | `/api/tour/:jobId` | GET | Fetch Code Tour result (greeting, stops, checklist) for a completed tour job |
 | `/api/tour/:jobId/checklist` | PUT | Persist checklist item state for a Code Tour |
+| `/api/guide/:jobId` | GET | Fetch Guided Review result (ordered sections with overviews + file refs) for a completed guide job |
+| `/api/guide/:jobId/reviewed` | PUT | Persist per-section reviewed state for a guide |
+| `/api/guide/:jobId/output` | GET | Fetch a failed guide job's captured raw output for manual repair (404 if none captured) |
+| `/api/guide/:jobId/submit` | POST | Manually submit corrected guide JSON for a failed job (body: `{ payload }`) |
 | `/api/code-nav/resolve` | POST | Search for symbol definitions and references via ripgrep (body: `{ symbol, filePath, line, charStart, side, language? }`) |
 | `/api/code-nav/file` | GET | Read file from working tree for code-nav preview (`?path=`) |
 

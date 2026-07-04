@@ -6,7 +6,7 @@
  */
 
 import { resolve as resolvePath } from "node:path";
-import { unquoteGitPath, parsePatchPathToken } from "./diff-paths";
+import { unquoteGitPath, parsePatchPathToken, parseDiffFilePathLines, parseDiffGitHeader } from "./diff-paths";
 
 export const JJ_TRUNK_REVSET = "trunk()";
 
@@ -679,6 +679,13 @@ function assertGitSuccess(
   );
 }
 
+// LOCKSTEP: packages/review-editor/App.tsx's activeWorktreePath memo
+// hand-parses worktree: diffTypes with a COPY of this list (this module
+// can't enter the browser bundle — node:path import above). Adding a
+// subtype here without updating that copy makes the client derive a
+// different worktreePath than the server stamped on guide/tour jobs,
+// silently breaking their context matching. Real fix (cleanup PR):
+// extract the pure parser to a browser-safe module.
 const WORKTREE_SUB_TYPES = new Set([
   "since-base",
   "uncommitted",
@@ -1527,4 +1534,48 @@ export function parseP4DiffType(
 
 export function isP4DiffType(diffType: string): boolean {
   return parseP4DiffType(diffType) !== null;
+}
+
+/**
+ * Extract per-file path + line-count stats from a raw unified diff patch.
+ * Mirrors the client's packages/review-editor/utils/diffParser.ts chunk-split
+ * and additions/deletions counting logic, but only needs path/additions/
+ * deletions (no status/oldPath) — used server-side to give agent-job
+ * providers (e.g. Guided Review) the authoritative changed-file set to plan
+ * against, without duplicating the VCS-agnostic diff-splitting logic.
+ */
+export function listPatchFiles(
+  patch: string,
+): { path: string; additions: number; deletions: number }[] {
+  if (!patch) return [];
+
+  const chunkStarts = [...patch.matchAll(/^diff --git /gm)];
+  if (chunkStarts.length === 0) return [];
+
+  const files: { path: string; additions: number; deletions: number }[] = [];
+
+  for (let i = 0; i < chunkStarts.length; i++) {
+    const start = chunkStarts[i].index ?? 0;
+    const end = chunkStarts[i + 1]?.index ?? patch.length;
+    const lines = patch.slice(start, end).split("\n");
+
+    // Prefer the --- /+++ path lines (present on every non-mode-only chunk);
+    // fall back to the "diff --git a/x b/y" header for the rare chunk that
+    // lacks them (e.g. a pure mode change).
+    const { oldPath: bodyOldPath, newPath: bodyNewPath } = parseDiffFilePathLines(lines);
+    const headerPaths = parseDiffGitHeader(lines[0] ?? "");
+    const path = bodyNewPath ?? bodyOldPath ?? headerPaths.newPath ?? headerPaths.oldPath;
+    if (!path) continue;
+
+    let additions = 0;
+    let deletions = 0;
+    for (const line of lines) {
+      if (line.startsWith("+") && !line.startsWith("+++")) additions++;
+      else if (line.startsWith("-") && !line.startsWith("---")) deletions++;
+    }
+
+    files.push({ path, additions, deletions });
+  }
+
+  return files;
 }

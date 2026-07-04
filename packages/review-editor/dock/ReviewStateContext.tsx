@@ -97,6 +97,21 @@ export interface ReviewState {
   canStageFiles: boolean;
   /** Per-file staging gate — false for committed files in since-base mode. */
   canStagePath?: (filePath: string) => boolean;
+  /** Worktree path parsed from the live diffType when it's a
+   *  `worktree:<path>:<subType>` string; null for the main tree and PR mode.
+   *  Feeds jobMatchesReviewContext's third argument so guide/tour context
+   *  matching is worktree-aware (populated from App.tsx's
+   *  activeWorktreePath memo — the same parse that drives the sections/tree
+   *  UI, so context matching aligns with what's on screen). */
+  currentWorktreePath?: string | null;
+  /** Guide-mode reveal channel: set (with a fresh token) when a sidebar jump
+   *  — annotation click or AI line citation — targets a file while the guide
+   *  takeover is open. The GuideSectionCard containing that file expands its
+   *  collapsed (reviewed) section, focuses the file's diff, and scrolls to
+   *  it; without this, jumps into collapsed sections silently no-op because
+   *  no viewer is mounted for the file. Cleared when the guide closes so a
+   *  reopen doesn't replay the last reveal. */
+  guideRevealFile?: { path: string; token: number } | null;
   stageError: string | null;
 
   // Search
@@ -160,6 +175,9 @@ export interface ReviewState {
 
   // Tour
   openTourPanel: (jobId: string) => void;
+
+  // Guide — optional because not every host wires a guide takeover surface.
+  openGuide?: (jobId: string) => void;
 
   // Code navigation
   onCodeNavRequest?: (request: import('@plannotator/shared/code-nav').CodeNavRequest) => void;
