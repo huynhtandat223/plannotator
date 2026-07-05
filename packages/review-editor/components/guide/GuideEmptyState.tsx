@@ -23,6 +23,7 @@ const GUIDE_ENGINES = Object.keys(REVIEW_ENGINE_LABEL) as ReviewEngine[];
 const CURSOR_FALLBACK = [{ value: 'auto', label: 'Auto' }];
 const OPENCODE_FALLBACK = [{ value: '', label: 'Default' }];
 const PI_FALLBACK = [{ value: '', label: 'Default' }];
+const COPILOT_FALLBACK = [{ value: '', label: 'Default' }];
 
 type Option = { value: string; label: string };
 
@@ -169,6 +170,7 @@ export const GuideEmptyState: React.FC<GuideEmptyStateProps> = ({ capabilities, 
     guideOpencodeModel,
     guidePiModel,
     guidePiThinking,
+    guideCopilotModel,
     setGuideEngine,
     setGuideClaudeModel,
     setGuideClaudeEffort,
@@ -178,6 +180,7 @@ export const GuideEmptyState: React.FC<GuideEmptyStateProps> = ({ capabilities, 
     setGuideOpencodeModel,
     setGuidePiModel,
     setGuidePiThinking,
+    setGuideCopilotModel,
   } = useAgentSettings();
 
   const [launching, setLaunching] = useState(false);
@@ -277,7 +280,7 @@ export const GuideEmptyState: React.FC<GuideEmptyStateProps> = ({ capabilities, 
   // saved-default user with a blank pill and no way back after picking a
   // concrete model. Cursor REPLACES: its discovered list natively includes
   // 'auto', so prepending would duplicate it.
-  const markerModels = (id: 'cursor' | 'opencode' | 'pi', fallback: Option[]): Option[] => {
+  const markerModels = (id: 'cursor' | 'opencode' | 'pi' | 'copilot', fallback: Option[]): Option[] => {
     const models = capabilities?.providers.find((p) => p.id === id)?.models;
     if (!models || models.length === 0) return fallback;
     const discovered = models.map((m) => ({ value: m.id, label: m.label }));
@@ -289,6 +292,7 @@ export const GuideEmptyState: React.FC<GuideEmptyStateProps> = ({ capabilities, 
   const cursorOptions = markerModels('cursor', CURSOR_FALLBACK);
   const opencodeOptions = markerModels('opencode', OPENCODE_FALLBACK);
   const piOptions = markerModels('pi', PI_FALLBACK);
+  const copilotOptions = markerModels('copilot', COPILOT_FALLBACK);
 
   // AgentsTab reconciles the saved guide Cursor/OpenCode/Pi model back to the
   // catalog head via effects when the live catalog no longer contains it (see
@@ -307,6 +311,7 @@ export const GuideEmptyState: React.FC<GuideEmptyStateProps> = ({ capabilities, 
   const effectiveCursorModel = effectiveModel(guideCursorModel, cursorOptions);
   const effectiveOpencodeModel = effectiveModel(guideOpencodeModel, opencodeOptions);
   const effectivePiModel = effectiveModel(guidePiModel, piOptions);
+  const effectiveCopilotModel = effectiveModel(guideCopilotModel, copilotOptions);
 
   const modelPicker: { value: string; options: Option[]; onChange: (v: string) => void } =
     engine === 'claude'
@@ -317,7 +322,9 @@ export const GuideEmptyState: React.FC<GuideEmptyStateProps> = ({ capabilities, 
           ? { value: effectiveCursorModel, options: cursorOptions, onChange: setGuideCursorModel }
           : engine === 'opencode'
             ? { value: effectiveOpencodeModel, options: opencodeOptions, onChange: setGuideOpencodeModel }
-            : { value: effectivePiModel, options: piOptions, onChange: setGuidePiModel };
+            : engine === 'copilot'
+              ? { value: effectiveCopilotModel, options: copilotOptions, onChange: setGuideCopilotModel }
+              : { value: effectivePiModel, options: piOptions, onChange: setGuidePiModel };
 
   const canLaunch = guideAvailable && availableEngines.length > 0 && !launching;
 
@@ -350,7 +357,14 @@ export const GuideEmptyState: React.FC<GuideEmptyStateProps> = ({ capabilities, 
                 ...(effectivePiModel ? { model: effectivePiModel } : {}),
                 thinking: guidePiThinking,
               }
-            : {
+            : engine === 'copilot'
+              ? {
+                  provider: 'guide',
+                  label: 'Guided Review',
+                  engine: 'copilot',
+                  ...(effectiveCopilotModel ? { model: effectiveCopilotModel } : {}),
+                }
+              : {
                 provider: 'guide',
                 label: 'Guided Review',
                 engine,
@@ -434,7 +448,7 @@ export const GuideEmptyState: React.FC<GuideEmptyStateProps> = ({ capabilities, 
 
       {!guideAvailable || availableEngines.length === 0 ? (
         <p className="mt-8 text-xs text-muted-foreground/70">
-          Guided review needs an agent CLI (Claude, Codex, Cursor, OpenCode, or Pi) available on this machine.
+          Guided review needs an agent CLI (Claude, Codex, Cursor, OpenCode, Pi, or Copilot) available on this machine.
         </p>
       ) : (
         <>

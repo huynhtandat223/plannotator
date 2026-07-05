@@ -54,6 +54,11 @@ export const DEFAULT_PI_MODEL = '';
 // Pi's unified reasoning knob (`--thinking`); 'medium' matches Pi's own default.
 export const DEFAULT_PI_THINKING = 'medium';
 
+// Copilot has no `auto` pseudo-model in our picker; empty string means "let
+// Copilot pick" and copilotBuildArgv omits `--model` for it — same convention
+// as OpenCode/Pi.
+export const DEFAULT_COPILOT_MODEL = '';
+
 // Guide-scoped marker-engine defaults — same isolation rationale as
 // DEFAULT_GUIDE_CLAUDE_EFFORT above (a guide's Cursor/OpenCode/Pi model must
 // not silently change the next Cursor/OpenCode/Pi code review, and vice
@@ -64,6 +69,7 @@ export const DEFAULT_GUIDE_CURSOR_MODEL = 'auto';
 export const DEFAULT_GUIDE_OPENCODE_MODEL = '';
 export const DEFAULT_GUIDE_PI_MODEL = '';
 export const DEFAULT_GUIDE_PI_THINKING = 'medium';
+export const DEFAULT_GUIDE_COPILOT_MODEL = '';
 
 interface ClaudeSection {
   model: string;
@@ -93,11 +99,17 @@ interface PiSection {
   thinking: string; // off | minimal | low | medium | high | xhigh
 }
 
+// Copilot: flat model only, like Cursor/OpenCode (its --effort knob is
+// deliberately not surfaced yet — the CLI default is sensible).
+interface CopilotSection {
+  model: string; // '' (default) or a model id from `copilot help config`
+}
+
 export type AgentMode = 'review' | 'tour' | 'guide';
 export type AgentEngine = 'claude' | 'codex';
 // Review-only engine union. Tour stays on the narrow AgentEngine so its
 // exhaustive Record<AgentEngine, ...> maps remain valid without change.
-export type ReviewEngine = AgentEngine | 'cursor' | 'opencode' | 'pi';
+export type ReviewEngine = AgentEngine | 'cursor' | 'opencode' | 'pi' | 'copilot';
 
 interface AgentSettingsState {
   selectedMode?: AgentMode;
@@ -115,6 +127,7 @@ interface AgentSettingsState {
   cursor: CursorSection;
   opencode: OpencodeSection;
   pi: PiSection;
+  copilot: CopilotSection;
   tourClaude: ClaudeSection;
   tourCodex: CodexSection;
   guideClaude: ClaudeSection;
@@ -126,10 +139,11 @@ interface AgentSettingsState {
   guideCursor: CursorSection;
   guideOpencode: OpencodeSection;
   guidePi: PiSection;
+  guideCopilot: CopilotSection;
 }
 
 const BUILTIN_DEFAULT_PROFILE = 'builtin:default';
-const REVIEW_ENGINES: ReviewEngine[] = ['claude', 'codex', 'cursor', 'opencode', 'pi'];
+const REVIEW_ENGINES: ReviewEngine[] = ['claude', 'codex', 'cursor', 'opencode', 'pi', 'copilot'];
 
 const initialState: AgentSettingsState = {
   selectedMode: 'review',
@@ -140,6 +154,7 @@ const initialState: AgentSettingsState = {
     cursor: BUILTIN_DEFAULT_PROFILE,
     opencode: BUILTIN_DEFAULT_PROFILE,
     pi: BUILTIN_DEFAULT_PROFILE,
+    copilot: BUILTIN_DEFAULT_PROFILE,
   },
   tourEngine: 'claude',
   guideEngine: 'claude',
@@ -148,6 +163,7 @@ const initialState: AgentSettingsState = {
   cursor: { model: DEFAULT_CURSOR_MODEL },
   opencode: { model: DEFAULT_OPENCODE_MODEL },
   pi: { model: DEFAULT_PI_MODEL, thinking: DEFAULT_PI_THINKING },
+  copilot: { model: DEFAULT_COPILOT_MODEL },
   tourClaude: { model: DEFAULT_TOUR_CLAUDE_MODEL, perModel: {} },
   tourCodex: { model: DEFAULT_TOUR_CODEX_MODEL, perModel: {} },
   guideClaude: { model: DEFAULT_GUIDE_CLAUDE_MODEL, perModel: {} },
@@ -155,6 +171,7 @@ const initialState: AgentSettingsState = {
   guideCursor: { model: DEFAULT_GUIDE_CURSOR_MODEL },
   guideOpencode: { model: DEFAULT_GUIDE_OPENCODE_MODEL },
   guidePi: { model: DEFAULT_GUIDE_PI_MODEL, thinking: DEFAULT_GUIDE_PI_THINKING },
+  guideCopilot: { model: DEFAULT_GUIDE_COPILOT_MODEL },
 };
 
 // One-shot migration: drop any cached "none" codex reasoning entries. The
@@ -192,6 +209,7 @@ function parseReviewEngine(value: unknown): ReviewEngine {
   if (value === 'cursor') return 'cursor';
   if (value === 'opencode') return 'opencode';
   if (value === 'pi') return 'pi';
+  if (value === 'copilot') return 'copilot';
   return parseEngine(value);
 }
 
@@ -244,6 +262,9 @@ function readCookie(): AgentSettingsState {
         model: typeof parsed.pi?.model === 'string' ? parsed.pi.model : DEFAULT_PI_MODEL,
         thinking: typeof parsed.pi?.thinking === 'string' ? parsed.pi.thinking : DEFAULT_PI_THINKING,
       },
+      copilot: {
+        model: typeof parsed.copilot?.model === 'string' ? parsed.copilot.model : DEFAULT_COPILOT_MODEL,
+      },
       tourClaude: {
         model: typeof parsed.tourClaude?.model === 'string' ? parsed.tourClaude.model : DEFAULT_TOUR_CLAUDE_MODEL,
         perModel: parsed.tourClaude?.perModel ?? {},
@@ -269,6 +290,9 @@ function readCookie(): AgentSettingsState {
       guidePi: {
         model: typeof parsed.guidePi?.model === 'string' ? parsed.guidePi.model : DEFAULT_GUIDE_PI_MODEL,
         thinking: typeof parsed.guidePi?.thinking === 'string' ? parsed.guidePi.thinking : DEFAULT_GUIDE_PI_THINKING,
+      },
+      guideCopilot: {
+        model: typeof parsed.guideCopilot?.model === 'string' ? parsed.guideCopilot.model : DEFAULT_GUIDE_COPILOT_MODEL,
       },
     };
   } catch {
@@ -389,6 +413,10 @@ export function useAgentSettings() {
     setState((s) => ({ ...s, pi: { ...s.pi, thinking } }));
   }, []);
 
+  const setCopilotModel = useCallback((model: string) => {
+    setState((s) => ({ ...s, copilot: { ...s.copilot, model } }));
+  }, []);
+
   const patchCodex = useCallback(
     (
       section: 'codex' | 'tourCodex' | 'guideCodex',
@@ -475,6 +503,10 @@ export function useAgentSettings() {
     setState((s) => ({ ...s, guidePi: { ...s.guidePi, thinking } }));
   }, []);
 
+  const setGuideCopilotModel = useCallback((model: string) => {
+    setState((s) => ({ ...s, guideCopilot: { ...s.guideCopilot, model } }));
+  }, []);
+
   const claudeEffort = state.claude.perModel[state.claude.model]?.effort ?? DEFAULT_CLAUDE_EFFORT;
   const codexReasoning = state.codex.perModel[state.codex.model]?.reasoning ?? DEFAULT_CODEX_REASONING;
   const codexFast = state.codex.perModel[state.codex.model]?.fast ?? DEFAULT_CODEX_FAST;
@@ -499,6 +531,7 @@ export function useAgentSettings() {
     opencodeModel: state.opencode.model,
     piModel: state.pi.model,
     piThinking: state.pi.thinking,
+    copilotModel: state.copilot.model,
     tourClaudeModel: state.tourClaude.model,
     tourClaudeEffort,
     tourCodexModel: state.tourCodex.model,
@@ -512,6 +545,7 @@ export function useAgentSettings() {
     guideOpencodeModel: state.guideOpencode.model,
     guidePiModel: state.guidePi.model,
     guidePiThinking: state.guidePi.thinking,
+    guideCopilotModel: state.guideCopilot.model,
     setSelectedMode,
     setReviewEngine,
     setReviewProfileId,
@@ -526,6 +560,7 @@ export function useAgentSettings() {
     setOpencodeModel,
     setPiModel,
     setPiThinking,
+    setCopilotModel,
     setTourClaudeModel,
     setTourClaudeEffort,
     setTourCodexModel,
@@ -539,5 +574,6 @@ export function useAgentSettings() {
     setGuideOpencodeModel,
     setGuidePiModel,
     setGuidePiThinking,
+    setGuideCopilotModel,
   };
 }

@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import type { GuideDiffRef } from '@plannotator/shared/guide';
+import { renderInlineMarkdown } from '../../utils/renderInlineMarkdown';
 import { DiffViewer } from '../DiffViewer';
 import { useReviewState } from '../../dock/ReviewStateContext';
 import { annotationMatchesPrScope } from '../../utils/annotationScope';
@@ -80,6 +81,11 @@ export const GuideDiffSection: React.FC<GuideDiffSectionProps> = ({ diffRef, isF
 
   return (
     <div onPointerEnter={onFocus} onFocus={onFocus}>
+      {diffRef.summary && (
+        <p className="mb-1.5 px-1 text-xs leading-relaxed text-muted-foreground">
+          {renderInlineMarkdown(diffRef.summary)}
+        </p>
+      )}
       {/* DiffViewer is `h-full flex flex-col` internally (FileHeader + its own
           scrolling body) — it fills whatever height its parent gives it rather
           than growing to fit content. The guide page is one continuous scroll

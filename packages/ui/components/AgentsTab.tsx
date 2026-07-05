@@ -17,7 +17,7 @@ import type { AgentJobInfo, AgentCapabilities } from '../types';
 import { isTerminalStatus } from '@plannotator/shared/agent-jobs';
 import { cn } from '../lib/utils';
 import { ReviewAgentsIcon } from './ReviewAgentsIcon';
-import { ClaudeIcon, CodexIcon, CursorIcon, OpenCodeIcon, PiIcon } from './icons/AgentIcons';
+import { ClaudeIcon, CodexIcon, CopilotIcon, CursorIcon, OpenCodeIcon, PiIcon } from './icons/AgentIcons';
 import { useAgentSettings } from '../hooks/useAgentSettings';
 import type { AgentEngine, AgentMode, ReviewEngine } from '../hooks/useAgentSettings';
 import type { AgentLaunchParams } from '../hooks/useAgentJobs';
@@ -103,6 +103,12 @@ const PI_MODELS: Array<{ value: string; label: string }> = [
   { value: '', label: 'Default' },
 ];
 
+// Fallback Copilot model catalog. The real list is discovered server-side via
+// `copilot help config`; empty value means "let Copilot pick".
+const COPILOT_MODELS: Array<{ value: string; label: string }> = [
+  { value: '', label: 'Default' },
+];
+
 // Pi's unified reasoning knob (`--thinking`), applied to whichever model is
 // selected. xhigh is accepted only by codex-max models.
 export const PI_THINKING: Array<{ value: string; label: string }> = [
@@ -140,6 +146,7 @@ export const REVIEW_ENGINE_LABEL: Record<ReviewEngine, string> = {
   cursor: 'Cursor',
   opencode: 'OpenCode',
   pi: 'Pi',
+  copilot: 'Copilot',
 };
 
 // Review-only icon map — the wide set. Tour keeps the narrow ENGINE_ICON.
@@ -149,6 +156,7 @@ const REVIEW_ENGINE_ICON: Record<ReviewEngine, React.FC<{ className?: string }>>
   cursor: CursorIcon,
   opencode: OpenCodeIcon,
   pi: PiIcon,
+  copilot: CopilotIcon,
 };
 
 export type AgentLaunchResult = AgentJobInfo | null | void;
@@ -242,11 +250,12 @@ function formatModel(provider: string, engine: string | undefined, model: string
   if (provider === 'cursor') return catalogLabel(CURSOR_MODELS, model);
   if (provider === 'opencode') return model ? model : 'Default';
   if (provider === 'pi') return model || 'Default';
+  if (provider === 'copilot') return model || 'Default';
   if (provider === 'codex' || engine === 'codex') return catalogLabel(CODEX_MODELS, model);
   if ((provider === 'tour' || provider === 'guide') && engine === 'claude') return catalogLabel(TOUR_CLAUDE_MODELS, model);
   if (provider === 'tour' || provider === 'guide') {
     if (engine === 'cursor') return catalogLabel(CURSOR_MODELS, model);
-    if (engine === 'opencode' || engine === 'pi') return model || 'Default';
+    if (engine === 'opencode' || engine === 'pi' || engine === 'copilot') return model || 'Default';
   }
   return catalogLabel(CLAUDE_MODELS, model);
 }
@@ -547,6 +556,7 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({
     opencodeModel,
     piModel,
     piThinking,
+    copilotModel,
     tourClaudeModel,
     tourClaudeEffort,
     tourCodexModel,
@@ -560,6 +570,7 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({
     guideOpencodeModel,
     guidePiModel,
     guidePiThinking,
+    guideCopilotModel,
     setSelectedMode,
     setReviewEngine,
     setReviewProfileId,
@@ -574,6 +585,7 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({
     setOpencodeModel,
     setPiModel,
     setPiThinking,
+    setCopilotModel,
     setTourClaudeModel,
     setTourClaudeEffort,
     setTourCodexModel,
@@ -587,6 +599,7 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({
     setGuideOpencodeModel,
     setGuidePiModel,
     setGuidePiThinking,
+    setGuideCopilotModel,
   } = settings;
 
   // Review profiles (built-in default plus the user's enabled skills). Loaded
@@ -621,6 +634,7 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({
   const cursorAvailable = capabilities?.providers.some((p) => p.id === 'cursor' && p.available) ?? false;
   const opencodeAvailable = capabilities?.providers.some((p) => p.id === 'opencode' && p.available) ?? false;
   const piAvailable = capabilities?.providers.some((p) => p.id === 'pi' && p.available) ?? false;
+  const copilotAvailable = capabilities?.providers.some((p) => p.id === 'copilot' && p.available) ?? false;
 
   // Cursor's model catalog is account-specific and discovered server-side, so
   // prefer the live list from the capability; fall back to `auto`-only when the
@@ -647,6 +661,14 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({
     return opts.length > 0 ? [...PI_MODELS, ...opts] : PI_MODELS;
   }, [capabilities]);
 
+  // Copilot models discovered server-side via `copilot help config`; prepend
+  // the "Default" option so the user can leave the model to Copilot's own pick.
+  const copilotModels = useMemo<Array<{ value: string; label: string }>>(() => {
+    const discovered = capabilities?.providers.find((p) => p.id === 'copilot')?.models ?? [];
+    const opts = discovered.map((m) => ({ value: m.id, label: m.label }));
+    return opts.length > 0 ? [...COPILOT_MODELS, ...opts] : COPILOT_MODELS;
+  }, [capabilities]);
+
   // Tour engines (narrow union). Cursor is NOT included here — it is review-only.
   const availableEngines = useMemo<AgentEngine[]>(() => {
     const engines: AgentEngine[] = [];
@@ -661,8 +683,9 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({
     if (cursorAvailable) engines.push('cursor');
     if (opencodeAvailable) engines.push('opencode');
     if (piAvailable) engines.push('pi');
+    if (copilotAvailable) engines.push('copilot');
     return engines;
-  }, [availableEngines, cursorAvailable, opencodeAvailable, piAvailable]);
+  }, [availableEngines, cursorAvailable, opencodeAvailable, piAvailable, copilotAvailable]);
 
   const availableModes = useMemo<AgentMode[]>(() => {
     const modes: AgentMode[] = [];
@@ -684,6 +707,7 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({
     engine === 'cursor' ? cursorAvailable
       : engine === 'opencode' ? opencodeAvailable
       : engine === 'pi' ? piAvailable
+      : engine === 'copilot' ? copilotAvailable
       : engineAvailable(engine);
 
   // Reconcile mode + engine choices against live capabilities. Runs when
@@ -754,6 +778,15 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({
       setGuidePiModel(piModels[0]?.value ?? '');
     }
   }, [piAvailable, piModels, piModel, setPiModel, guidePiModel, setGuidePiModel]);
+  useEffect(() => {
+    if (!copilotAvailable) return;
+    if (!copilotModels.some((m) => m.value === copilotModel)) {
+      setCopilotModel(copilotModels[0]?.value ?? '');
+    }
+    if (!copilotModels.some((m) => m.value === guideCopilotModel)) {
+      setGuideCopilotModel(copilotModels[0]?.value ?? '');
+    }
+  }, [copilotAvailable, copilotModels, copilotModel, setCopilotModel, guideCopilotModel, setGuideCopilotModel]);
 
   // Annotation counts per job source
   const annotationCounts = useMemo(() => {
@@ -825,6 +858,15 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({
         ...review,
       };
     }
+    if (engine === 'copilot') {
+      // Empty model ⇒ Copilot's own pick; only send a real model id.
+      return {
+        provider: 'copilot',
+        label: 'Code Review',
+        ...(copilotModel ? { model: copilotModel } : {}),
+        ...review,
+      };
+    }
     return {
       provider: 'codex',
       label: 'Code Review',
@@ -870,6 +912,14 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({
         engine: 'pi',
         ...(guidePiModel ? { model: guidePiModel } : {}),
         thinking: guidePiThinking,
+      };
+    }
+    if (guideEngine === 'copilot') {
+      return {
+        provider: 'guide',
+        label: 'Guided Review',
+        engine: 'copilot',
+        ...(guideCopilotModel ? { model: guideCopilotModel } : {}),
       };
     }
     return {
@@ -1079,6 +1129,7 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({
                     </ConfigRow>
                   </>
                 )}
+                {reviewEngine === 'copilot' && renderMarkerEngineConfig(copilotModel, copilotModels, setCopilotModel)}
               </>
             )}
 
@@ -1156,6 +1207,7 @@ export const AgentsTab: React.FC<AgentsTabProps> = ({
                     </ConfigRow>
                   </>
                 )}
+                {guideEngine === 'copilot' && renderMarkerEngineConfig(guideCopilotModel, copilotModels, setGuideCopilotModel)}
               </>
             )}
           </div>

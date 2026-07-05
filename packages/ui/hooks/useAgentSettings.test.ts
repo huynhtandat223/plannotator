@@ -51,6 +51,7 @@ describe("parseReviewProfileByEngine", () => {
       cursor: "builtin:default",
       opencode: "builtin:default",
       pi: "builtin:default",
+      copilot: "builtin:default",
     });
   });
 
@@ -61,6 +62,7 @@ describe("parseReviewProfileByEngine", () => {
       cursor: "skill:security",
       opencode: "skill:security",
       pi: "skill:security",
+      copilot: "skill:security",
     });
   });
 
@@ -76,6 +78,7 @@ describe("parseReviewProfileByEngine", () => {
       cursor: "skill:b",
       opencode: "skill:legacy",
       pi: "skill:legacy",
+      copilot: "skill:legacy",
     });
   });
 
@@ -88,6 +91,7 @@ describe("parseReviewProfileByEngine", () => {
       cursor: "builtin:default",
       opencode: "builtin:default",
       pi: "builtin:default",
+      copilot: "builtin:default",
     });
   });
 });

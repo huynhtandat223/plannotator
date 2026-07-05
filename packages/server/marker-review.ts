@@ -201,9 +201,13 @@ export interface MarkerBuildOptions {
   thinking?: string;
 }
 
+/** Stable ids of the marker engines — the single union every cast/lookup
+ *  should use, so adding an engine is one edit here plus a descriptor below. */
+export type MarkerEngineId = "cursor" | "opencode" | "pi" | "copilot";
+
 export interface MarkerEngine {
   /** Stable engine id — also the provider id used by the server. */
-  id: "cursor" | "opencode" | "pi";
+  id: MarkerEngineId;
   /** Display name for the capabilities/provider listing (e.g. "Cursor CLI"). */
   name: string;
   /** The CLI binary to spawn (NOTE: cursor's binary is `agent`). */
@@ -645,7 +649,171 @@ function piBuildArgv(prompt: string, model?: string, cwd?: string, opts?: Marker
 }
 
 // ---------------------------------------------------------------------------
-// The three descriptors + registry.
+// Copilot engine helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Copilot `extractText`: assistant text lives on `assistant.message` events
+ * (the complete message for that turn) as `data.content`. We deliberately do
+ * NOT also read `assistant.message_delta` events — `assistant.message` already
+ * carries the fully-assembled text, so summing both would double the canonical
+ * text (same shape as Pi's message_update/message_end split). A message that
+ * only carries toolRequests has empty content and contributes nothing.
+ */
+function copilotExtractText(event: MarkerStreamEvent): string | null {
+  if (event.type !== "assistant.message") return null;
+  const data = event.data as { content?: unknown } | undefined;
+  return typeof data?.content === "string" && data.content ? data.content : null;
+}
+
+/**
+ * Parse `copilot help config` output into a model catalog. Copilot has no
+ * dedicated model-list command; the config help enumerates the valid values of
+ * the `model` setting as an indented block:
+ *
+ *   `model`: AI model to use for Copilot CLI; ...
+ *     - "claude-sonnet-5"
+ *     - "gpt-5.5"
+ *
+ * We locate the `model`: line, then collect consecutive `- "<id>"` lines until
+ * the first line that isn't one (the next setting's block). No header found —
+ * e.g. a future help rewrite — fails closed to [] (the picker just offers
+ * "Default" and the --model flag is omitted).
+ */
+function copilotParseModels(stdout: string): MarkerModel[] {
+  try {
+    if (!stdout) return [];
+    const lines = stripAnsi(stdout).split("\n");
+    const headerIndex = lines.findIndex((l) => /^\s*`model`\s*:/.test(l));
+    if (headerIndex === -1) return [];
+
+    const models: MarkerModel[] = [];
+    const seen = new Set<string>();
+    for (const line of lines.slice(headerIndex + 1)) {
+      const match = /^\s*-\s*"([^"]+)"\s*$/.exec(line);
+      if (!match) break; // end of the model value block
+      const id = match[1];
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      models.push({ id, label: id });
+    }
+    return models;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Format one `copilot --output-format json` event for the LiveLogViewer. Tool
+ * calls surface as `tool.execution_start` (toolName + args preview) and their
+ * failures as `tool.execution_complete` errors (a permission denial is worth
+ * seeing live); assistant text surfaces once, on `assistant.message` — the same
+ * event `copilotExtractText` reads. Session bookkeeping (mcp_servers_loaded,
+ * skills_loaded), the echoed user turn, turn lifecycle, and per-character
+ * `assistant.message_delta` events are noise and are skipped.
+ */
+function copilotFormatLogEvent(event: MarkerStreamEvent): string | null {
+  const data = event.data as Record<string, unknown> | undefined;
+  switch (event.type) {
+    case "session.tools_updated": {
+      const model = typeof data?.model === "string" ? data.model : undefined;
+      return model ? `[init] model=${model}` : null;
+    }
+    case "tool.execution_start": {
+      const name = typeof data?.toolName === "string" ? data.toolName : "tool";
+      const args = data?.arguments !== undefined ? JSON.stringify(data.arguments).slice(0, 100) : "";
+      return `[${name}] ${args}`.trimEnd();
+    }
+    case "tool.execution_complete": {
+      const error = data?.error as { message?: unknown } | undefined;
+      if (error && typeof error.message === "string") return `[tool] ${error.message}`;
+      return null; // success — the start line already showed the call
+    }
+    case "assistant.message": {
+      const text = copilotExtractText(event);
+      return text ? text : null;
+    }
+    default:
+      return null;
+  }
+}
+
+/**
+ * Build the `copilot -p` command.
+ *
+ * `--output-format json` emits the JSONL event stream we capture on stdout.
+ * `--no-ask-user` disables the ask_user tool (a background job can never
+ * answer), and in non-interactive mode any tool without an allow rule is
+ * auto-denied rather than prompted — the model receives a clean "denied"
+ * result and continues. Read-ONLY-ish posture: `--deny-tool=write` removes the
+ * file-mutation tools (deny rules beat every allow rule, per Copilot's
+ * permission docs) and the allowlist opens only the VCS/forge inspection
+ * commands the review/guide prompts rely on (`git`/`gh`/`glab`/`jj`, plus wc) —
+ * the same command families Claude's fine-grained allowlist grants, at
+ * first-level-subcommand-wildcard granularity because that's the pattern shape
+ * Copilot documents for git/gh. Shell is otherwise auto-denied, which puts
+ * Copilot BETWEEN Claude (full subcommand granularity) and Cursor/OpenCode/Pi
+ * (Bash unrestricted) on the trust spectrum. `--disable-builtin-mcps` skips the
+ * github-mcp-server handshake at startup (PR reads go through the allowlisted
+ * `gh` CLI instead); `--no-auto-update` keeps a background job from pausing to
+ * download a CLI update. The `=` form is used for the variadic permission
+ * flags so they can never greedily consume a following argument. The prompt is
+ * the value of `-p`, passed last. `--model` is omitted when empty or `auto`
+ * so Copilot picks its own default.
+ */
+function copilotBuildArgv(prompt: string, model?: string, cwd?: string): string[] {
+  const useModel = !!model && model.trim().length > 0 && model.toLowerCase() !== "auto";
+  return [
+    "copilot",
+    ...(cwd ? ["-C", cwd] : []),
+    "--output-format",
+    "json",
+    "--no-ask-user",
+    "--no-auto-update",
+    "--disable-builtin-mcps",
+    "--deny-tool=write",
+    // Deny rules take precedence over every allow rule (Copilot's documented
+    // permission model), and match at first-level-subcommand granularity
+    // ("git push", "gh pr create") — probe-verified: with these in place,
+    // `git log` runs while `git push --dry-run` is denied. This keeps the
+    // broad `git:*`/`gh:*` allows below for inspection ergonomics while
+    // structurally blocking the high-consequence verbs a prompt-injected
+    // background job could abuse: remote writes (push), working-tree
+    // destruction (reset/clean/checkout/restore — local reviews run in the
+    // user's REAL working tree, so these mean uncommitted-work loss), and
+    // outward-facing forge writes (PR/MR/issue comments, creation, merges),
+    // which the review methodology already forbids at the prompt level.
+    "--deny-tool=shell(git push)",
+    "--deny-tool=shell(git reset)",
+    "--deny-tool=shell(git clean)",
+    "--deny-tool=shell(git checkout)",
+    "--deny-tool=shell(git restore)",
+    "--deny-tool=shell(gh pr comment)",
+    "--deny-tool=shell(gh pr create)",
+    "--deny-tool=shell(gh pr merge)",
+    "--deny-tool=shell(gh pr close)",
+    "--deny-tool=shell(gh pr edit)",
+    "--deny-tool=shell(gh pr review)",
+    "--deny-tool=shell(gh issue comment)",
+    "--deny-tool=shell(gh issue create)",
+    "--deny-tool=shell(glab mr note)",
+    "--deny-tool=shell(glab mr create)",
+    "--deny-tool=shell(glab mr merge)",
+    "--deny-tool=shell(glab mr close)",
+    "--allow-tool=shell(git:*)",
+    "--allow-tool=shell(gh:*)",
+    "--allow-tool=shell(glab:*)",
+    "--allow-tool=shell(jj:*)",
+    "--allow-tool=shell(wc)",
+    ...(useModel ? ["--model", model] : []),
+    // Prompt is the value of -p (copilot reads it from argv, not stdin).
+    "-p",
+    prompt,
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// The four descriptors + registry.
 // ---------------------------------------------------------------------------
 
 const CURSOR_ENGINE: MarkerEngine = {
@@ -684,10 +852,23 @@ const PI_ENGINE: MarkerEngine = {
   formatLogEvent: piFormatLogEvent,
 };
 
-export const MARKER_ENGINES: Record<"cursor" | "opencode" | "pi", MarkerEngine> = {
+const COPILOT_ENGINE: MarkerEngine = {
+  id: "copilot",
+  name: "Copilot CLI",
+  binary: "copilot",
+  author: "Copilot",
+  buildArgv: copilotBuildArgv,
+  extractText: copilotExtractText,
+  modelsArgv: ["help", "config"],
+  parseModels: copilotParseModels,
+  formatLogEvent: copilotFormatLogEvent,
+};
+
+export const MARKER_ENGINES: Record<MarkerEngineId, MarkerEngine> = {
   cursor: CURSOR_ENGINE,
   opencode: OPENCODE_ENGINE,
   pi: PI_ENGINE,
+  copilot: COPILOT_ENGINE,
 };
 
 // ---------------------------------------------------------------------------

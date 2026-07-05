@@ -24,6 +24,7 @@ export const DEMO_GUIDE: CodeGuideData = {
       diffs: [
         {
           file: 'src/components/Button.tsx',
+          summary: 'Guards `onClick` behind the `disabled` prop and forwards native `disabled` to the DOM element.',
         },
       ],
     },
@@ -34,9 +35,11 @@ export const DEMO_GUIDE: CodeGuideData = {
       diffs: [
         {
           file: 'src/hooks/useAuth.ts',
+          summary: 'Replaces the untyped fetch calls with `api.auth.*` and adds `error` state so failed logins surface in the UI.',
         },
         {
           file: 'src/services/api.ts',
+          summary: 'New typed request client with an `ApiError` class carrying HTTP status and error code.',
         },
       ],
     },
@@ -47,9 +50,11 @@ export const DEMO_GUIDE: CodeGuideData = {
       diffs: [
         {
           file: 'src/config/settings.ts',
+          summary: 'Indentation-only reformat of the config getters; no behavior change.',
         },
         {
           file: 'src/components/Modal.tsx',
+          summary: 'New portal-based dialog component; added but not yet wired up anywhere.',
         },
       ],
     },

@@ -65,6 +65,29 @@ describe("validateGuideOutput", () => {
     expect(result.guide.unplacedFiles?.sort()).toEqual(["src/b.ts", "src/c.ts"]);
   });
 
+  it("carries per-file summaries through, omitting blank/non-string ones without dropping the ref", () => {
+    const raw = JSON.parse(
+      guideJson([
+        {
+          title: "S",
+          overview: "o",
+          diffs: [
+            { file: "src/a.ts", summary: "Adds the thing." },
+            { file: "src/b.ts", summary: "   " },
+            { file: "src/c.ts", summary: 42 },
+          ],
+        },
+      ]),
+    );
+    const result = validateGuideOutput(raw, FILES);
+    if ("error" in result) throw new Error(result.error);
+    expect(result.guide.sections[0].diffs).toEqual([
+      { file: "src/a.ts", summary: "Adds the thing." },
+      { file: "src/b.ts" },
+      { file: "src/c.ts" },
+    ]);
+  });
+
   it("coerces non-string title/intent from prompt-only marker engines", () => {
     const raw = JSON.parse(guideJson([{ title: "S", overview: "o", diffs: [{ file: "src/a.ts" }] }]));
     raw.title = 42;

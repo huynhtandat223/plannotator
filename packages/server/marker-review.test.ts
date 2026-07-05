@@ -121,6 +121,43 @@ describe("buildMarkerCommand: opencode", () => {
   });
 });
 
+describe("buildMarkerCommand: copilot", () => {
+  test("json output, non-interactive denial posture, read-only shell allowlist, prompt via -p", () => {
+    const { command } = buildMarkerCommand(MARKER_ENGINES.copilot, "review this", "claude-sonnet-5", "/repo");
+    expect(command[0]).toBe("copilot");
+    expect(command[command.indexOf("-C") + 1]).toBe("/repo");
+    expect(command[command.indexOf("--output-format") + 1]).toBe("json");
+    expect(command).toContain("--no-ask-user");
+    expect(command).toContain("--no-auto-update");
+    expect(command).toContain("--disable-builtin-mcps");
+    expect(command).toContain("--deny-tool=write");
+    expect(command).toContain("--allow-tool=shell(git:*)");
+    expect(command).toContain("--allow-tool=shell(gh:*)");
+    // High-consequence verbs are structurally denied even though git:*/gh:*/
+    // glab:* are allowed — deny rules take precedence in Copilot's model.
+    expect(command).toContain("--deny-tool=shell(git push)");
+    expect(command).toContain("--deny-tool=shell(git reset)");
+    expect(command).toContain("--deny-tool=shell(git clean)");
+    expect(command).toContain("--deny-tool=shell(git restore)");
+    expect(command).toContain("--deny-tool=shell(gh pr comment)");
+    expect(command).toContain("--deny-tool=shell(gh pr merge)");
+    expect(command).toContain("--deny-tool=shell(glab mr note)");
+    expect(command).not.toContain("--allow-all-tools");
+    expect(command).not.toContain("--yolo");
+    expect(command[command.indexOf("--model") + 1]).toBe("claude-sonnet-5");
+    // Prompt is the VALUE of -p, last in argv.
+    expect(command[command.length - 2]).toBe("-p");
+    expect(command[command.length - 1]).toBe("review this");
+  });
+
+  test("omits --model for auto/empty/undefined; -C when no cwd", () => {
+    expect(buildMarkerCommand(MARKER_ENGINES.copilot, "p", "auto", "/repo").command).not.toContain("--model");
+    expect(buildMarkerCommand(MARKER_ENGINES.copilot, "p", "", "/repo").command).not.toContain("--model");
+    expect(buildMarkerCommand(MARKER_ENGINES.copilot, "p", undefined, "/repo").command).not.toContain("--model");
+    expect(buildMarkerCommand(MARKER_ENGINES.copilot, "p").command).not.toContain("-C");
+  });
+});
+
 // ===========================================================================
 // parseModels — both descriptors
 // ===========================================================================
@@ -167,6 +204,30 @@ describe("parseModels: opencode", () => {
 // ===========================================================================
 // reduceMarkerStream / extractText — both descriptors
 // ===========================================================================
+
+describe("reduceMarkerStream: copilot", () => {
+  test("reads assistant.message content once; deltas and bookkeeping are skipped", () => {
+    const stdout =
+      ndjson({ type: "session.tools_updated", data: { model: "claude-sonnet-5" } }) +
+      ndjson({ type: "assistant.message_delta", data: { deltaContent: "Loo" } }) +
+      ndjson({ type: "assistant.message_delta", data: { deltaContent: "king" } }) +
+      ndjson({ type: "assistant.message", data: { content: "Looking at the diff." } }) +
+      ndjson({ type: "assistant.message", data: { content: "", toolRequests: [{ name: "bash" }] } }) +
+      ndjson({ type: "result", exitCode: 0 });
+    const { canonicalText } = reduceMarkerStream(stdout, MARKER_ENGINES.copilot);
+    expect(canonicalText).toBe("Looking at the diff.");
+  });
+
+  test("full pipeline: marker block inside assistant.message content parses", () => {
+    const stdout = ndjson({
+      type: "assistant.message",
+      data: { content: "Commentary first.\n" + markerBlock(validReview) },
+    });
+    const out = parseMarkerStreamOutput(stdout, MARKER_ENGINES.copilot, NONCE);
+    expect(out?.findings).toHaveLength(1);
+    expect(out?.findings[0].file).toBe("packages/server/review.ts");
+  });
+});
 
 describe("reduceMarkerStream: cursor", () => {
   test("reconstructs canonical text regardless of chunk boundaries", () => {

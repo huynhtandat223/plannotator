@@ -1,9 +1,11 @@
 export interface GuideDiffRef {
-  /** Repo-relative path; must match a DiffFile.path in the current review patch.
-   *  Deliberately the only field: the section overview carries all semantics —
-   *  per-diff captions/line hints proved to be noise the model shouldn't spend
-   *  generation effort on. */
+  /** Repo-relative path; must match a DiffFile.path in the current review patch. */
   file: string;
+  /** 1-2 sentence semantic description of what changed in THIS file, written
+   *  from the diff hunks alone (no investigation). Required by the JSON schema
+   *  for schema-enforced engines; optional here so a marker engine that omits
+   *  it still yields a valid guide — the UI simply renders nothing. */
+  summary?: string;
 }
 
 export interface GuideSection {

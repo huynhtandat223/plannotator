@@ -28,6 +28,7 @@ import {
 	MARKER_ENGINES,
 	formatMarkerLogEvent,
 	type MarkerEngine,
+	type MarkerEngineId,
 	type MarkerModel,
 } from "../generated/marker-review.js";
 import { json, parseBody } from "./helpers.js";
@@ -51,6 +52,7 @@ const SERVER_BUILT_PROVIDERS: ReadonlySet<string> = new Set([
 	"cursor",
 	"opencode",
 	"pi",
+	"copilot",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -179,7 +181,7 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions) {
 	const markerModelsCache = new Map<string, MarkerModel[]>();
 	async function buildCapabilitiesResponse(): Promise<AgentCapabilities> {
 		const providers = await Promise.all(capabilities.map(async (c) => {
-			const engine = MARKER_ENGINES[c.id as "cursor" | "opencode" | "pi"];
+			const engine = MARKER_ENGINES[c.id as MarkerEngineId];
 			if (!engine || !c.available) return c;
 			let models = markerModelsCache.get(engine.id);
 			if (!models) {
@@ -294,8 +296,8 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions) {
 					// Guide jobs keep provider: "guide" and carry the marker engine on
 					// spawnOptions.engine instead — fall back to that lookup so guide
 					// logs get the same readable formatting as review jobs.
-					const markerEngine = MARKER_ENGINES[provider as "cursor" | "opencode" | "pi"]
-						?? (spawnOptions?.engine ? MARKER_ENGINES[spawnOptions.engine as "cursor" | "opencode" | "pi"] : undefined);
+					const markerEngine = MARKER_ENGINES[provider as MarkerEngineId]
+						?? (spawnOptions?.engine ? MARKER_ENGINES[spawnOptions.engine as MarkerEngineId] : undefined);
 					if (markerEngine) {
 						const formatted = formatMarkerLogEvent(line, markerEngine);
 						if (formatted !== null) broadcast({ type: "job:log", jobId: id, delta: formatted + '\n' });
@@ -390,7 +392,7 @@ export function createAgentJobHandler(options: AgentJobHandlerOptions) {
 						// that fail-closed rule too: both are single-shot, all-or-nothing
 						// outputs with nothing meaningful partially ingested, so an
 						// unexpected throw means the whole result is unusable.
-						if (MARKER_ENGINES[provider as "cursor" | "opencode" | "pi"]) {
+						if (MARKER_ENGINES[provider as MarkerEngineId]) {
 							entry.info.status = "failed";
 							entry.info.error = err instanceof Error ? err.message : `${provider} result ingestion failed`;
 						} else if (provider === "tour" || provider === "guide") {

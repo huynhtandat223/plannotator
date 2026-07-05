@@ -84,6 +84,7 @@ import {
   transformMarkerFindings,
   makeMarkerNonce,
   extractMarkerNonce,
+  type MarkerEngineId,
 } from "./marker-review";
 import { loadConfig, saveConfig, detectGitUser, getServerConfig } from "./config";
 import { type PRMetadata, type PRRef, type PRReviewFileComment, type PRStackTree, type PRListItem, fetchPR, fetchPRFileContent, fetchPRContext, submitPRReview, fetchPRViewedFiles, markPRFilesViewed, fetchPRStack, fetchPRList, getPRUser, parsePRUrl, prRefFromMetadata, isSameProject, getDisplayRepo, getMRLabel, getMRNumberLabel, prCommandRuntime } from "./pr";
@@ -905,7 +906,7 @@ export async function startReviewServer(
           // engine id itself for claude/codex.
           const failedEngine = typeof config?.engine === "string" && config.engine ? config.engine : undefined;
           const failedEngineBinary = failedEngine
-            ? MARKER_ENGINES[failedEngine as "cursor" | "opencode" | "pi"]?.binary ?? failedEngine
+            ? MARKER_ENGINES[failedEngine as MarkerEngineId]?.binary ?? failedEngine
             : undefined;
           const repairEngine =
             failedEngine && Bun.which(failedEngineBinary!)
@@ -993,7 +994,7 @@ export async function startReviewServer(
       // no cwd flag — it always uses the process's actual cwd, which spawnJob
       // already sets from this same cwd).
       // captureStdout is required: the marker block comes back on stdout NDJSON.
-      const markerEngine = MARKER_ENGINES[provider as "cursor" | "opencode" | "pi"];
+      const markerEngine = MARKER_ENGINES[provider as MarkerEngineId];
       if (markerEngine) {
         const model = typeof config?.model === "string" && config.model ? config.model : undefined;
         const thinking = typeof config?.thinking === "string" && config.thinking ? config.thinking : undefined;
@@ -1111,7 +1112,7 @@ export async function startReviewServer(
       // an exit-0 job marked done). Mirrors the Tour fail-closed pattern below.
       // Findings carry nullable file/line, classified into line/whole-file/
       // general by transformMarkerFindings — nothing is dropped (same as Claude).
-      const markerEngine = MARKER_ENGINES[job.provider as "cursor" | "opencode" | "pi"];
+      const markerEngine = MARKER_ENGINES[job.provider as MarkerEngineId];
       if (markerEngine) {
         // Recover the per-job nonce embedded in the prompt; without it no block
         // can be trusted, so parse fails closed below.
