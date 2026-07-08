@@ -331,9 +331,22 @@ Six items accumulated through Workspaces' first three integration slices. All ar
 
 ---
 
+## HtmlViewer rendering neutrality (0.25.0)
+
+`HtmlViewer` no longer writes into a rendered document's namespace (Workspaces' upstream brief; supersedes the H-ask-1 patch — delete it on adoption). Arbitrary HTML now renders exactly as in a standalone browser tab:
+
+1. **No bare token injection.** Host theme tokens travel only as viewer-owned `--pn-*` properties (srcdoc block and the bridge's theme handler, which now refuses non-`--pn-` writes). A document defining `--muted`/`--background`/etc. keeps its own values in both host themes.
+2. **No root mutations.** The `light` class toggle and the `color-scheme: light` injection are gone for arbitrary documents; light/dark resolves from the document + OS.
+3. **Diff CSS gated and scoped.** `<ins>`/`<del>` styles are injected only while `diffActive` and target `ins.plannotator-diff`/`del.plannotator-diff`. If your host renders its own version-diff HTML through the viewer, tag the generated wrappers with `class="plannotator-diff"`; author-written `<ins>`/`<del>` markup is never restyled.
+4. **Host theming is opt-in per document.** `<meta name="plannotator-theme" content="host">` in the document's head restores the bare-token push, the `light` root class, and a symmetric `color-scheme` sync — for that document only. Documents relying on the old implicit override must add the tag.
+
+The contract is pinned by `components/html-viewer/srcdoc.test.ts` (no bare custom-property declarations, no `color-scheme`, `--pn-*`-only bridge writes, scoped diff selectors).
+
+---
+
 ## Publishing & versioning
 
-- `@plannotator/core` and `@plannotator/ui` are versioned **in lockstep with the repo** (`@plannotator/ui` is now `0.24.0`; `@plannotator/core` remains `0.22.0` until its next change — the ui→core dependency still resolves exactly at pack time).
+- `@plannotator/core` and `@plannotator/ui` are versioned **in lockstep with the repo** (`@plannotator/ui` is now `0.25.0`; `@plannotator/core` remains `0.22.0` until its next change — the ui→core dependency still resolves exactly at pack time).
 - They depend on each other via `workspace:*`. At publish time that must resolve to the **exact** version in the tarball, so publish with a tool that does that resolution (the repo's existing flow uses `bun pm pack` to build the tarball, then `npm publish *.tgz --provenance --access public`). Publish **`core` first, then `ui`**.
 - `styles.css` is built by the `prepack` script (`bun run build:css`) so the published tarball always carries fresh precompiled CSS.
 - There is **no CI publish job for these two packages yet** — first publish is manual from `main` after merge. (Wiring a CI publish job is a follow-up.)
