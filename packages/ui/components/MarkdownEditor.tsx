@@ -9,6 +9,20 @@ import { useTheme } from './ThemeProvider';
 
 export type { MarkdownEditorHandle };
 
+/* Wiki-links, re-exported through the ui surface. @plannotator/ui is the single
+   supported contract for hosts — do NOT import @plannotator/atomic-editor
+   directly (it's outside the import allowlist). Build the extension with
+   wikiLinks(config) and pass it through the `extensions` prop below; the
+   capture-once-per-documentId caveat on `extensions` applies (config callbacks
+   like suggest/resolve/onOpen may close over live state). */
+export { wikiLinks } from '@plannotator/atomic-editor';
+export type {
+  WikiLinksConfig,
+  WikiLinkSuggestion,
+  WikiLinkResolvedTarget,
+  WikiLinkStatus,
+} from '@plannotator/atomic-editor';
+
 /* Grid-mode card utilities stay here (not in the package): they're Plannotator
    design-system Tailwind classes, and this file is @source-scanned. */
 const GRID_CARD_CLASSES = 'px-5 md:px-8 lg:px-10 xl:px-12 shadow-xl border border-border/50';
