@@ -30,6 +30,21 @@ configurePlannotatorUI({
 
 Anything you don't pass keeps Plannotator's default. A few component-specific overrides (e.g. an "open in editor" diff action) are passed as props where you render that component.
 
+### Resize-handle seams (`ResizeHandle` / `useResizablePanel`)
+
+The sidebar/panel resize handle exposes seams for hosts that want different edge interactions (e.g. no hover reveal, click-to-collapse). All default to today's behavior — pass nothing and it's unchanged.
+
+- **Suppress / restyle the hover reveal.** The inner visible track carries a `[data-resize-track]` attribute (same host-CSS pattern as the collapse button's `[data-collapse]`), and `ResizeHandle` takes a `trackClassName` prop. To kill the pop-in from host CSS:
+  ```css
+  [data-resize-track] { background: none !important; }
+  ```
+- **Click-to-collapse anywhere on the handle.** The handle can't tell a click from a drag-start on its own — the hook owns the pointer state machine. Pass `onClick` to `useResizablePanel`; it fires on pointer-up only when the pointer never traveled past `clickThreshold` (default 4px), so a genuine click on the full-width handle can collapse the panel while drags still resize:
+  ```ts
+  const resize = useResizablePanel({ storageKey, side: "left", onSnapClose: collapse, onClick: collapse });
+  ```
+
+Building your own tooltip and removing the built-in double-click reset are host-side concerns (override `onDoubleClick` where you render the handle).
+
 ## Consuming it (e.g. from Workspaces)
 
 ```bash

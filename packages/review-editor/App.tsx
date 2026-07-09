@@ -148,6 +148,9 @@ function orderFilesBySections(files: DiffFile[], sections?: SinceBaseSections | 
     .map((entry) => entry.file);
 }
 
+/** Hint shown following the cursor while hovering a sidebar/panel resize handle. */
+const RESIZE_HANDLE_TOOLTIP = 'Click to close · Drag to resize';
+
 const ReviewApp: React.FC = () => {
   const { resolvedMode } = useTheme();
   const [diffData, setDiffData] = useState<DiffData | null>(null);
@@ -788,11 +791,15 @@ const ReviewApp: React.FC = () => {
   const panelResize = useResizablePanel({
     storageKey: 'plannotator-review-panel-width',
     onSnapClose: () => reviewSidebar.close(),
+    // Single click on the handle (no drag) collapses it.
+    onClick: () => reviewSidebar.close(),
   });
   const fileTreeResize = useResizablePanel({
     storageKey: 'plannotator-filetree-width',
     defaultWidth: 256, minWidth: 160, maxWidth: 400, side: 'left',
     onSnapClose: () => setIsFileTreeOpen(false),
+    // Single click on the handle (no drag) collapses it.
+    onClick: () => setIsFileTreeOpen(false),
   });
   const isResizing = panelResize.isDragging || fileTreeResize.isDragging;
 
@@ -3146,7 +3153,7 @@ const ReviewApp: React.FC = () => {
                 onSelectSearchMatch={hasSearchableFiles ? handleSelectSearchMatch : undefined}
                 onStepSearchMatch={hasSearchableFiles ? stepSearchMatch : undefined}
               />
-              <ResizeHandle {...fileTreeResize.handleProps} className="z-10" side="left" onCollapse={() => setIsFileTreeOpen(false)} />
+              <ResizeHandle {...fileTreeResize.handleProps} className="z-10" side="left" hideHoverTrack tooltip={RESIZE_HANDLE_TOOLTIP} onCollapse={() => setIsFileTreeOpen(false)} />
             </div>
           )}
           {!guideOpen && shouldShowFileTree && isFileTreeOpen && showCommitsPanel && (
@@ -3166,7 +3173,7 @@ const ReviewApp: React.FC = () => {
                 onSelectPanelView={handlePanelViewSelect}
                 showSectionsOption={sectionsCapable}
               />
-              <ResizeHandle {...fileTreeResize.handleProps} className="z-10" side="left" onCollapse={() => setIsFileTreeOpen(false)} />
+              <ResizeHandle {...fileTreeResize.handleProps} className="z-10" side="left" hideHoverTrack tooltip={RESIZE_HANDLE_TOOLTIP} onCollapse={() => setIsFileTreeOpen(false)} />
             </div>
           )}
           {!guideOpen && shouldShowFileTree && isFileTreeOpen && !(sectionsAvailable && panelView === 'sections') && !showCommitsPanel && (
@@ -3233,7 +3240,7 @@ const ReviewApp: React.FC = () => {
                 onStageFile={canStageFiles ? stageFile : undefined}
                 stagingFile={stagingFile}
               />
-              <ResizeHandle {...fileTreeResize.handleProps} className="z-10" side="left" onCollapse={() => setIsFileTreeOpen(false)} />
+              <ResizeHandle {...fileTreeResize.handleProps} className="z-10" side="left" hideHoverTrack tooltip={RESIZE_HANDLE_TOOLTIP} onCollapse={() => setIsFileTreeOpen(false)} />
             </div>
           )}
 
@@ -3357,7 +3364,7 @@ const ReviewApp: React.FC = () => {
           {/* Resize Handle + Sidebar */}
           {reviewSidebar.isOpen && (
             <div className="contents group/sidebar">
-              <ResizeHandle {...panelResize.handleProps} className="z-10" side="right" onCollapse={() => reviewSidebar.close()} />
+              <ResizeHandle {...panelResize.handleProps} className="z-10" side="right" hideHoverTrack tooltip={RESIZE_HANDLE_TOOLTIP} onCollapse={() => reviewSidebar.close()} />
               <ReviewSidebar
                 isOpen
                 onClose={reviewSidebar.close}
