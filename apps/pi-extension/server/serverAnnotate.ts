@@ -245,21 +245,30 @@ export async function startAnnotateServer(options: {
 					.replace(/^-+|-+$/g, "")
 					.slice(0, 60) || "document";
 			const slug = `annotate-${base}-${contentHash(resolvePath(options.filePath)).slice(0, 8)}`;
-			const saved = saveToHistory(annotateProjectName, slug, historyContent);
-			const previousPlan =
-				saved.version > 1
-					? getPlanVersion(annotateProjectName, slug, saved.version - 1)
-					: null;
-			annotateHistory = {
-				slug,
-				diffCurrent: historyContent,
-				previousPlan,
-				versionInfo: {
-					version: saved.version,
-					totalVersions: getVersionCount(annotateProjectName, slug),
-					project: annotateProjectName,
-				},
-			};
+			// History is an enhancement, never a gate: a read-only/full data dir
+			// must degrade to stateless annotate (no version diff), not fail the
+			// whole session before the UI ever opens. Mirrors packages/server.
+			try {
+				const saved = saveToHistory(annotateProjectName, slug, historyContent);
+				const previousPlan =
+					saved.version > 1
+						? getPlanVersion(annotateProjectName, slug, saved.version - 1)
+						: null;
+				annotateHistory = {
+					slug,
+					diffCurrent: historyContent,
+					previousPlan,
+					versionInfo: {
+						version: saved.version,
+						totalVersions: getVersionCount(annotateProjectName, slug),
+						project: annotateProjectName,
+					},
+				};
+			} catch (error) {
+				console.error(
+					`Plannotator: annotate history unavailable (${error instanceof Error ? error.message : String(error)}); continuing without version diff`,
+				);
+			}
 		}
 	}
 
