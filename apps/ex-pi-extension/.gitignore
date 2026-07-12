@@ -1,1 +1,2 @@
-ex-plannotator.html
+# Keep the generated single-file app in git so a direct Pi package install works.
+# The build-isolation test regenerates it and verifies Official assets stay unchanged.

@@ -1,18 +1,33 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+
+function fingerprint(path: string): string | null {
+	if (!existsSync(path)) return null;
+	return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
 
 describe("Ex-Plannotator build isolation", () => {
-	test("builds its browser into only the Ex package asset", () => {
-		const exPackage = JSON.parse(readFileSync(resolve(import.meta.dir, "package.json"), "utf8"));
-		const officialPackage = JSON.parse(readFileSync(resolve(import.meta.dir, "../pi-extension/package.json"), "utf8"));
-		const rootPackage = JSON.parse(readFileSync(resolve(import.meta.dir, "../../package.json"), "utf8"));
+	test("builds its browser asset without creating or changing Official Plannotator assets", () => {
+		const repositoryRoot = resolve(import.meta.dir, "../..");
+		const exAsset = resolve(import.meta.dir, "ex-plannotator.html");
+		const officialAssets = [
+			resolve(import.meta.dir, "../pi-extension/plannotator.html"),
+			resolve(import.meta.dir, "../pi-extension/review-editor.html"),
+		];
+		const officialBefore = officialAssets.map(fingerprint);
+		rmSync(exAsset, { force: true });
 
-		expect(exPackage.scripts.build).toContain("../ex-review");
-		expect(exPackage.scripts.build).toContain("ex-plannotator.html");
-		expect(exPackage.scripts.build).not.toContain("../hook");
-		expect(officialPackage.scripts.build).not.toContain("ex-review");
-		expect(officialPackage.scripts.build).not.toContain("ex-plannotator.html");
-		expect(rootPackage.scripts["build:ex-pi"]).toBe("bun run --cwd apps/ex-pi-extension build");
-	});
+		const build = spawnSync("bun", ["run", "build:ex-pi"], {
+			cwd: repositoryRoot,
+			encoding: "utf8",
+		});
+
+		expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
+		expect(existsSync(exAsset)).toBe(true);
+		expect(readFileSync(exAsset, "utf8")).toContain("<title>Ex-Plannotator</title>");
+		expect(officialAssets.map(fingerprint)).toEqual(officialBefore);
+	}, 60_000);
 });
