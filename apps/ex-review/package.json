@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "build": "vite build",
+    "build": "NODE_ENV=production vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
