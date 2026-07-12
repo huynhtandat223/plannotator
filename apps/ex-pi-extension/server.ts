@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { createLiveMessageReviewState, type LiveAssistantMessage } from "./session.js";
+import { createLiveMessageReviewSnapshot, type LiveAssistantMessage } from "./session.js";
 
 export type LiveMessageReviewServer = {
 	port: number;
@@ -11,7 +11,7 @@ export async function startLiveMessageReviewServer(options: {
 	htmlContent: string;
 	messages: LiveAssistantMessage[];
 }): Promise<LiveMessageReviewServer> {
-	const state = createLiveMessageReviewState(options.messages);
+	const snapshot = createLiveMessageReviewSnapshot(options.messages);
 	const server = createServer((request, response) => {
 		const url = new URL(request.url ?? "/", "http://localhost");
 
@@ -25,7 +25,6 @@ export async function startLiveMessageReviewServer(options: {
 		}
 
 		if (request.method === "GET" && url.pathname === "/api/session") {
-			const snapshot = state.snapshot();
 			response.writeHead(200, {
 				"Content-Type": "application/json; charset=utf-8",
 				"Cache-Control": "no-store",
