@@ -23,6 +23,8 @@
     "dev:marketing": "bun run --cwd apps/marketing dev",
     "dev:review": "bun run --cwd apps/review dev",
     "build:hook": "bun run --cwd apps/hook build",
+    "build:ex-review": "bun run --cwd apps/ex-review build",
+    "build:ex-pi": "bun run --cwd apps/ex-pi-extension build",
     "build:portal": "bun run --cwd apps/portal build",
     "build:marketing": "bun run --cwd apps/marketing build",
     "build:opencode": "bun run --cwd apps/opencode-plugin build",
@@ -33,7 +35,7 @@
     "build:vscode": "bun run --cwd apps/vscode-extension build",
     "package:vscode": "bun run --cwd apps/vscode-extension package",
     "test": "bun test",
-    "typecheck": "bash apps/pi-extension/vendor.sh && tsc --noEmit -p packages/core/tsconfig.json && tsc --noEmit -p packages/shared/tsconfig.json && tsc --noEmit -p packages/ai/tsconfig.json && tsc --noEmit -p packages/server/tsconfig.json && tsc --noEmit -p packages/ui/tsconfig.json && tsc --noEmit -p packages/ui/tsconfig.strict-consumer.json && tsc --noEmit -p apps/pi-extension/tsconfig.json",
+    "typecheck": "bash apps/pi-extension/vendor.sh && tsc --noEmit -p packages/core/tsconfig.json && tsc --noEmit -p packages/shared/tsconfig.json && tsc --noEmit -p packages/ai/tsconfig.json && tsc --noEmit -p packages/server/tsconfig.json && tsc --noEmit -p packages/ui/tsconfig.json && tsc --noEmit -p packages/ui/tsconfig.strict-consumer.json && tsc --noEmit -p apps/pi-extension/tsconfig.json && tsc --noEmit -p apps/ex-review/tsconfig.json && tsc --noEmit -p apps/ex-pi-extension/tsconfig.json",
     "build:ui-css": "bun run --cwd packages/ui build:css"
   },
   "dependencies": {
@@ -48,6 +50,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.5.2",
+    "typescript": "~5.8.2",
     "@types/turndown": "^5.0.6",
     "bun-types": "^1.3.11"
   }

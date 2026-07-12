@@ -1,0 +1,45 @@
+{
+  "name": "@huynhtandat223/ex-plannotator-pi-extension",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Persistent annotation-focused review of assistant responses in Pi",
+  "author": "huynhtandat223",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huynhtandat223/plannotator.git",
+    "directory": "apps/ex-pi-extension"
+  },
+  "keywords": [
+    "pi-package",
+    "ex-plannotator",
+    "message-review",
+    "ai-agent"
+  ],
+  "pi": {
+    "extensions": [
+      "./"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "assistant-message.ts",
+    "browser.ts",
+    "server.ts",
+    "session.ts",
+    "README.md",
+    "ex-plannotator.html"
+  ],
+  "scripts": {
+    "build": "bun run --cwd ../ex-review build && cp ../ex-review/dist/index.html ex-plannotator.html",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "prepublishOnly": "cd ../.. && bun run build:ex-pi"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0",
+    "typescript": "~5.8.2"
+  }
+}
