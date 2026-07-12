@@ -29,22 +29,29 @@ function normalizeTimestamp(value: unknown): string | undefined {
 	return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }
 
-export function getRecentAssistantMessages(
+export function getActiveBranchAssistantMessages(
 	ctx: ExtensionContext,
-	limit = 25,
 ): LiveAssistantMessage[] {
 	const branch = ctx.sessionManager.getBranch() as SessionEntry[];
 	const messages: LiveAssistantMessage[] = [];
-	for (let index = branch.length - 1; index >= 0 && messages.length < limit; index -= 1) {
+	for (let index = branch.length - 1; index >= 0; index -= 1) {
 		const entry = branch[index];
 		if (entry.type !== "message") continue;
 		const text = assistantText(entry.message);
 		if (!text) continue;
+		const timestamp = normalizeTimestamp(entry.timestamp);
 		messages.push({
 			messageId: entry.id,
 			text,
-			...(normalizeTimestamp(entry.timestamp) ? { timestamp: normalizeTimestamp(entry.timestamp) } : {}),
+			...(timestamp ? { timestamp } : {}),
 		});
 	}
 	return messages;
+}
+
+export function getRecentAssistantMessages(
+	ctx: ExtensionContext,
+	limit = 25,
+): LiveAssistantMessage[] {
+	return getActiveBranchAssistantMessages(ctx).slice(0, limit);
 }

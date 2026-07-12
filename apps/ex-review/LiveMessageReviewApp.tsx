@@ -1,35 +1,92 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AnnotationPanel } from "@plannotator/ui/components/AnnotationPanel";
-import { MessagesBrowser } from "@plannotator/ui/components/sidebar/MessagesBrowser";
 import { ThemeProvider } from "@plannotator/ui/components/ThemeProvider";
 import { TooltipProvider } from "@plannotator/ui/components/Tooltip";
 import { Viewer } from "@plannotator/ui/components/Viewer";
 import { ScrollViewportProvider } from "@plannotator/ui/hooks/useScrollViewport";
 import { extractFrontmatter, parseMarkdownToBlocks } from "@plannotator/ui/utils/parser";
 import type { Annotation } from "@plannotator/ui/types";
+import { LiveMessagesBrowser, type LiveMessage } from "./LiveMessagesBrowser";
 
-type Message = { messageId: string; text: string; timestamp?: string };
-type SessionResponse = { messages: Message[]; selectedMessageId: string | null };
+type SessionResponse = {
+	messages: LiveMessage[];
+	selectedMessageId: string | null;
+	unreadMessageIds: string[];
+	draftsByMessageId: Record<string, Annotation[]>;
+};
+
+async function putSessionState(path: string, body: unknown): Promise<void> {
+	const response = await fetch(path, {
+		method: "PUT",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify(body),
+	});
+	if (!response.ok) throw new Error(`Session update failed (${response.status})`);
+}
 
 export function LiveMessageReviewApp() {
-	const [messages, setMessages] = useState<Message[]>([]);
+	const [messages, setMessages] = useState<LiveMessage[]>([]);
 	const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
+	const [unreadMessageIds, setUnreadMessageIds] = useState<Set<string>>(new Set());
 	const [draftsByMessageId, setDraftsByMessageId] = useState<Record<string, Annotation[]>>({});
 	const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
 	const [viewport, setViewport] = useState<HTMLElement | null>(null);
 	const [loadingError, setLoadingError] = useState<string | null>(null);
+	const mutationQueue = useRef(Promise.resolve());
+
+	function applySnapshot(session: SessionResponse) {
+		setMessages(session.messages);
+		setSelectedMessageId(session.selectedMessageId);
+		setUnreadMessageIds(new Set(session.unreadMessageIds));
+		setDraftsByMessageId(session.draftsByMessageId);
+	}
+
+	function queueMutation(mutation: () => Promise<void>) {
+		mutationQueue.current = mutationQueue.current
+			.then(mutation)
+			.catch((error) => setLoadingError(error instanceof Error ? error.message : String(error)));
+	}
 
 	useEffect(() => {
-		void fetch("/api/session")
+		let cancelled = false;
+		let source: EventSource | null = null;
+
+		// Hydrate from the initial GET snapshot first, then open the SSE stream.
+		// Every new SSE subscriber immediately receives the authoritative full
+		// snapshot, so sequencing avoids a race where an older GET response
+		// overwrites state that the SSE has already advanced.
+		fetch("/api/session")
 			.then(async (response) => {
 				if (!response.ok) throw new Error(`Session request failed (${response.status})`);
 				return response.json() as Promise<SessionResponse>;
 			})
 			.then((session) => {
-				setMessages(session.messages);
-				setSelectedMessageId(session.selectedMessageId);
+				if (cancelled) return;
+				applySnapshot(session);
+				setLoadingError(null);
+
+				source = new EventSource("/api/session/events");
+				source.onmessage = (event) => {
+					if (cancelled) return;
+					try {
+						applySnapshot(JSON.parse(event.data) as SessionResponse);
+						setLoadingError(null);
+					} catch {
+						setLoadingError("Ex-Plannotator received an invalid session update.");
+					}
+				};
+				source.onerror = () => {
+					if (!cancelled) setLoadingError("Live updates disconnected. Reconnecting…");
+				};
 			})
-			.catch((error) => setLoadingError(error instanceof Error ? error.message : String(error)));
+			.catch((error) => {
+				if (!cancelled) setLoadingError(error instanceof Error ? error.message : String(error));
+			});
+
+		return () => {
+			cancelled = true;
+			if (source) source.close();
+		};
 	}, []);
 
 	const selectedMessage = messages.find((message) => message.messageId === selectedMessageId) ?? null;
@@ -46,15 +103,27 @@ export function LiveMessageReviewApp() {
 
 	function updateDrafts(updater: (current: Annotation[]) => Annotation[]) {
 		if (!selectedMessageId) return;
-		setDraftsByMessageId((current) => ({
-			...current,
-			[selectedMessageId]: updater(current[selectedMessageId] ?? []),
-		}));
+		const messageId = selectedMessageId;
+		const currentAnnotations = draftsByMessageId[messageId] ?? [];
+		const annotations = updater(currentAnnotations);
+		queueMutation(() => putSessionState("/api/session/drafts", { messageId, annotations }));
+		setDraftsByMessageId((current) => {
+			const next = { ...current };
+			if (annotations.length === 0) delete next[messageId];
+			else next[messageId] = annotations;
+			return next;
+		});
 	}
 
 	function selectMessage(messageId: string) {
 		setSelectedMessageId(messageId);
+		setUnreadMessageIds((current) => {
+			const next = new Set(current);
+			next.delete(messageId);
+			return next;
+		});
 		setSelectedAnnotationId(null);
+		queueMutation(() => putSessionState("/api/session/selection", { messageId }));
 	}
 
 	return (
@@ -69,20 +138,22 @@ export function LiveMessageReviewApp() {
 									<p className="text-[10px] text-muted-foreground">Live message review</p>
 								</div>
 							</div>
-							<MessagesBrowser
+							<LiveMessagesBrowser
 								messages={messages}
 								selectedMessageId={selectedMessageId}
+								unreadMessageIds={unreadMessageIds}
 								onSelect={selectMessage}
 								annotationCounts={annotationCounts}
 							/>
 						</aside>
 
 						<main ref={setViewport} className="min-w-0 flex-1 overflow-y-auto px-6 py-8">
-							{loadingError ? (
-								<div className="mx-auto max-w-3xl rounded-lg border border-destructive/40 p-4 text-sm text-destructive">
+							{loadingError && (
+								<div className="mx-auto mb-4 max-w-3xl rounded-lg border border-destructive/40 p-3 text-sm text-destructive">
 									{loadingError}
 								</div>
-							) : selectedMessage ? (
+							)}
+							{selectedMessage ? (
 								<Viewer
 									key={selectedMessage.messageId}
 									blocks={blocks}

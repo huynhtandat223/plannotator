@@ -7,9 +7,11 @@ import type { LiveMessageReviewServer } from "./server";
 function fakePi() {
 	const commands: Array<{ name: string; options: { handler: (args: string, ctx: never) => Promise<void> } }> = [];
 	const events: string[] = [];
+	const handlers = new Map<string, (...args: never[]) => unknown>();
 	return {
 		commands,
 		events,
+		handlers,
 		api: {
 			registerCommand(name: string, options: { handler: (args: string, ctx: never) => Promise<void> }) {
 				commands.push({ name, options });
@@ -17,12 +19,17 @@ function fakePi() {
 			registerFlag() {},
 			registerShortcut() {},
 			registerTool() {},
-			on(name: string) {
+			on(name: string, handler: (...args: never[]) => unknown) {
 				events.push(name);
+				handlers.set(name, handler);
 			},
 			events: { on() {}, emit() {} },
 		},
 	};
+}
+
+function waitForDeferredReconciliation(): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, 5));
 }
 
 describe("Ex-Plannotator package surface", () => {
@@ -36,7 +43,12 @@ describe("Ex-Plannotator package surface", () => {
 
 	test("opens the active branch snapshot through its command handler", async () => {
 		const opened: Array<{ messages: Array<{ messageId: string; text: string }> }> = [];
-		const server: LiveMessageReviewServer = { port: 1234, url: "http://127.0.0.1:1234", stop() {} };
+		const server: LiveMessageReviewServer = {
+			port: 1234,
+			url: "http://127.0.0.1:1234",
+			reconcile() {},
+			stop() {},
+		};
 		const pi = fakePi();
 		exPlannotator(pi.api as never, {
 			startBrowser: async (_ctx, messages) => {
@@ -60,6 +72,61 @@ describe("Ex-Plannotator package surface", () => {
 
 		expect(opened).toEqual([{ messages: [{ messageId: "assistant", text: "Review me" }] }]);
 		expect(notices[0]).toContain("Ex-Plannotator opened");
+	});
+
+	test("reconciles only finalized assistant events against stable active-branch identities", async () => {
+		const reconciliations: Array<{
+			messages: Array<{ messageId: string; text: string }>;
+			activeBranchMessageIds: string[];
+		}> = [];
+		const server: LiveMessageReviewServer = {
+			port: 1234,
+			url: "http://127.0.0.1:1234",
+			reconcile: (messages, activeBranchMessageIds) => {
+				reconciliations.push({ messages, activeBranchMessageIds });
+			},
+			stop() {},
+		};
+		const pi = fakePi();
+		exPlannotator(pi.api as never, { startBrowser: async () => server });
+		const branch: Array<Record<string, unknown>> = [
+			{ id: "initial", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Initial" }] } },
+		];
+		const context = {
+			hasUI: true,
+			sessionManager: { getBranch: () => branch },
+			ui: { notify() {} },
+		};
+		await pi.commands[0].options.handler("", context as never);
+		const onMessageEnd = pi.handlers.get("message_end")!;
+
+		onMessageEnd({ message: { role: "user", content: "Question" } } as never, context as never);
+		onMessageEnd({ message: { role: "toolResult", content: [] } } as never, context as never);
+		expect(reconciliations).toEqual([]);
+
+		onMessageEnd({
+			message: { role: "assistant", content: [{ type: "text", text: "Final response" }] },
+		} as never, context as never);
+		branch.push({
+			id: "stable-entry-id",
+			type: "message",
+			message: { role: "assistant", content: [{ type: "text", text: "Final response" }] },
+		});
+		await waitForDeferredReconciliation();
+
+		expect(reconciliations).toEqual([{
+			messages: [
+				{ messageId: "stable-entry-id", text: "Final response" },
+				{ messageId: "initial", text: "Initial" },
+			],
+			activeBranchMessageIds: ["stable-entry-id", "initial"],
+		}]);
+
+		onMessageEnd({
+			message: { role: "assistant", content: [{ type: "text", text: "Outside branch" }] },
+		} as never, context as never);
+		await waitForDeferredReconciliation();
+		expect(reconciliations.at(-1)?.messages.some((message) => message.text === "Outside branch")).toBe(false);
 	});
 
 	test("coexists with Official Plannotator without command collisions", async () => {

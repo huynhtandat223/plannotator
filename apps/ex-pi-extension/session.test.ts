@@ -11,6 +11,8 @@ describe("Live Message Review Session snapshot", () => {
 		expect(createLiveMessageReviewSnapshot(messages)).toEqual({
 			messages,
 			selectedMessageId: "new",
+			unreadMessageIds: [],
+			draftsByMessageId: {},
 		});
 	});
 
