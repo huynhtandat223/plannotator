@@ -98,18 +98,49 @@ function SourceButton({
 
 function Header({ draftCount }: { draftCount: number }) {
 	return (
-		<header className="flex h-12 shrink-0 items-center justify-between border-b border-border/50 bg-card px-4">
-			<div>
-				<h1 className="text-sm font-semibold">Ex-Plannotator Plan</h1>
-				<p className="text-[10px] text-muted-foreground">plan/ · 2 responses · 3 plan files</p>
+		<header className="flex min-h-12 shrink-0 items-center justify-between gap-2 border-b border-border/50 bg-card px-3 py-2 md:px-4">
+			<div className="min-w-0">
+				<h1 className="truncate text-sm font-semibold">Ex-Plannotator Plan</h1>
+				<p className="truncate text-[10px] text-muted-foreground">plan/ · 2 responses · 3 plan files</p>
 			</div>
-			<div className="flex items-center gap-3">
-				<span className="text-[10px] text-muted-foreground">All source drafts are included</span>
-				<button className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground">
+			<div className="flex shrink-0 items-center gap-3">
+				<span className="hidden text-[10px] text-muted-foreground md:inline">All source drafts are included</span>
+				<button className="rounded-md bg-primary px-2.5 py-1.5 text-[11px] font-medium text-primary-foreground md:px-3 md:text-xs">
 					Send feedback{draftCount ? ` (${draftCount})` : ""}
 				</button>
 			</div>
 		</header>
+	);
+}
+
+function MobileSourceStrip({
+	selected,
+	select,
+	drafts,
+}: {
+	selected: Source;
+	select: (source: Source) => void;
+	drafts: Record<string, Annotation[]>;
+}) {
+	return (
+		<nav className="flex shrink-0 gap-1 overflow-x-auto border-b border-border/50 bg-card p-2 md:hidden">
+			{sources.map((source) => (
+				<button
+					key={source.id}
+					type="button"
+					onClick={() => select(source)}
+					className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] ${
+						selected.id === source.id
+							? "border-primary/30 bg-primary/10 text-primary"
+							: "border-border/50 text-muted-foreground"
+					}`}
+				>
+					<span>{source.kind === "response" ? "AI" : "MD"}</span>
+					<span>{source.label}</span>
+					{countFor(source.id, drafts) > 0 && <strong>{countFor(source.id, drafts)}</strong>}
+				</button>
+			))}
+		</nav>
 	);
 }
 
@@ -129,8 +160,9 @@ function VariantA({
 	return (
 		<div className="flex h-screen min-h-0 flex-col bg-background text-foreground">
 			<Header draftCount={draftCount} />
+			<MobileSourceStrip selected={selected} select={select} drafts={drafts} />
 			<div className="flex min-h-0 flex-1">
-				<aside className="flex w-72 shrink-0 flex-col border-r border-border/50 bg-card">
+				<aside className="hidden w-72 shrink-0 flex-col border-r border-border/50 bg-card md:flex">
 					<div className="grid grid-cols-2 border-b border-border/50 p-2">
 						{(["response", "file"] as const).map((kind) => (
 							<button
@@ -162,7 +194,7 @@ function VariantB({ selected, select, drafts, draftCount, viewer, panel }: Varia
 		<div className="flex h-screen min-h-0 flex-col bg-background text-foreground">
 			<Header draftCount={draftCount} />
 			<div className="flex min-h-0 flex-1 flex-col">
-				<nav className="flex h-11 shrink-0 items-end gap-1 overflow-x-auto border-b border-border/50 bg-card px-3">
+				<nav className="flex h-11 shrink-0 items-end gap-1 overflow-x-auto border-b border-border/50 bg-card px-2 md:px-3">
 					{sources.map((source) => (
 						<button
 							key={source.id}
@@ -177,7 +209,7 @@ function VariantB({ selected, select, drafts, draftCount, viewer, panel }: Varia
 					))}
 				</nav>
 				<div className="flex min-h-0 flex-1">
-					<div className="flex w-14 shrink-0 flex-col items-center gap-3 border-r border-border/50 bg-card py-3 text-[10px] text-muted-foreground">
+					<div className="hidden w-14 shrink-0 flex-col items-center gap-3 border-r border-border/50 bg-card py-3 text-[10px] text-muted-foreground md:flex">
 						<div className="rounded bg-primary/10 px-2 py-1 text-primary">{selected.kind === "response" ? "AI" : "MD"}</div>
 						<span className="[writing-mode:vertical-rl]">{selected.kind === "response" ? "Agent response" : "Plan file"}</span>
 					</div>
@@ -193,8 +225,9 @@ function VariantC({ selected, select, drafts, draftCount, viewer, panel }: Varia
 	return (
 		<div className="flex h-screen min-h-0 flex-col bg-background text-foreground">
 			<Header draftCount={draftCount} />
+			<MobileSourceStrip selected={selected} select={select} drafts={drafts} />
 			<div className="flex min-h-0 flex-1">
-				<aside className="w-80 shrink-0 overflow-y-auto border-r border-border/50 bg-card p-3">
+				<aside className="hidden w-80 shrink-0 overflow-y-auto border-r border-border/50 bg-card p-3 md:block">
 					<section>
 						<div className="mb-2 flex items-center justify-between px-2">
 							<h2 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Agent responses</h2>
@@ -260,9 +293,9 @@ function PrototypeSwitcher({ variant, onChange }: { variant: Variant; onChange: 
 		return () => window.removeEventListener("keydown", onKeyDown);
 	});
 	return (
-		<div className="fixed bottom-4 left-1/2 z-[100] flex -translate-x-1/2 items-center gap-3 rounded-full bg-zinc-950 px-2 py-2 text-white shadow-2xl ring-1 ring-white/20">
+		<div className="fixed bottom-3 left-1/2 z-[100] flex max-w-[calc(100vw-1rem)] -translate-x-1/2 items-center gap-1 rounded-full bg-zinc-950 px-1.5 py-1.5 text-white shadow-2xl ring-1 ring-white/20 md:bottom-4 md:gap-3 md:px-2 md:py-2">
 			<button type="button" onClick={() => cycle(-1)} className="rounded-full px-3 py-1 hover:bg-white/15" aria-label="Previous variant">←</button>
-			<span className="min-w-44 text-center text-xs font-medium">{variant} — {variants[index].name}</span>
+			<span className="min-w-0 flex-1 whitespace-nowrap text-center text-[11px] font-medium md:min-w-44 md:text-xs">{variant} — {variants[index].name}</span>
 			<button type="button" onClick={() => cycle(1)} className="rounded-full px-3 py-1 hover:bg-white/15" aria-label="Next variant">→</button>
 		</div>
 	);
@@ -315,7 +348,7 @@ export function PlanReviewPrototype() {
 	}
 
 	const viewer = (
-		<main ref={setViewport} className="min-w-0 flex-1 overflow-y-auto px-6 py-8">
+		<main ref={setViewport} className="min-w-0 flex-1 overflow-y-auto px-3 py-4 md:px-6 md:py-8">
 			<div className="mx-auto mb-3 flex max-w-[900px] items-center justify-between rounded-md border border-border/50 bg-card px-3 py-2">
 				<div>
 					<span className="text-[10px] font-semibold uppercase tracking-wider text-primary">{selected.kind === "response" ? "Agent response" : "Plan file"}</span>
@@ -344,7 +377,7 @@ export function PlanReviewPrototype() {
 		</main>
 	);
 	const panel = (
-		<aside className="flex w-80 shrink-0 flex-col border-l border-border/50 bg-card">
+		<aside className="hidden w-80 shrink-0 flex-col border-l border-border/50 bg-card md:flex">
 			<div className="border-b border-border/50 px-3 py-2 text-[10px] text-muted-foreground">
 				Showing annotations for <strong className="text-foreground">{selected.label}</strong>. Send feedback includes {draftCount} draft{draftCount === 1 ? "" : "s"} across all sources.
 			</div>
