@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "NODE_ENV=production vite build",
+    "prototype:plan": "vite --host 0.0.0.0",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
