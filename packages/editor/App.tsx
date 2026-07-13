@@ -165,6 +165,18 @@ type MessageAnnotationState = {
   selectedCodeAnnotationId: string | null;
 };
 
+type LiveReviewRoundStatus = 'open' | 'submitting' | 'delivery_failed' | 'waiting' | 'agent_stopped';
+
+type LiveMessageReviewSnapshot = {
+  messages: PickerMessage[];
+  selectedMessageId: string | null;
+  reviewRoundStatus: LiveReviewRoundStatus;
+  deliveryError: string | null;
+};
+
+const liveReviewIsLocked = (status: LiveReviewRoundStatus): boolean =>
+  status === 'submitting' || status === 'waiting' || status === 'agent_stopped';
+
 const countLinkedDocSessionAnnotations = (session: LinkedDocSessionState): number => {
   let total =
     session.root.annotations.length +
@@ -358,6 +370,13 @@ const App: React.FC = () => {
   const [annotateSource, setAnnotateSource] = useState<'file' | 'message' | 'folder' | null>(null);
   const [recentMessages, setRecentMessages] = useState<PickerMessage[]>([]);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
+  // This capability is only emitted by Ex-Plannotator. Official annotate-last
+  // sessions keep their terminal submit behavior and never open this adapter.
+  const [liveMessageReview, setLiveMessageReview] = useState(false);
+  const [liveReviewRoundStatus, setLiveReviewRoundStatus] = useState<LiveReviewRoundStatus>('open');
+  const [liveReviewDeliveryError, setLiveReviewDeliveryError] = useState<string | null>(null);
+  const [isLiveReviewActionPending, setIsLiveReviewActionPending] = useState(false);
+  const liveReviewLockActive = liveMessageReview && liveReviewIsLocked(liveReviewRoundStatus);
   const messageStateCacheRef = useRef<Map<string, MessageAnnotationState>>(new Map());
   const [cachedMessageAnnotationCounts, setCachedMessageAnnotationCounts] = useState<Map<string, number>>(new Map());
   const [goalSetupBundle, setGoalSetupBundle] = useState<GoalSetupBundle | null>(null);
@@ -1035,12 +1054,73 @@ const App: React.FC = () => {
     linkedDocHook.restoreSession(targetState.linkedDocSession);
     setCodeAnnotations([...targetState.codeAnnotations]);
     setSelectedCodeAnnotationId(targetState.selectedCodeAnnotationId);
+    // Ex-Plannotator owns selection in its live snapshot. Keep the normal
+    // annotate-last picker local unless that explicit capability is present.
+    if (liveMessageReview) {
+      void fetch('/api/session/selection', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messageId }),
+      });
+    }
   }, [
     recentMessages,
     selectedMessageId,
     saveCurrentMessageState,
     linkedDocHook.restoreSession,
+    liveMessageReview,
   ]);
+
+  // Applies the Ex-only server snapshot without changing the normal
+  // annotate-last state flow. Existing message states stay keyed by messageId,
+  // so newly-arrived messages never discard drafts for older messages.
+  const applyLiveReviewSnapshot = React.useCallback((snapshot: LiveMessageReviewSnapshot) => {
+    const hasSelectedMessage = snapshot.selectedMessageId !== null && snapshot.messages.some(
+      (message) => message.messageId === snapshot.selectedMessageId,
+    );
+    const nextSelectedMessageId = hasSelectedMessage ? snapshot.selectedMessageId : null;
+
+    setLiveReviewRoundStatus(snapshot.reviewRoundStatus);
+    setLiveReviewDeliveryError(snapshot.deliveryError);
+    setRecentMessages(snapshot.messages);
+
+    if (!nextSelectedMessageId || nextSelectedMessageId === selectedMessageId) return;
+    const targetMessage = snapshot.messages.find((message) => message.messageId === nextSelectedMessageId);
+    if (!targetMessage) return;
+
+    const states = saveCurrentMessageState();
+    const targetState = normalizeMessageState(
+      states.get(nextSelectedMessageId) ?? createEmptyMessageState(targetMessage),
+      targetMessage,
+    );
+    setSelectedMessageId(nextSelectedMessageId);
+    linkedDocHook.restoreSession(targetState.linkedDocSession);
+    setCodeAnnotations([...targetState.codeAnnotations]);
+    setSelectedCodeAnnotationId(targetState.selectedCodeAnnotationId);
+
+    if (snapshot.reviewRoundStatus === 'open') {
+      toast('Agent response received', { description: 'Reloading the latest review state.' });
+      window.location.reload();
+    }
+  }, [selectedMessageId, saveCurrentMessageState, linkedDocHook.restoreSession]);
+
+  const handleLiveReviewAction = React.useCallback(async (
+    path: '/api/session/feedback/retry' | '/api/session/resume' | '/api/session/cancel-waiting',
+  ) => {
+    setIsLiveReviewActionPending(true);
+    try {
+      const response = await fetch(path, { method: 'POST' });
+      const body = await response.json().catch(() => ({})) as LiveMessageReviewSnapshot & { error?: string };
+      if (!response.ok) throw new Error(body.error || 'Live review action failed.');
+      applyLiveReviewSnapshot(body);
+    } catch (error) {
+      toast.error('Live review action failed', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setIsLiveReviewActionPending(false);
+    }
+  }, [applyLiveReviewSnapshot]);
 
   const handleFileBrowserSelect = React.useCallback((absolutePath: string, dirPath: string) => {
     const normalizedAbsolutePath = normalizeBrowserPath(absolutePath);
@@ -2213,7 +2293,7 @@ const App: React.FC = () => {
         if (!res.ok) throw new Error('Not in API mode');
         return res.json();
       })
-      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'archive' | 'goal-setup'; goalSetup?: GoalSetupBundle; filePath?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; renderAs?: 'html' | 'markdown'; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; archivePlans?: ArchivedPlan[]; projectRoot?: string; isWSL?: boolean; serverConfig?: { displayName?: string; gitUser?: string }; recentMessages?: PickerMessage[]; agentTerminal?: AgentTerminalCapability }) => {
+      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'archive' | 'goal-setup'; goalSetup?: GoalSetupBundle; filePath?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; renderAs?: 'html' | 'markdown'; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; archivePlans?: ArchivedPlan[]; projectRoot?: string; isWSL?: boolean; serverConfig?: { displayName?: string; gitUser?: string }; recentMessages?: PickerMessage[]; selectedMessageId?: string; agentTerminal?: AgentTerminalCapability; liveMessageReview?: boolean }) => {
         // Initialize config store with server-provided values (config file > cookie > default)
         configStore.init(data.serverConfig);
         // Session-level force-markdown preference (--markdown); threaded into folder/linked
@@ -2254,6 +2334,7 @@ const App: React.FC = () => {
           }
         }
         setIsApiMode(true);
+        setLiveMessageReview(data.liveMessageReview === true);
         if (data.mode === 'annotate' || data.mode === 'annotate-last' || data.mode === 'annotate-folder') {
           setAnnotateMode(true);
           setGate(data.gate ?? false);
@@ -2268,7 +2349,15 @@ const App: React.FC = () => {
           messageStateCacheRef.current = new Map();
           setCachedMessageAnnotationCounts(new Map());
           setRecentMessages(data.recentMessages);
-          setSelectedMessageId(data.recentMessages[0].messageId);
+          // Live Ex sessions provide their canonical selection in /api/plan.
+          // This makes the first SSE snapshot after an automatic reload a
+          // no-op instead of immediately triggering another reload.
+          const initialSelectedMessageId = data.liveMessageReview === true &&
+            typeof data.selectedMessageId === 'string' &&
+            data.recentMessages.some((message) => message.messageId === data.selectedMessageId)
+            ? data.selectedMessageId
+            : data.recentMessages[0].messageId;
+          setSelectedMessageId(initialSelectedMessageId);
         } else {
           messageStateCacheRef.current = new Map();
           setCachedMessageAnnotationCounts(new Map());
@@ -2329,6 +2418,28 @@ const App: React.FC = () => {
       })
       .finally(() => setIsLoading(false));
   }, [isLoadingShared, isSharedSession]);
+
+  // Ex-Plannotator's server emits complete snapshots on this stream, including
+  // immediately after connection. This is intentionally capability-gated so
+  // official hosts neither request the route nor change their submit flow.
+  useEffect(() => {
+    if (!liveMessageReview || !isApiMode || annotateSource !== 'message') return;
+
+    const source = new EventSource('/api/session/events');
+    source.onmessage = (event) => {
+      try {
+        applyLiveReviewSnapshot(JSON.parse(event.data) as LiveMessageReviewSnapshot);
+      } catch {
+        // A reconnect will receive a full snapshot; keep the current review UI
+        // usable if an intermediary produced malformed event data.
+      }
+    };
+    source.onerror = () => {
+      // EventSource reconnects by itself. Do not replace live review state with
+      // an error state because delivery failures belong to the server snapshot.
+    };
+    return () => source.close();
+  }, [annotateSource, applyLiveReviewSnapshot, isApiMode, liveMessageReview]);
 
   useEffect(() => {
     if (!aiSessionEnabled || !isApiMode || isSharedSession) {
@@ -2710,6 +2821,10 @@ const App: React.FC = () => {
   // Annotate mode handler — sends feedback to the running terminal agent when
   // available, otherwise through the original server feedback channel.
   const handleAnnotateFeedback = async () => {
+    if (liveMessageReview && liveReviewRoundStatus !== 'open') {
+      toast('Feedback is already pending', { description: 'Wait for the agent response or return to review first.' });
+      return;
+    }
     setIsSubmitting(true);
     try {
       snapshotActiveEditableDocument();
@@ -2758,11 +2873,27 @@ const App: React.FC = () => {
           ...(messageMultiSelectMode && annotatedMessageIds.length > 1 ? { feedbackScope: 'messages' } : {}),
         }),
       });
-      if (!res.ok) throw new Error('Failed to send feedback');
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error || 'Failed to send feedback');
+      }
+      if (liveMessageReview) {
+        // Ex-Plannotator moves into its retryable waiting state after delivery.
+        // Keep local message state intact: an SSE snapshot will select a fresh
+        // response when it arrives without dropping drafts for older messages.
+        dismissDraft();
+        setIsSubmitting(false);
+        return;
+      }
       dismissDraft();
       setSubmitted('denied'); // reuse 'denied' state for "feedback sent" overlay
-    } catch {
+    } catch (error) {
       setIsSubmitting(false);
+      if (liveMessageReview) {
+        toast.error('Feedback delivery failed', {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
       scheduleDraftSaveAfterSubmitFailure();
     }
   };
@@ -3816,6 +3947,7 @@ const App: React.FC = () => {
     <ThemeProvider defaultTheme="dark">
       <TooltipProvider delayDuration={900} skipDelayDuration={200} disableHoverableContent>
       <div data-print-region="root" className="h-screen flex flex-col bg-background overflow-hidden">
+        <div inert={liveReviewLockActive ? true : undefined} aria-busy={liveReviewLockActive}>
         <AppHeader
           htmlSurface={isHtmlSurface}
           htmlToolsHidden={htmlToolsHidden}
@@ -3883,6 +4015,7 @@ const App: React.FC = () => {
           bearConfigured={getBearSettings().enabled}
           octarineConfigured={isOctarineConfigured()}
         />
+        </div>
 
         {/* Linked document error banner */}
         {linkedDocHook.error && (
@@ -3942,10 +4075,70 @@ const App: React.FC = () => {
             Keep this window open while it runs. Close Plannotator when you're done.
           </div>
         )}
+        {liveMessageReview && (
+          <div className={`border-b px-4 py-2 text-xs flex items-center gap-3 flex-shrink-0 ${
+            liveReviewRoundStatus === 'delivery_failed'
+              ? 'border-destructive/25 bg-destructive/10 text-destructive'
+              : liveReviewRoundStatus === 'agent_stopped'
+                ? 'border-warning/25 bg-warning/10 text-warning-foreground'
+                : 'border-primary/20 bg-primary/5 text-muted-foreground'
+          }`}>
+            {isSubmitting || liveReviewRoundStatus === 'submitting' ? (
+              <><span className="font-medium text-foreground">Sending feedback…</span><span>Delivering it to the agent.</span></>
+            ) : liveReviewRoundStatus === 'waiting' ? (
+              <><span className="font-medium text-foreground">Feedback sent — waiting for agent response.</span><span>This review is locked and reloads automatically when the response arrives.</span></>
+            ) : liveReviewRoundStatus === 'agent_stopped' ? (
+              <><span className="font-medium">Agent stopped while feedback is pending.</span>{liveReviewDeliveryError && <span>{liveReviewDeliveryError}</span>}</>
+            ) : liveReviewRoundStatus === 'delivery_failed' ? (
+              <><span className="font-medium">Feedback delivery failed.</span><span>{liveReviewDeliveryError || 'The agent did not receive the feedback.'}</span></>
+            ) : (
+              <span className="font-medium text-foreground">Ready to review live agent responses.</span>
+            )}
+            {(liveReviewRoundStatus === 'waiting' || liveReviewRoundStatus === 'agent_stopped' || liveReviewRoundStatus === 'delivery_failed') && (
+              <div className="ml-auto flex items-center gap-2 shrink-0">
+                {liveReviewRoundStatus === 'delivery_failed' && (
+                  <button
+                    type="button"
+                    onClick={() => { void handleLiveReviewAction('/api/session/feedback/retry'); }}
+                    disabled={isLiveReviewActionPending}
+                    className="rounded border border-current/30 px-2 py-1 font-medium hover:bg-background/40 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Retry
+                  </button>
+                )}
+                {liveReviewRoundStatus === 'agent_stopped' && (
+                  <button
+                    type="button"
+                    onClick={() => { void handleLiveReviewAction('/api/session/resume'); }}
+                    disabled={isLiveReviewActionPending}
+                    className="rounded border border-current/30 px-2 py-1 font-medium hover:bg-background/40 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Resume
+                  </button>
+                )}
+                {(liveReviewRoundStatus === 'waiting' || liveReviewRoundStatus === 'agent_stopped') && (
+                  <button
+                    type="button"
+                    onClick={() => { void handleLiveReviewAction('/api/session/cancel-waiting'); }}
+                    disabled={isLiveReviewActionPending}
+                    className="rounded border border-current/30 px-2 py-1 font-medium hover:bg-background/40 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Return to review
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Main Content */}
         <ScrollViewportProvider viewport={scrollViewport}>
-        <div data-print-region="content" className={`flex-1 flex overflow-hidden relative z-0 ${isResizing ? 'select-none' : ''}`}>
+        <div
+          data-print-region="content"
+          className={`flex-1 flex overflow-hidden relative z-0 ${isResizing ? 'select-none' : ''}`}
+          aria-busy={liveReviewLockActive}
+          inert={liveReviewLockActive ? true : undefined}
+        >
           {/* Tater sprites — inside content wrapper so z-0 stacking context applies */}
           {taterMode && <TaterSpriteRunning />}
           {shouldRenderAgentTerminal && agentTerminalCapability && (

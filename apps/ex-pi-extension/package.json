@@ -31,7 +31,7 @@
     "ex-plannotator.html"
   ],
   "scripts": {
-    "build": "bun run --cwd ../ex-review build && cp ../ex-review/dist/index.html ex-plannotator.html",
+    "build": "cd ../hook && bunx vite build && cp dist/index.html ../ex-pi-extension/ex-plannotator.html",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "prepublishOnly": "cd ../.. && bun run build:ex-pi"
   },

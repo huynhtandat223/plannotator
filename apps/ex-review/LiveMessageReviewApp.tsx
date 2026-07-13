@@ -8,11 +8,16 @@ import { extractFrontmatter, parseMarkdownToBlocks } from "@plannotator/ui/utils
 import type { Annotation } from "@plannotator/ui/types";
 import { LiveMessagesBrowser, type LiveMessage } from "./LiveMessagesBrowser";
 
+type ReviewRoundStatus = "open" | "submitting" | "delivery_failed" | "waiting" | "agent_stopped";
+
 type SessionResponse = {
 	messages: LiveMessage[];
 	selectedMessageId: string | null;
 	unreadMessageIds: string[];
 	draftsByMessageId: Record<string, Annotation[]>;
+	sentAnnotationsByMessageId: Record<string, Annotation[]>;
+	reviewRoundStatus: ReviewRoundStatus;
+	deliveryError: string | null;
 };
 
 async function putSessionState(path: string, body: unknown): Promise<void> {
@@ -24,11 +29,22 @@ async function putSessionState(path: string, body: unknown): Promise<void> {
 	if (!response.ok) throw new Error(`Session update failed (${response.status})`);
 }
 
+async function postSessionAction(path: string): Promise<void> {
+	const response = await fetch(path, { method: "POST" });
+	if (!response.ok) {
+		const result = await response.json().catch(() => null) as { error?: unknown } | null;
+		throw new Error(typeof result?.error === "string" ? result.error : `Session action failed (${response.status})`);
+	}
+}
+
 export function LiveMessageReviewApp() {
 	const [messages, setMessages] = useState<LiveMessage[]>([]);
 	const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
 	const [unreadMessageIds, setUnreadMessageIds] = useState<Set<string>>(new Set());
 	const [draftsByMessageId, setDraftsByMessageId] = useState<Record<string, Annotation[]>>({});
+	const [sentAnnotationsByMessageId, setSentAnnotationsByMessageId] = useState<Record<string, Annotation[]>>({});
+	const [reviewRoundStatus, setReviewRoundStatus] = useState<ReviewRoundStatus>("open");
+	const [deliveryError, setDeliveryError] = useState<string | null>(null);
 	const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
 	const [viewport, setViewport] = useState<HTMLElement | null>(null);
 	const [loadingError, setLoadingError] = useState<string | null>(null);
@@ -39,6 +55,9 @@ export function LiveMessageReviewApp() {
 		setSelectedMessageId(session.selectedMessageId);
 		setUnreadMessageIds(new Set(session.unreadMessageIds));
 		setDraftsByMessageId(session.draftsByMessageId);
+		setSentAnnotationsByMessageId(session.sentAnnotationsByMessageId);
+		setReviewRoundStatus(session.reviewRoundStatus);
+		setDeliveryError(session.deliveryError);
 	}
 
 	function queueMutation(mutation: () => Promise<void>) {
@@ -90,27 +109,37 @@ export function LiveMessageReviewApp() {
 	}, []);
 
 	const selectedMessage = messages.find((message) => message.messageId === selectedMessageId) ?? null;
-	const annotations = selectedMessageId ? draftsByMessageId[selectedMessageId] ?? [] : [];
+	const draftAnnotations = selectedMessageId ? draftsByMessageId[selectedMessageId] ?? [] : [];
+	const sentAnnotations = selectedMessageId ? sentAnnotationsByMessageId[selectedMessageId] ?? [] : [];
+	const annotations = [...sentAnnotations, ...draftAnnotations];
+	const inputLocked = reviewRoundStatus !== "open";
 	const blocks = useMemo(() => parseMarkdownToBlocks(selectedMessage?.text ?? ""), [selectedMessage?.text]);
 	const frontmatter = useMemo(
 		() => extractFrontmatter(selectedMessage?.text ?? "").frontmatter,
 		[selectedMessage?.text],
 	);
 	const annotationCounts = useMemo(
-		() => new Map(Object.entries(draftsByMessageId).map(([messageId, drafts]) => [messageId, drafts.length])),
+		() => new Map(messages.map((message) => [
+			message.messageId,
+			(draftsByMessageId[message.messageId]?.length ?? 0) + (sentAnnotationsByMessageId[message.messageId]?.length ?? 0),
+		])),
+		[draftsByMessageId, messages, sentAnnotationsByMessageId],
+	);
+	const draftCount = useMemo(
+		() => Object.values(draftsByMessageId).reduce((total, drafts) => total + drafts.length, 0),
 		[draftsByMessageId],
 	);
 
 	function updateDrafts(updater: (current: Annotation[]) => Annotation[]) {
-		if (!selectedMessageId) return;
+		if (!selectedMessageId || inputLocked) return;
 		const messageId = selectedMessageId;
 		const currentAnnotations = draftsByMessageId[messageId] ?? [];
-		const annotations = updater(currentAnnotations);
-		queueMutation(() => putSessionState("/api/session/drafts", { messageId, annotations }));
+		const nextAnnotations = updater(currentAnnotations);
+		queueMutation(() => putSessionState("/api/session/drafts", { messageId, annotations: nextAnnotations }));
 		setDraftsByMessageId((current) => {
 			const next = { ...current };
-			if (annotations.length === 0) delete next[messageId];
-			else next[messageId] = annotations;
+			if (nextAnnotations.length === 0) delete next[messageId];
+			else next[messageId] = nextAnnotations;
 			return next;
 		});
 	}
@@ -124,6 +153,21 @@ export function LiveMessageReviewApp() {
 		});
 		setSelectedAnnotationId(null);
 		queueMutation(() => putSessionState("/api/session/selection", { messageId }));
+	}
+
+	function submitFeedback() {
+		if (inputLocked || draftCount === 0) return;
+		queueMutation(async () => {
+			await postSessionAction("/api/session/feedback");
+			setLoadingError(null);
+		});
+	}
+
+	function runAction(path: string) {
+		queueMutation(async () => {
+			await postSessionAction(path);
+			setLoadingError(null);
+		});
 	}
 
 	return (
@@ -153,6 +197,27 @@ export function LiveMessageReviewApp() {
 									{loadingError}
 								</div>
 							)}
+							{reviewRoundStatus === "waiting" && (
+								<div className="mx-auto mb-4 flex max-w-3xl items-center gap-2 rounded-lg border border-primary/30 bg-primary/10 p-3 text-sm text-primary">
+									<span className="h-2 w-2 animate-pulse rounded-full bg-primary" aria-hidden />
+									Waiting for agent. Sent annotations are locked until its next completed response.
+								</div>
+							)}
+							{reviewRoundStatus === "delivery_failed" && (
+								<div className="mx-auto mb-4 rounded-lg border border-destructive/40 p-3 text-sm text-destructive">
+									Feedback was not delivered{deliveryError ? `: ${deliveryError}` : ""}. Retry safely; Pi did not accept this batch.
+								</div>
+							)}
+							{reviewRoundStatus === "agent_stopped" && (
+								<div className="mx-auto mb-4 rounded-lg border border-primary/30 bg-primary/10 p-3 text-sm text-primary">
+									Pi accepted the feedback, but the agent stopped before responding. Resume or cancel waiting; do not resend the batch.
+								</div>
+							)}
+							{reviewRoundStatus === "submitting" && (
+								<div className="mx-auto mb-4 max-w-3xl rounded-lg border border-primary/30 bg-primary/10 p-3 text-sm text-primary">
+									Sending feedback…
+								</div>
+							)}
 							{selectedMessage ? (
 								<Viewer
 									key={selectedMessage.messageId}
@@ -171,30 +236,74 @@ export function LiveMessageReviewApp() {
 									disableCodePathValidation
 									maxWidth={900}
 									copyLabel="Copy response"
+									readOnly={inputLocked}
 								/>
 							) : (
 								<div className="py-20 text-center text-sm text-muted-foreground">Loading responses…</div>
 							)}
 						</main>
 
-						<AnnotationPanel
-							isOpen
-							annotations={annotations}
-							blocks={blocks}
-							onSelect={setSelectedAnnotationId}
-							onDelete={(id) => {
-								updateDrafts((current) => current.filter((annotation) => annotation.id !== id));
-								if (selectedAnnotationId === id) setSelectedAnnotationId(null);
-							}}
-							onEdit={(id, updates) => {
-								updateDrafts((current) => current.map((annotation) => (
-									annotation.id === id ? { ...annotation, ...updates } : annotation
-								)));
-							}}
-							selectedId={selectedAnnotationId}
-							sharingEnabled={false}
-							width={320}
-						/>
+						<aside className="flex w-80 shrink-0 flex-col border-l border-border/50 bg-card">
+							<div className="space-y-2 border-b border-border/50 p-3">
+								{reviewRoundStatus === "delivery_failed" ? (
+									<button
+										type="button"
+										onClick={() => runAction("/api/session/feedback/retry")}
+										className="w-full rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
+									>
+										Retry feedback
+									</button>
+								) : (
+									<button
+										type="button"
+										onClick={submitFeedback}
+										disabled={inputLocked || draftCount === 0}
+										className="w-full rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-45"
+									>
+										{reviewRoundStatus === "submitting" ? "Sending feedback…" : `Send feedback${draftCount ? ` (${draftCount})` : ""}`}
+									</button>
+								)}
+								{reviewRoundStatus === "agent_stopped" && (
+									<button type="button" onClick={() => runAction("/api/session/resume")} className="w-full rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90">
+										Resume
+									</button>
+								)}
+								{(reviewRoundStatus === "waiting" || reviewRoundStatus === "agent_stopped") && (
+									<button type="button" onClick={() => runAction("/api/session/cancel-waiting")} className="w-full rounded-md border border-border px-3 py-2 text-sm font-medium transition-colors hover:bg-muted">
+										Cancel waiting
+									</button>
+								)}
+								<button type="button" onClick={() => runAction("/api/session/close")} className="w-full rounded-md border border-border px-3 py-2 text-sm font-medium transition-colors hover:bg-muted">
+									Close
+								</button>
+								<p className="text-[10px] leading-snug text-muted-foreground">
+									{inputLocked
+										? "Navigation and sent annotations stay available while this Review Round waits."
+										: "Sends every draft annotation across all assistant responses in one batch."}
+								</p>
+							</div>
+							<AnnotationPanel
+								isOpen
+								annotations={annotations}
+								blocks={blocks}
+								onSelect={setSelectedAnnotationId}
+								onDelete={(id) => {
+									if (sentAnnotations.some((annotation) => annotation.id === id)) return;
+									updateDrafts((current) => current.filter((annotation) => annotation.id !== id));
+									if (selectedAnnotationId === id) setSelectedAnnotationId(null);
+								}}
+								onEdit={(id, updates) => {
+									if (sentAnnotations.some((annotation) => annotation.id === id)) return;
+									updateDrafts((current) => current.map((annotation) => (
+										annotation.id === id ? { ...annotation, ...updates } : annotation
+									)));
+								}}
+								selectedId={selectedAnnotationId}
+								sharingEnabled={false}
+								readOnly={inputLocked}
+								width="100%"
+							/>
+						</aside>
 					</div>
 				</ScrollViewportProvider>
 			</TooltipProvider>

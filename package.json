@@ -23,7 +23,6 @@
     "dev:marketing": "bun run --cwd apps/marketing dev",
     "dev:review": "bun run --cwd apps/review dev",
     "build:hook": "bun run --cwd apps/hook build",
-    "build:ex-review": "bun run --cwd apps/ex-review build",
     "build:ex-pi": "bun run --cwd apps/ex-pi-extension build",
     "build:portal": "bun run --cwd apps/portal build",
     "build:marketing": "bun run --cwd apps/marketing build",

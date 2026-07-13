@@ -8,10 +8,12 @@ function fakePi() {
 	const commands: Array<{ name: string; options: { handler: (args: string, ctx: never) => Promise<void> } }> = [];
 	const events: string[] = [];
 	const handlers = new Map<string, (...args: never[]) => unknown>();
+	const sentUserMessages: string[] = [];
 	return {
 		commands,
 		events,
 		handlers,
+		sentUserMessages,
 		api: {
 			registerCommand(name: string, options: { handler: (args: string, ctx: never) => Promise<void> }) {
 				commands.push({ name, options });
@@ -19,6 +21,9 @@ function fakePi() {
 			registerFlag() {},
 			registerShortcut() {},
 			registerTool() {},
+			sendUserMessage(content: string) {
+				sentUserMessages.push(content);
+			},
 			on(name: string, handler: (...args: never[]) => unknown) {
 				events.push(name);
 				handlers.set(name, handler);
@@ -47,6 +52,7 @@ describe("Ex-Plannotator package surface", () => {
 			port: 1234,
 			url: "http://127.0.0.1:1234",
 			reconcile() {},
+			setFeedbackDelivery() {},
 			stop() {},
 		};
 		const pi = fakePi();
@@ -64,6 +70,7 @@ describe("Ex-Plannotator package surface", () => {
 					{ id: "assistant", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Review me" }] } },
 					{ id: "user", type: "message", message: { role: "user", content: [{ type: "text", text: "Question" }] } },
 				],
+				getSessionId: () => "test-session",
 			},
 			ui: { notify: (message: string) => notices.push(message) },
 		};
@@ -72,6 +79,9 @@ describe("Ex-Plannotator package surface", () => {
 
 		expect(opened).toEqual([{ messages: [{ messageId: "assistant", text: "Review me" }] }]);
 		expect(notices[0]).toContain("Ex-Plannotator opened");
+
+		// Verify delivery callback was wired
+		expect(pi.sentUserMessages).toEqual([]);
 	});
 
 	test("reconciles only finalized assistant events against stable active-branch identities", async () => {
@@ -85,6 +95,7 @@ describe("Ex-Plannotator package surface", () => {
 			reconcile: (messages, activeBranchMessageIds) => {
 				reconciliations.push({ messages, activeBranchMessageIds });
 			},
+			setFeedbackDelivery() {},
 			stop() {},
 		};
 		const pi = fakePi();
@@ -94,7 +105,7 @@ describe("Ex-Plannotator package surface", () => {
 		];
 		const context = {
 			hasUI: true,
-			sessionManager: { getBranch: () => branch },
+			sessionManager: { getBranch: () => branch, getSessionId: () => "test-session" },
 			ui: { notify() {} },
 		};
 		await pi.commands[0].options.handler("", context as never);
@@ -150,5 +161,218 @@ describe("Ex-Plannotator package surface", () => {
 		expect(exPackage.files).toContain("ex-plannotator.html");
 		expect(officialPackage.files).not.toContain("ex-plannotator.html");
 		expect(exPackage.pi.extensions).toEqual(["./"]);
+	});
+
+	test("wires and invokes the feedback delivery callback with session identity check", async () => {
+		const deliveryCallbacks: Array<(batch: unknown) => Promise<void>> = [];
+		const server: LiveMessageReviewServer = {
+			port: 1234,
+			url: "http://127.0.0.1:1234",
+			reconcile() {},
+			setFeedbackDelivery(callback) {
+				deliveryCallbacks.push(callback as (batch: unknown) => Promise<void>);
+			},
+			stop() {},
+		};
+		const pi = fakePi();
+		exPlannotator(pi.api as never, {
+			startBrowser: async () => server,
+		});
+
+		const context = {
+			hasUI: true,
+			sessionManager: {
+				getBranch: () => [
+					{ id: "m1", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Review me" }] } },
+				],
+				getSessionId: () => "test-session",
+			},
+			ui: { notify() {} },
+		};
+
+		await pi.commands[0].options.handler("", context as never);
+		expect(deliveryCallbacks).toHaveLength(1);
+
+		// Simulate a message_end to keep currentPiSessionId current
+		const onMessageEnd = pi.handlers.get("message_end")!;
+		onMessageEnd(
+			{ message: { role: "assistant", content: [{ type: "text", text: "New" }] } } as never,
+			context as never,
+		);
+
+		// Deliver feedback
+		const batch = {
+			batchId: "batch-1",
+			messages: [{
+				messageId: "m1",
+				messageText: "Review me",
+				annotations: [{ id: "a1", type: "COMMENT", originalText: "Review me", text: "Fix this part" }],
+			}],
+		};
+		await deliveryCallbacks[0](batch);
+
+		// Verify sendUserMessage was called with formatted batch
+		expect(pi.sentUserMessages).toHaveLength(1);
+		expect(pi.sentUserMessages[0]).toContain("batch-1");
+		expect(pi.sentUserMessages[0]).toContain("m1");
+		expect(pi.sentUserMessages[0]).toContain("Fix this part");
+		expect(pi.sentUserMessages[0]).toContain("Please address the annotation feedback above.");
+	});
+
+	test("delivery callback rejects after a session switch before message_end", async () => {
+		const deliveryCallbacks: Array<(batch: unknown) => Promise<void>> = [];
+		const server: LiveMessageReviewServer = {
+			port: 1234,
+			url: "http://127.0.0.1:1234",
+			reconcile() {},
+			setFeedbackDelivery(callback) {
+				deliveryCallbacks.push(callback as (batch: unknown) => Promise<void>);
+			},
+			stop() {},
+		};
+		const pi = fakePi();
+		exPlannotator(pi.api as never, {
+			startBrowser: async () => server,
+		});
+
+		const contextA = {
+			hasUI: true,
+			sessionManager: {
+				getBranch: () => [{ id: "m1", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Hi" }] } }],
+				getSessionId: () => "session-a",
+			},
+			ui: { notify() {} },
+		};
+
+		await pi.commands[0].options.handler("", contextA as never);
+		expect(deliveryCallbacks).toHaveLength(1);
+
+		// Switch sessions without a message_end event from the new session.
+		const contextB = {
+			hasUI: true,
+			sessionManager: {
+				getBranch: () => [{ id: "m2", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Bye" }] } }],
+				getSessionId: () => "session-b",
+			},
+			ui: { notify() {} },
+		};
+		pi.handlers.get("session_start")!({} as never, contextB as never);
+
+		// Delivery must fail because the active session is now session-b, not session-a.
+		const batch = {
+			batchId: "batch-1",
+			messages: [{
+				messageId: "m1",
+				messageText: "Hi",
+				annotations: [{ id: "a1", type: "COMMENT", originalText: "Hi", text: "Edit" }],
+			}],
+		};
+		await expect(deliveryCallbacks[0](batch)).rejects.toThrow("Pi conversation has changed");
+		expect(pi.sentUserMessages).toHaveLength(0);
+	});
+
+	test("forwards stopped-agent recovery to Resume without re-delivering feedback", async () => {
+		const resumeCallbacks: Array<() => Promise<void>> = [];
+		const events: string[] = [];
+		const server: LiveMessageReviewServer = {
+			port: 1234,
+			url: "http://127.0.0.1:1234",
+			reconcile() {},
+			setFeedbackDelivery() {},
+			setResumeAgent(callback) { resumeCallbacks.push(callback); },
+			setStopHandler() {},
+			markAgentStarted() { events.push("started"); },
+			markAgentStopped() { events.push("stopped"); },
+			stop() {},
+		};
+		const pi = fakePi();
+		exPlannotator(pi.api as never, { startBrowser: async () => server });
+		const context = {
+			hasUI: true,
+			sessionManager: {
+				getBranch: () => [{ id: "m1", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Hi" }] } }],
+				getSessionId: () => "session-a",
+			},
+			ui: { notify() {} },
+		};
+
+		await pi.commands[0].options.handler("", context as never);
+		pi.handlers.get("agent_start")!({} as never, context as never);
+		pi.handlers.get("agent_end")!({} as never, context as never);
+		await resumeCallbacks[0]();
+
+		expect(events).toEqual(["started", "stopped"]);
+		expect(pi.sentUserMessages).toEqual(["Continue addressing the previously accepted annotation feedback."]);
+	});
+
+	test("session shutdown and browser close clear the active server without re-stopping it", async () => {
+		let stopped = 0;
+		let closeHandler: (() => void) | undefined;
+		const server: LiveMessageReviewServer = {
+			port: 1234,
+			url: "http://127.0.0.1:1234",
+			reconcile() {},
+			setFeedbackDelivery() {},
+			setResumeAgent() {},
+			setStopHandler(handler) { closeHandler = handler; },
+			markAgentStarted() {},
+			markAgentStopped() {},
+			stop() { stopped += 1; },
+		};
+		const pi = fakePi();
+		exPlannotator(pi.api as never, { startBrowser: async () => server });
+		const context = {
+			hasUI: true,
+			sessionManager: {
+				getBranch: () => [{ id: "m1", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Hi" }] } }],
+				getSessionId: () => "session-a",
+			},
+			ui: { notify() {} },
+		};
+
+		await pi.commands[0].options.handler("", context as never);
+		closeHandler?.();
+		pi.handlers.get("session_shutdown")!({} as never, context as never);
+		expect(stopped).toBe(0);
+	});
+
+	test("session_shutdown clears session identity tracking", async () => {
+		const deliveryCallbacks: Array<(batch: unknown) => Promise<void>> = [];
+		const server: LiveMessageReviewServer = {
+			port: 1234,
+			url: "http://127.0.0.1:1234",
+			reconcile() {},
+			setFeedbackDelivery(callback) {
+				deliveryCallbacks.push(callback as (batch: unknown) => Promise<void>);
+			},
+			stop() {},
+		};
+		const pi = fakePi();
+		exPlannotator(pi.api as never, {
+			startBrowser: async () => server,
+		});
+
+		const context = {
+			hasUI: true,
+			sessionManager: {
+				getBranch: () => [{ id: "m1", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Hi" }] } }],
+				getSessionId: () => "session-a",
+			},
+			ui: { notify() {} },
+		};
+
+		await pi.commands[0].options.handler("", context as never);
+
+		// Fire session_shutdown
+		const onShutdown = pi.handlers.get("session_shutdown")!;
+		onShutdown({} as never, context as never);
+
+		// Delivery should fail because session was cleared
+		const batch = {
+			batchId: "batch-1",
+			messages: [],
+		};
+		await expect(deliveryCallbacks[0](batch)).rejects.toThrow("Pi conversation has changed");
+		expect(pi.sentUserMessages).toHaveLength(0);
 	});
 });
