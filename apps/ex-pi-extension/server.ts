@@ -252,7 +252,7 @@ export async function startLiveMessageReviewServer(options: {
 			return;
 		}
 
-		if (request.method === "POST" && url.pathname === "/api/session/close") {
+		if (request.method === "POST" && (url.pathname === "/api/session/close" || url.pathname === "/api/exit")) {
 			writeJson(response, 200, { closed: true });
 			queueMicrotask(stop);
 			return;
