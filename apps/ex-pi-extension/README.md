@@ -28,3 +28,5 @@ bun run build:package # Both, sequentially
 `prepublishOnly` runs both independent build entries before packaging. The package explicitly discovers `index.ts` for Last and `plan-extension.ts` for Plan; the Plan build only writes `ex-plannotator-plan.html` and does not route through Official Plannotator assets.
 
 Then load or install `apps/ex-pi-extension` as a Pi package. Official `@plannotator/pi-extension` can remain installed.
+
+On WSL, Ex-Plannotator binds to `0.0.0.0` and opens the browser through the current WSL IPv4 address so Windows can reach the server. Set `EX_PLANNOTATOR_BIND_HOST` to override the listening interface or `EX_PLANNOTATOR_HOST` to override the hostname/IP placed in the browser URL.

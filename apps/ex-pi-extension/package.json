@@ -28,6 +28,7 @@
     "browser.ts",
     "server.ts",
     "session.ts",
+    "network.ts",
     "README.md",
     "ex-plannotator.html",
     "plan-extension.ts",

@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { LiveAssistantMessage } from "./session.js";
 import type { Annotation } from "@plannotator/ui/types";
 import type { PlanFile, PlanFileSnapshot } from "./plan-folder.js";
+import { getExPlannotatorBindHost, getExPlannotatorUrl } from "./network.js";
 import {
 	PlanReviewSession,
 	type PlanFeedbackBatch,
@@ -164,7 +165,7 @@ export async function startPlanReviewServer(options: {
 
 	await new Promise<void>((resolve, reject) => {
 		server.once("error", reject);
-		server.listen(0, "127.0.0.1", () => { server.removeListener("error", reject); resolve(); });
+		server.listen(0, getExPlannotatorBindHost(), () => { server.removeListener("error", reject); resolve(); });
 	});
 	const address = server.address();
 	if (!address || typeof address === "string") {
@@ -184,7 +185,7 @@ export async function startPlanReviewServer(options: {
 	server.on("error", stop);
 	return {
 		port: address.port,
-		url: `http://127.0.0.1:${address.port}`,
+		url: getExPlannotatorUrl(address.port),
 		setFeedbackDelivery(delivery) { if (!stopped) deliverFeedback = delivery; },
 		setResumeAgent(resume) { if (!stopped) resumeAgent = resume; },
 		setStopHandler(handler) { if (!stopped) stopHandler = handler; },

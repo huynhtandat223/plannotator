@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { getExPlannotatorBindHost, getExPlannotatorUrl } from "./network.js";
 import {
 	LiveMessageReviewSession,
 	type LiveAssistantMessage,
@@ -263,7 +264,7 @@ export async function startLiveMessageReviewServer(options: {
 
 	await new Promise<void>((resolve, reject) => {
 		server.once("error", reject);
-		server.listen(0, "0.0.0.0", () => {
+		server.listen(0, getExPlannotatorBindHost(), () => {
 			server.removeListener("error", reject);
 			resolve();
 		});
@@ -294,7 +295,7 @@ export async function startLiveMessageReviewServer(options: {
 
 	return {
 		port,
-		url: `http://127.0.0.1:${port}`,
+		url: getExPlannotatorUrl(port),
 		reconcile(messages, activeBranchMessageIds) {
 			if (!stopped) session.reconcile(messages, activeBranchMessageIds);
 		},
