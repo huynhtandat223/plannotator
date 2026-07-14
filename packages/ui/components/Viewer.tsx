@@ -105,7 +105,7 @@ interface ViewerProps {
    * assistant message. Clicking opens the full picker in the left sidebar's
    * Messages tab.
    */
-  messagePickerInfo?: { current: number; total: number; onOpen: () => void };
+  messagePickerInfo?: { current: number; total: number; onOpen: () => void; label?: string };
   // Checkbox toggle props
   onToggleCheckbox?: (blockId: string, checked: boolean) => void;
   checkboxOverrides?: Map<string, boolean>;
@@ -609,11 +609,11 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             <button
               onClick={messagePickerInfo.onOpen}
               className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-md transition-colors"
-              title="Pick a different message to annotate"
+              title={`Pick a different ${messagePickerInfo.label?.toLowerCase() ?? 'message'} to annotate`}
             >
               <MessagesIcon />
               {actionsLabelMode === 'full' && (
-                <span>Message {messagePickerInfo.current} of {messagePickerInfo.total}</span>
+                <span>{messagePickerInfo.label ?? 'Message'} {messagePickerInfo.current} of {messagePickerInfo.total}</span>
               )}
               {actionsLabelMode === 'short' && (
                 <span>{messagePickerInfo.current}/{messagePickerInfo.total}</span>

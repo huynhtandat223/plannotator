@@ -76,6 +76,7 @@ import { isFileBrowserEnabled, getFileBrowserSettings } from '@plannotator/ui/ut
 import { generateId } from '@plannotator/ui/utils/generateId';
 import { SidebarTabs } from '@plannotator/ui/components/sidebar/SidebarTabs';
 import { SidebarContainer } from '@plannotator/ui/components/sidebar/SidebarContainer';
+import { PlanReviewSourcesBrowser, planFileSnapshotKey, type PlanReviewSnapshot, type PlanReviewSelection } from './components/PlanReviewSourcesBrowser';
 import type { ArchivedPlan } from '@plannotator/ui/components/sidebar/ArchiveBrowser';
 import type { PickerMessage } from '@plannotator/ui/components/sidebar/MessagesBrowser';
 import { PlanDiffViewer } from '@plannotator/ui/components/plan-diff/PlanDiffViewer';
@@ -172,6 +173,11 @@ type LiveMessageReviewSnapshot = {
   selectedMessageId: string | null;
   reviewRoundStatus: LiveReviewRoundStatus;
   deliveryError: string | null;
+};
+
+type PlanReviewCapability = {
+  sourceMode: 'mixed';
+  snapshot: PlanReviewSnapshot & { reviewRoundStatus: LiveReviewRoundStatus; deliveryError: string | null };
 };
 
 const liveReviewIsLocked = (status: LiveReviewRoundStatus): boolean =>
@@ -373,9 +379,31 @@ const App: React.FC = () => {
   // This capability is only emitted by Ex-Plannotator. Official annotate-last
   // sessions keep their terminal submit behavior and never open this adapter.
   const [liveMessageReview, setLiveMessageReview] = useState(false);
+  // Opt-in only: Plan Review is served by Ex-Plannotator's mixed-source session.
+  // Last never receives this capability and retains its existing data flow.
+  const [planReview, setPlanReview] = useState<PlanReviewCapability | null>(null);
+  const [planReviewSourcesOpen, setPlanReviewSourcesOpen] = useState(false);
   const [liveReviewRoundStatus, setLiveReviewRoundStatus] = useState<LiveReviewRoundStatus>('open');
   const [liveReviewDeliveryError, setLiveReviewDeliveryError] = useState<string | null>(null);
   const [isLiveReviewActionPending, setIsLiveReviewActionPending] = useState(false);
+  const planReviewSelectedIsHistorical = (() => {
+    if (!planReview?.snapshot.selected) return false;
+    const selected = planReview.snapshot.selected;
+    if (selected.kind === 'file') {
+      return planReview.snapshot.fileSnapshots[selected.path]?.contentHash !== selected.contentHash;
+    }
+    return !planReview.snapshot.messages.some((message) => message.messageId === selected.messageId);
+  })();
+  const planReviewLocked = planReview !== null && planReview.snapshot.reviewRoundStatus !== 'open';
+  const planReviewReadOnly = planReviewLocked || planReviewSelectedIsHistorical;
+  const planReviewSentAnnotationIds = useMemo(() => {
+    if (!planReview?.snapshot.selected) return new Set<string>();
+    const selected = planReview.snapshot.selected;
+    const sent = selected.kind === 'message'
+      ? planReview.snapshot.sentAnnotationsByMessageId[selected.messageId] ?? []
+      : planReview.snapshot.sentAnnotationsByFileSnapshot[planFileSnapshotKey(selected.path, selected.contentHash)] ?? [];
+    return new Set(sent.map((annotation) => annotation.id));
+  }, [planReview]);
   const liveReviewLockActive = liveMessageReview && liveReviewIsLocked(liveReviewRoundStatus);
   const messageStateCacheRef = useRef<Map<string, MessageAnnotationState>>(new Map());
   const [cachedMessageAnnotationCounts, setCachedMessageAnnotationCounts] = useState<Map<string, number>>(new Map());
@@ -1122,6 +1150,22 @@ const App: React.FC = () => {
     }
   }, [applyLiveReviewSnapshot]);
 
+  const handlePlanReviewAction = React.useCallback(async (
+    path: '/api/session/feedback/retry' | '/api/session/resume' | '/api/session/cancel-waiting',
+  ) => {
+    setIsLiveReviewActionPending(true);
+    try {
+      const response = await fetch(path, { method: 'POST' });
+      const snapshot = await response.json().catch(() => null) as PlanReviewCapability['snapshot'] | null;
+      if (!response.ok || !snapshot) throw new Error('Plan Review action failed.');
+      setPlanReview({ sourceMode: 'mixed', snapshot });
+    } catch (error) {
+      toast.error('Plan Review action failed', { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setIsLiveReviewActionPending(false);
+    }
+  }, []);
+
   const handleFileBrowserSelect = React.useCallback((absolutePath: string, dirPath: string) => {
     const normalizedAbsolutePath = normalizeBrowserPath(absolutePath);
     const dirState = fileBrowser.dirs.find(d => d.path === dirPath);
@@ -1325,18 +1369,31 @@ const App: React.FC = () => {
   // Plan diff state — memoize filtered annotation lists to avoid new references per render
   const diffAnnotations = useMemo(() => allAnnotations.filter(a => !!a.diffContext), [allAnnotations]);
   const viewerAnnotations = useMemo(() => allAnnotations.filter(a => !a.diffContext), [allAnnotations]);
-  // Any-annotations flag used by Close/Approve/Send guards. Consolidates the
-  // four-term check that was inlined across the annotate-mode header + keyboard paths.
-  const messageMultiSelectMode = annotateSource === 'message' && recentMessages.length > 1;
+  // Any-annotations flag used by Close/Approve/Send guards. Plan Review is
+  // server-authoritative and its one Send action spans every reviewed source,
+  // so the header count must include every draft rather than only the visible
+  // source (sent annotations remain visible but must not enable Send again).
+  const planReviewDraftCount = useMemo(() => {
+    if (!planReview) return 0;
+    return [
+      ...Object.values(planReview.snapshot.draftsByMessageId),
+      ...Object.values(planReview.snapshot.draftsByFileSnapshot),
+    ].reduce((total, drafts) => total + drafts.length, 0);
+  }, [planReview]);
+  const messageMultiSelectMode = !planReview && annotateSource === 'message' && recentMessages.length > 1;
   const hasAnyAnnotations = useMemo(
-    () => messageMultiSelectMode
-      ? messageFeedbackAnnotationCount > 0 || editorAnnotations.length > 0
-      : allAnnotations.length > 0
-        || codeAnnotations.length > 0
-        || editorAnnotations.length > 0
-        || linkedDocHook.docAnnotationCount > 0
-        || globalAttachments.length > 0,
+    () => planReview
+      ? planReviewDraftCount > 0
+      : messageMultiSelectMode
+        ? messageFeedbackAnnotationCount > 0 || editorAnnotations.length > 0
+        : allAnnotations.length > 0
+          || codeAnnotations.length > 0
+          || editorAnnotations.length > 0
+          || linkedDocHook.docAnnotationCount > 0
+          || globalAttachments.length > 0,
     [
+      planReview,
+      planReviewDraftCount,
       messageMultiSelectMode,
       messageFeedbackAnnotationCount,
       allAnnotations.length,
@@ -1346,13 +1403,15 @@ const App: React.FC = () => {
       globalAttachments.length,
     ],
   );
-  const feedbackAnnotationCount = messageMultiSelectMode
-    ? messageFeedbackAnnotationCount + editorAnnotations.length
-    : allAnnotations.length +
-      codeAnnotations.length +
-      editorAnnotations.length +
-      linkedDocHook.docAnnotationCount +
-      globalAttachments.length;
+  const feedbackAnnotationCount = planReview
+    ? planReviewDraftCount
+    : messageMultiSelectMode
+      ? messageFeedbackAnnotationCount + editorAnnotations.length
+      : allAnnotations.length +
+        codeAnnotations.length +
+        editorAnnotations.length +
+        linkedDocHook.docAnnotationCount +
+        globalAttachments.length;
 
   const buildFullAnnotationsOutput = React.useCallback((): string => {
     if (messageMultiSelectMode) {
@@ -1600,6 +1659,7 @@ const App: React.FC = () => {
     (!linkedDocHook.isActive || (annotateSource === 'folder' && activeEditableDocument?.sourceSave?.enabled)) &&
     !isPlanDiffActive &&
     !isSharedSession &&
+    !planReview &&
     annotateSource !== 'message' &&
     !submitted;
 
@@ -2293,7 +2353,7 @@ const App: React.FC = () => {
         if (!res.ok) throw new Error('Not in API mode');
         return res.json();
       })
-      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'archive' | 'goal-setup'; goalSetup?: GoalSetupBundle; filePath?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; renderAs?: 'html' | 'markdown'; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; archivePlans?: ArchivedPlan[]; projectRoot?: string; isWSL?: boolean; serverConfig?: { displayName?: string; gitUser?: string }; recentMessages?: PickerMessage[]; selectedMessageId?: string; agentTerminal?: AgentTerminalCapability; liveMessageReview?: boolean }) => {
+      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'archive' | 'goal-setup'; goalSetup?: GoalSetupBundle; filePath?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; renderAs?: 'html' | 'markdown'; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; archivePlans?: ArchivedPlan[]; projectRoot?: string; isWSL?: boolean; serverConfig?: { displayName?: string; gitUser?: string }; recentMessages?: PickerMessage[]; selectedMessageId?: string; agentTerminal?: AgentTerminalCapability; liveMessageReview?: boolean; planReview?: PlanReviewCapability }) => {
         // Initialize config store with server-provided values (config file > cookie > default)
         configStore.init(data.serverConfig);
         // Session-level force-markdown preference (--markdown); threaded into folder/linked
@@ -2335,6 +2395,7 @@ const App: React.FC = () => {
         }
         setIsApiMode(true);
         setLiveMessageReview(data.liveMessageReview === true);
+        setPlanReview(data.planReview ?? null);
         if (data.mode === 'annotate' || data.mode === 'annotate-last' || data.mode === 'annotate-folder') {
           setAnnotateMode(true);
           setGate(data.gate ?? false);
@@ -2423,7 +2484,7 @@ const App: React.FC = () => {
   // immediately after connection. This is intentionally capability-gated so
   // official hosts neither request the route nor change their submit flow.
   useEffect(() => {
-    if (!liveMessageReview || !isApiMode || annotateSource !== 'message') return;
+    if (!liveMessageReview || planReview || !isApiMode || annotateSource !== 'message') return;
 
     const source = new EventSource('/api/session/events');
     source.onmessage = (event) => {
@@ -2439,7 +2500,68 @@ const App: React.FC = () => {
       // an error state because delivery failures belong to the server snapshot.
     };
     return () => source.close();
-  }, [annotateSource, applyLiveReviewSnapshot, isApiMode, liveMessageReview]);
+  }, [annotateSource, applyLiveReviewSnapshot, isApiMode, liveMessageReview, planReview]);
+
+  // The mixed Plan session is authoritative: its source snapshots, draft/sent
+  // split and history are never reconstructed from disk by the rich editor.
+  useEffect(() => {
+    if (!planReview || !isApiMode) return;
+    const source = new EventSource('/api/session/events');
+    source.onmessage = (event) => {
+      try {
+        const snapshot = JSON.parse(event.data) as PlanReviewCapability['snapshot'];
+        setPlanReview({ sourceMode: 'mixed', snapshot });
+      } catch { /* EventSource reconnects with a full snapshot. */ }
+    };
+    return () => source.close();
+  }, [isApiMode, planReview?.sourceMode]);
+
+  useEffect(() => {
+    if (!planReview) return;
+    const { snapshot } = planReview;
+    const selected = snapshot.selected;
+    const message = selected?.kind === 'message'
+      ? snapshot.messages.find((item) => item.messageId === selected.messageId) ?? snapshot.sentMessageSnapshots[selected.messageId]
+      : undefined;
+    const file = selected?.kind === 'file'
+      ? snapshot.fileSnapshots[selected.path]?.contentHash === selected.contentHash
+        ? snapshot.fileSnapshots[selected.path]
+        : snapshot.sentFileSnapshots[planFileSnapshotKey(selected.path, selected.contentHash)]
+      : undefined;
+    const markdown = message?.text ?? file?.content;
+    if (markdown === undefined) return;
+    const key = selected?.kind === 'message' ? selected.messageId : `${file!.path}:${file!.contentHash}`;
+    const drafts = selected?.kind === 'message'
+      ? snapshot.draftsByMessageId[selected.messageId] ?? []
+      : snapshot.draftsByFileSnapshot[planFileSnapshotKey(file!.path, file!.contentHash)] ?? [];
+    const sent = selected?.kind === 'message'
+      ? snapshot.sentAnnotationsByMessageId[selected.messageId] ?? []
+      : snapshot.sentAnnotationsByFileSnapshot[planFileSnapshotKey(file!.path, file!.contentHash)] ?? [];
+    setMarkdown(markdown);
+    originalMarkdownRef.current = markdown;
+    setAnnotations([...sent, ...drafts]);
+    setSelectedAnnotationId(null);
+    setSelectedCodeAnnotationId(null);
+    setEditGeneration((generation) => generation + 1);
+    setSourceInfo(selected?.kind === 'file' ? file!.path : 'Assistant response');
+    document.title = selected?.kind === 'file'
+      ? `${file!.path} · Ex-Plannotator Plan`
+      : 'Ex-Plannotator Plan';
+    // key makes the dependency explicit for message text or file hash changes.
+    void key;
+  }, [planReview]);
+
+  const selectPlanReviewSource = useCallback((selection: Exclude<PlanReviewSelection, null> | { kind: 'file'; path: string }) => {
+    if (!planReview) return;
+    setPlanReviewSourcesOpen(false);
+    void fetch('/api/session/selection', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(selection),
+    }).then(async (response) => {
+      if (!response.ok) throw new Error('Could not select Plan Review source');
+      return response.json() as Promise<PlanReviewSnapshot>;
+    }).then((snapshot) => setPlanReview({ sourceMode: 'mixed', snapshot: snapshot as PlanReviewCapability['snapshot'] }))
+      .catch((error) => toast.error('Could not load source', { description: error instanceof Error ? error.message : String(error) }));
+  }, [planReview]);
 
   useEffect(() => {
     if (!aiSessionEnabled || !isApiMode || isSharedSession) {
@@ -2568,6 +2690,9 @@ const App: React.FC = () => {
   // Global paste listener for image attachments
   useEffect(() => {
     const handlePaste = (e: ClipboardEvent) => {
+      // Plan Review has no image transport. Do not intercept image pastes or
+      // open an attachment workflow that cannot be included in its batch.
+      if (planReview) return;
       const items = e.clipboardData?.items;
       if (!items) return;
 
@@ -2588,7 +2713,7 @@ const App: React.FC = () => {
 
     document.addEventListener('paste', handlePaste);
     return () => document.removeEventListener('paste', handlePaste);
-  }, [globalAttachments]);
+  }, [globalAttachments, planReview]);
 
   // Handle paste annotator accept — name comes from ImageAnnotator
   const handlePasteAnnotatorAccept = async (blob: Blob, hasDrawings: boolean, name: string) => {
@@ -2821,6 +2946,24 @@ const App: React.FC = () => {
   // Annotate mode handler — sends feedback to the running terminal agent when
   // available, otherwise through the original server feedback channel.
   const handleAnnotateFeedback = async () => {
+    if (planReview) {
+      if (planReview.snapshot.reviewRoundStatus !== 'open') {
+        toast('Feedback is already pending', { description: 'Wait for the next review round or return to review first.' });
+        return;
+      }
+      setIsSubmitting(true);
+      try {
+        const response = await fetch('/api/session/feedback', { method: 'POST' });
+        const snapshot = await response.json().catch(() => null) as PlanReviewCapability['snapshot'] | null;
+        if (!response.ok || !snapshot) throw new Error('Plan Review feedback could not be delivered');
+        setPlanReview({ sourceMode: 'mixed', snapshot });
+      } catch (error) {
+        toast.error('Feedback delivery failed', { description: error instanceof Error ? error.message : String(error) });
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
     if (liveMessageReview && liveReviewRoundStatus !== 'open') {
       toast('Feedback is already pending', { description: 'Wait for the agent response or return to review first.' });
       return;
@@ -3065,8 +3208,25 @@ const App: React.FC = () => {
     maybeConfirmUnsavedSourceFileEdits,
   ]);
 
+  const savePlanReviewDrafts = useCallback((selection: PlanReviewSelection, next: Annotation[]) => {
+    if (!selection || !planReview || planReviewReadOnly) return;
+    const body = selection.kind === 'message'
+      ? { kind: 'message', messageId: selection.messageId, annotations: next }
+      : { kind: 'file', path: selection.path, contentHash: selection.contentHash, annotations: next };
+    void fetch('/api/session/drafts', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then(async (response) => { if (!response.ok) throw new Error('Could not save Plan Review annotations'); return response.json() as Promise<PlanReviewSnapshot>; })
+      .then((snapshot) => setPlanReview({ sourceMode: 'mixed', snapshot: snapshot as PlanReviewCapability['snapshot'] }))
+      .catch((error) => toast.error('Could not save annotation', { description: error instanceof Error ? error.message : String(error) }));
+  }, [planReview, planReviewReadOnly]);
+
   const handleAddAnnotation = (ann: Annotation) => {
-    setAnnotations(prev => [...prev, ann]);
+    if (planReview?.snapshot.selected) {
+      const selected = planReview.snapshot.selected;
+      const existing = selected.kind === 'message'
+        ? planReview.snapshot.draftsByMessageId[selected.messageId] ?? []
+        : planReview.snapshot.draftsByFileSnapshot[planFileSnapshotKey(selected.path, selected.contentHash)] ?? [];
+      savePlanReviewDrafts(selected, [...existing, ann]);
+    } else setAnnotations(prev => [...prev, ann]);
     setSelectedAnnotationId(ann.id);
     setSelectedCodeAnnotationId(null);
   };
@@ -3135,6 +3295,14 @@ const App: React.FC = () => {
   });
 
   const handleDeleteAnnotation = (id: string) => {
+    if (planReview?.snapshot.selected) {
+      const selected = planReview.snapshot.selected;
+      const drafts = selected.kind === 'message'
+        ? planReview.snapshot.draftsByMessageId[selected.messageId] ?? []
+        : planReview.snapshot.draftsByFileSnapshot[planFileSnapshotKey(selected.path, selected.contentHash)] ?? [];
+      if (drafts.some((annotation) => annotation.id === id)) savePlanReviewDrafts(selected, drafts.filter((annotation) => annotation.id !== id));
+      return;
+    }
     const ann = allAnnotations.find(a => a.id === id);
     // External annotations (live in SSE hook) route to the SSE hook, not local state.
     // Check membership by ID — source alone is insufficient because share-imported
@@ -3154,6 +3322,14 @@ const App: React.FC = () => {
   };
 
   const handleEditAnnotation = (id: string, updates: Partial<Annotation>) => {
+    if (planReview?.snapshot.selected) {
+      const selected = planReview.snapshot.selected;
+      const drafts = selected.kind === 'message'
+        ? planReview.snapshot.draftsByMessageId[selected.messageId] ?? []
+        : planReview.snapshot.draftsByFileSnapshot[planFileSnapshotKey(selected.path, selected.contentHash)] ?? [];
+      if (drafts.some((annotation) => annotation.id === id)) savePlanReviewDrafts(selected, drafts.map((annotation) => annotation.id === id ? { ...annotation, ...updates } : annotation));
+      return;
+    }
     const ann = allAnnotations.find(a => a.id === id);
     if (ann?.source && externalAnnotations.some(e => e.id === id)) {
       updateExternalAnnotation(id, updates);
@@ -4075,68 +4251,41 @@ const App: React.FC = () => {
             Keep this window open while it runs. Close Plannotator when you're done.
           </div>
         )}
-        {liveMessageReview && (
-          <div className={`border-b px-4 py-2 text-xs flex items-center gap-3 flex-shrink-0 ${
-            liveReviewRoundStatus === 'delivery_failed'
+        {(liveMessageReview || planReview) && (() => {
+          const status = planReview?.snapshot.reviewRoundStatus ?? liveReviewRoundStatus;
+          const error = planReview?.snapshot.deliveryError ?? liveReviewDeliveryError;
+          return <div className={`border-b px-4 py-2 text-xs flex items-center gap-3 flex-shrink-0 ${
+            status === 'delivery_failed'
               ? 'border-destructive/25 bg-destructive/10 text-destructive'
-              : liveReviewRoundStatus === 'agent_stopped'
+              : status === 'agent_stopped'
                 ? 'border-warning/25 bg-warning/10 text-warning-foreground'
                 : 'border-primary/20 bg-primary/5 text-muted-foreground'
           }`}>
-            {isSubmitting || liveReviewRoundStatus === 'submitting' ? (
+            {isSubmitting || status === 'submitting' ? (
               <><span className="font-medium text-foreground">Sending feedback…</span><span>Delivering it to the agent.</span></>
-            ) : liveReviewRoundStatus === 'waiting' ? (
-              <><span className="font-medium text-foreground">Feedback sent — waiting for agent response.</span><span>This review is locked and reloads automatically when the response arrives.</span></>
-            ) : liveReviewRoundStatus === 'agent_stopped' ? (
-              <><span className="font-medium">Agent stopped while feedback is pending.</span>{liveReviewDeliveryError && <span>{liveReviewDeliveryError}</span>}</>
-            ) : liveReviewRoundStatus === 'delivery_failed' ? (
-              <><span className="font-medium">Feedback delivery failed.</span><span>{liveReviewDeliveryError || 'The agent did not receive the feedback.'}</span></>
-            ) : (
-              <span className="font-medium text-foreground">Ready to review live agent responses.</span>
-            )}
-            {(liveReviewRoundStatus === 'waiting' || liveReviewRoundStatus === 'agent_stopped' || liveReviewRoundStatus === 'delivery_failed') && (
+            ) : status === 'waiting' ? (
+              <><span className="font-medium text-foreground">Feedback sent — waiting for agent response.</span><span>This review is locked until the next round.</span></>
+            ) : status === 'agent_stopped' ? (
+              <><span className="font-medium">Agent stopped while feedback is pending.</span>{error && <span>{error}</span>}</>
+            ) : status === 'delivery_failed' ? (
+              <><span className="font-medium">Feedback delivery failed.</span><span>{error || 'The agent did not receive the feedback.'}</span></>
+            ) : <span className="font-medium text-foreground">Ready to review {planReview ? 'responses and Plan Files.' : 'live agent responses.'}</span>}
+            {(status === 'waiting' || status === 'agent_stopped' || status === 'delivery_failed') && (
               <div className="ml-auto flex items-center gap-2 shrink-0">
-                {liveReviewRoundStatus === 'delivery_failed' && (
-                  <button
-                    type="button"
-                    onClick={() => { void handleLiveReviewAction('/api/session/feedback/retry'); }}
-                    disabled={isLiveReviewActionPending}
-                    className="rounded border border-current/30 px-2 py-1 font-medium hover:bg-background/40 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Retry
-                  </button>
-                )}
-                {liveReviewRoundStatus === 'agent_stopped' && (
-                  <button
-                    type="button"
-                    onClick={() => { void handleLiveReviewAction('/api/session/resume'); }}
-                    disabled={isLiveReviewActionPending}
-                    className="rounded border border-current/30 px-2 py-1 font-medium hover:bg-background/40 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Resume
-                  </button>
-                )}
-                {(liveReviewRoundStatus === 'waiting' || liveReviewRoundStatus === 'agent_stopped') && (
-                  <button
-                    type="button"
-                    onClick={() => { void handleLiveReviewAction('/api/session/cancel-waiting'); }}
-                    disabled={isLiveReviewActionPending}
-                    className="rounded border border-current/30 px-2 py-1 font-medium hover:bg-background/40 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Return to review
-                  </button>
-                )}
+                {status === 'delivery_failed' && <button type="button" onClick={() => { if (planReview) void handlePlanReviewAction('/api/session/feedback/retry'); else void handleLiveReviewAction('/api/session/feedback/retry'); }} disabled={isLiveReviewActionPending} className="rounded border border-current/30 px-2 py-1 font-medium hover:bg-background/40 disabled:cursor-not-allowed disabled:opacity-50">Retry</button>}
+                {status === 'agent_stopped' && <button type="button" onClick={() => { if (planReview) void handlePlanReviewAction('/api/session/resume'); else void handleLiveReviewAction('/api/session/resume'); }} disabled={isLiveReviewActionPending} className="rounded border border-current/30 px-2 py-1 font-medium hover:bg-background/40 disabled:cursor-not-allowed disabled:opacity-50">Resume</button>}
+                {(status === 'waiting' || status === 'agent_stopped') && <button type="button" onClick={() => { if (planReview) void handlePlanReviewAction('/api/session/cancel-waiting'); else void handleLiveReviewAction('/api/session/cancel-waiting'); }} disabled={isLiveReviewActionPending} className="rounded border border-current/30 px-2 py-1 font-medium hover:bg-background/40 disabled:cursor-not-allowed disabled:opacity-50">Return to review</button>}
               </div>
             )}
-          </div>
-        )}
+          </div>;
+        })()}
 
         {/* Main Content */}
         <ScrollViewportProvider viewport={scrollViewport}>
         <div
           data-print-region="content"
           className={`flex-1 flex overflow-hidden relative z-0 ${isResizing ? 'select-none' : ''}`}
-          aria-busy={liveReviewLockActive}
+          aria-busy={liveReviewLockActive || planReviewLocked}
           inert={liveReviewLockActive ? true : undefined}
         >
           {/* Tater sprites — inside content wrapper so z-0 stacking context applies */}
@@ -4171,8 +4320,9 @@ const App: React.FC = () => {
               )}
             </div>
           )}
+          {planReview && wideModeType === null && <PlanReviewSourcesBrowser snapshot={planReview.snapshot} onSelect={selectPlanReviewSource} width={`var(--toc-w, ${tocResize.width}px)`} mobileOpen={planReviewSourcesOpen} onMobileClose={() => setPlanReviewSourcesOpen(false)} />}
           {/* Left Sidebar: collapsed tab flags (when sidebar is closed) */}
-          {wideModeType === null && !sidebar.isOpen && !goalSetupMode && !isAgentTerminalOpen && (
+          {!planReview && wideModeType === null && !sidebar.isOpen && !goalSetupMode && !isAgentTerminalOpen && (
             <SidebarTabs
               activeTab={sidebar.activeTab}
               onToggleTab={toggleSidebarTab}
@@ -4191,7 +4341,7 @@ const App: React.FC = () => {
           )}
 
           {/* Left Sidebar: open state (TOC or Version Browser) */}
-          {sidebar.isOpen && !goalSetupMode && (
+          {!planReview && sidebar.isOpen && !goalSetupMode && (
             <div className="contents group/sidebar">
               <SidebarContainer
                 activeTab={sidebar.activeTab}
@@ -4568,20 +4718,38 @@ const App: React.FC = () => {
                     }
                     imageBaseDir={imageBaseDir}
                     codePathBaseDir={activeDocBaseDir}
-                    copyLabel={annotateSource === 'message' ? 'Copy message' : annotateSource === 'file' || annotateSource === 'folder' ? 'Copy file' : undefined}
+                    copyLabel={planReview ? (planReview.snapshot.selected?.kind === 'file' ? 'Copy file' : 'Copy response') : annotateSource === 'message' ? 'Copy message' : annotateSource === 'file' || annotateSource === 'folder' ? 'Copy file' : undefined}
+                    readOnly={planReviewReadOnly}
+                    allowImages={!planReview}
                     archiveInfo={archive.currentInfo}
                     sourceInfo={sourceInfo}
                     openInAppPath={annotateMode ? (linkedDocHook.isActive ? (linkedDocHook.filepath ?? null) : sourceFilePath) : null}
                     messagePickerInfo={
-                      annotateSource === 'message' && recentMessages.length > 1
+                      planReview && planReview.snapshot.messages.length + planReview.snapshot.files.length > 1
                         ? {
-                            // selectedMessageId is always one of recentMessages (set on init,
-                            // only changed via handleSelectMessage), so findIndex is >= 0.
-                            current: recentMessages.findIndex((m) => m.messageId === selectedMessageId) + 1,
-                            total: recentMessages.length,
-                            onOpen: () => sidebar.open('messages'),
+                            current: (() => {
+                              const selected = planReview.snapshot.selected;
+                              if (selected?.kind === 'message') {
+                                return Math.max(1, planReview.snapshot.messages.findIndex((message) => message.messageId === selected.messageId) + 1);
+                              }
+                              if (selected?.kind === 'file') {
+                                return Math.max(1, planReview.snapshot.messages.length + planReview.snapshot.files.findIndex((file) => file.path === selected.path) + 1);
+                              }
+                              return 1;
+                            })(),
+                            total: planReview.snapshot.messages.length + planReview.snapshot.files.length,
+                            label: planReview.snapshot.selected?.kind === 'file' ? 'Plan File' : 'Source',
+                            onOpen: () => setPlanReviewSourcesOpen(true),
                           }
-                        : undefined
+                        : annotateSource === 'message' && recentMessages.length > 1
+                          ? {
+                              // selectedMessageId is always one of recentMessages (set on init,
+                              // only changed via handleSelectMessage), so findIndex is >= 0.
+                              current: recentMessages.findIndex((m) => m.messageId === selectedMessageId) + 1,
+                              total: recentMessages.length,
+                              onOpen: () => sidebar.open('messages'),
+                            }
+                          : undefined
                     }
                     onToggleCheckbox={checkbox.toggle}
                     checkboxOverrides={checkbox.overrides}
@@ -4629,6 +4797,8 @@ const App: React.FC = () => {
               ...item,
               onDiscard: item.id === 'plan' ? () => handleDiscardEdits() : undefined,
             })) ?? null}
+            readOnly={planReviewReadOnly}
+            isAnnotationReadOnly={planReview ? (annotation) => planReviewSentAnnotationIds.has(annotation.id) : undefined}
             onOtherFileAnnotationsClick={handleFlashAnnotatedFiles}
           />
           {isPanelOpen && rightSidebarTab === 'ai' && wideModeType === null && !goalSetupMode && canUseAskAI && (

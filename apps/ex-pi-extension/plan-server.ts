@@ -73,6 +73,30 @@ export async function startPlanReviewServer(options: {
 			response.end(options.htmlContent);
 			return;
 		}
+		if (request.method === "GET" && url.pathname === "/api/plan") {
+			const snapshot = session.snapshot();
+			const selected = snapshot.selected;
+			const message = selected?.kind === "message"
+				? snapshot.messages.find((candidate) => candidate.messageId === selected.messageId)
+					?? snapshot.sentMessageSnapshots[selected.messageId]
+				: undefined;
+			const file = selected?.kind === "file"
+				? snapshot.fileSnapshots[selected.path]?.contentHash === selected.contentHash
+					? snapshot.fileSnapshots[selected.path]
+					: snapshot.sentFileSnapshots[`${selected.path}\u0000${selected.contentHash}`]
+				: undefined;
+			writeJson(response, 200, {
+				mode: "annotate-last",
+				plan: message?.text ?? file?.content ?? "",
+				recentMessages: snapshot.messages,
+				...(selected?.kind === "message" ? { selectedMessageId: selected.messageId } : {}),
+				origin: "pi",
+				gate: false,
+				sharingEnabled: false,
+				planReview: { sourceMode: "mixed", snapshot },
+			});
+			return;
+		}
 		if (request.method === "GET" && url.pathname === "/api/session") {
 			writeJson(response, 200, session.snapshot());
 			return;

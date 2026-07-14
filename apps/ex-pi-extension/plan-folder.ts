@@ -16,7 +16,8 @@ function isWithinRoot(root: string, candidate: string): boolean {
 }
 
 export function resolvePlanFolder(cwd: string, argument: string): string {
-	return resolve(cwd, argument.trim() || "./plan");
+	const requestedPath = argument.trim().replace(/^@/, "");
+	return resolve(cwd, requestedPath || "./plan");
 }
 
 export async function discoverPlanFolder(folder: string): Promise<PlanFolder> {

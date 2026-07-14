@@ -80,6 +80,10 @@ interface PanelProps {
   /** Hide every mutation affordance (delete/edit buttons on all card kinds).
     *  Selection and scrolling still work. Default false — today's behavior. */
   readOnly?: boolean;
+  /** Makes selected persistent annotations view-only while keeping current
+    * drafts editable. Used by hosts that render immutable sent history beside
+    * an active draft source. */
+  isAnnotationReadOnly?: (annotation: Annotation) => boolean;
 }
 
 export const AnnotationPanel: React.FC<PanelProps> = ({
@@ -105,6 +109,7 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
   directEdits = null,
   renderCardFooter,
   readOnly = false,
+  isAnnotationReadOnly,
 }) => {
   const isMobile = useIsMobile();
   const [copiedText, setCopiedText] = useState(false);
@@ -203,7 +208,7 @@ export const AnnotationPanel: React.FC<PanelProps> = ({
                   onSelect={() => onSelect(entry.annotation.id)}
                   onDelete={() => onDelete(entry.annotation.id)}
                   onEdit={onEdit ? (updates: Partial<Annotation>) => onEdit(entry.annotation.id, updates) : undefined}
-                  readOnly={readOnly}
+                  readOnly={readOnly || isAnnotationReadOnly?.(entry.annotation) === true}
                   footer={renderCardFooter?.(entry.annotation)}
                 />
               ) : (

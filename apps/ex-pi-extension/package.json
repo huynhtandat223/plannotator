@@ -42,7 +42,7 @@
     "build": "cd ../hook && bunx vite build && cp dist/index.html ../ex-pi-extension/ex-plannotator.html",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "prepublishOnly": "bun run build && bun run build:plan",
-    "build:plan": "cd ../ex-plan-review && bunx vite build && cp dist/index.html ../ex-pi-extension/ex-plannotator-plan.html",
+    "build:plan": "cd ../hook && bunx vite build && cp dist/index.html ../ex-pi-extension/ex-plannotator-plan.html",
     "build:package": "bun run build && bun run build:plan"
   },
   "dependencies": {

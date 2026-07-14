@@ -7,7 +7,7 @@ Ex-Plannotator provides two independent Pi commands that can coexist with Offici
 
 ## Plan Folder review
 
-`/ex-plannotator-plan` resolves an optional `[folder]` relative to the current Pi session cwd. It defaults to `./plan`.
+`/ex-plannotator-plan` resolves an optional `[folder]` relative to the current Pi session cwd. It defaults to `./plan`. Paths inserted through Pi's `@` file picker are also accepted, for example `/ex-plannotator-plan @.pi/agent/`.
 
 At the start of each Review Round, Ex-Plannotator recursively lists every regular file below that folder, including hidden files. It applies no ignore list and does not follow directory symlinks. Markdown and MDX files can be opened for read-only annotation; other discovered files remain visible in the Files tab and are marked unsupported.
 

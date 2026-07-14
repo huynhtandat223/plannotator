@@ -159,8 +159,9 @@ describe("Ex-Plannotator package surface", () => {
 		expect(exPackage.name).toBe("@huynhtandat223/ex-plannotator-pi-extension");
 		expect(exPackage.name).not.toBe(officialPackage.name);
 		expect(exPackage.files).toContain("ex-plannotator.html");
+		expect(exPackage.files).toContain("ex-plannotator-plan.html");
 		expect(officialPackage.files).not.toContain("ex-plannotator.html");
-		expect(exPackage.pi.extensions).toEqual(["./"]);
+		expect(exPackage.pi.extensions).toEqual(["./", "./plan-extension.ts"]);
 	});
 
 	test("wires and invokes the feedback delivery callback with session identity check", async () => {
