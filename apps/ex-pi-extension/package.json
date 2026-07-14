@@ -18,7 +18,8 @@
   ],
   "pi": {
     "extensions": [
-      "./"
+      "./",
+      "./plan-extension.ts"
     ]
   },
   "files": [
@@ -28,12 +29,23 @@
     "server.ts",
     "session.ts",
     "README.md",
-    "ex-plannotator.html"
+    "ex-plannotator.html",
+    "plan-extension.ts",
+    "plan-browser.ts",
+    "plan-server.ts",
+    "plan-session.ts",
+    "plan-folder.ts",
+    "ex-plannotator-plan.html"
   ],
   "scripts": {
     "build": "cd ../hook && bunx vite build && cp dist/index.html ../ex-pi-extension/ex-plannotator.html",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "prepublishOnly": "cd ../.. && bun run build:ex-pi"
+    "prepublishOnly": "bun run build && bun run build:plan",
+    "build:plan": "cd ../ex-plan-review && bunx vite build && cp dist/index.html ../ex-pi-extension/ex-plannotator-plan.html",
+    "build:package": "bun run build && bun run build:plan"
+  },
+  "dependencies": {
+    "@plannotator/ui": "^0.28.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.74.0"

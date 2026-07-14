@@ -17,13 +17,21 @@ The independently named fork package that owns persistent review commands prefix
 _Avoid_: Plannotator customization, patched official package
 
 **Review Round**:
-One Feedback Batch followed by the next completed assistant response. While that response is pending, reviewed content stays readable but new annotation input is blocked.
+One fixed discovery of the reviewed assistant responses and Plan Folder paths, followed by one Feedback Batch and the next completed assistant response. A Plan File's content becomes fixed for the round when the reviewer opens it. While the response is pending, reviewed content stays readable but new annotation input is blocked. The Plan Folder is re-scanned only when that next response completes, not watched during the round.
 _Avoid_: Chat turn, tool call
 
 **Feedback Batch**:
-All draft annotations across reviewed assistant responses that are delivered to Pi by one Send feedback action.
+All draft annotations across reviewed assistant responses and Plan Files that are atomically delivered to Pi by one Send feedback action. Its message and file sections reuse the existing feedback formats.
 _Avoid_: Single-message feedback, chat message
 
 **Sent Annotation**:
-An immutable comment already delivered to Pi as part of a Feedback Batch. It remains attached to its reviewed assistant response as review history.
+An immutable comment already delivered to Pi as part of a Feedback Batch. It remains attached to the exact Source Snapshot that was reviewed as history.
 _Avoid_: Draft comment, editable feedback
+
+**Reviewed Source**:
+An assistant response or Plan File available for annotation. Its Source Identity remains stable across Review Rounds: the Pi message ID for a response, or the normalized path relative to the Plan Folder for a file.
+_Avoid_: Document, item
+
+**Source Snapshot**:
+An immutable version of a Reviewed Source. An assistant response is identified by its Pi message ID; a Plan File snapshot is captured when opened and combines its Source Identity with a content hash. Draft and Sent Annotations always target a Source Snapshot rather than a mutable file path.
+_Avoid_: Current file, source version

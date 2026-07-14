@@ -1,2 +1,3 @@
 # Single-file build embeds binary font payloads; do not apply text diff/merge rules.
 ex-plannotator.html binary
+ex-plannotator-plan.html binary
