@@ -20,7 +20,15 @@ export function resolvePlanFolder(cwd: string, argument: string): string {
 }
 
 export async function discoverPlanFolder(folder: string): Promise<PlanFolder> {
-	const root = await realpath(folder);
+	let root: string;
+	try {
+		root = await realpath(folder);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+			return { root: resolve(folder), files: [] };
+		}
+		throw error;
+	}
 	const files: PlanFile[] = [];
 	async function visit(directory: string): Promise<void> {
 		const entries = await readdir(directory, { withFileTypes: true });
