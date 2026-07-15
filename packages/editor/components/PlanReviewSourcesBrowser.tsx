@@ -13,6 +13,8 @@ export type PlanReviewSelection =
 export type PlanReviewSnapshot = {
   messages: PlanReviewMessage[];
   files: PlanReviewFile[];
+  /** Latest response rounds, oldest to newest. Kept separately from sent annotation snapshots. */
+  responseHistory: PlanReviewMessage[];
   selected: PlanReviewSelection;
   fileSnapshots: Record<string, PlanReviewFileSnapshot>;
   draftsByMessageId: Record<string, Annotation[]>;
@@ -25,6 +27,18 @@ export type PlanReviewSnapshot = {
 
 export function planFileSnapshotKey(path: string, contentHash: string): string {
   return `${path}\u0000${contentHash}`;
+}
+
+export function filterPlanReviewFiles(files: PlanReviewFile[], query: string): PlanReviewFile[] {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  if (!normalizedQuery) return files;
+  return files.filter((file) => file.path.toLocaleLowerCase().includes(normalizedQuery));
+}
+
+export function resolvePlanReviewMessage(snapshot: PlanReviewSnapshot, messageId: string): PlanReviewMessage | undefined {
+  return snapshot.messages.find((message) => message.messageId === messageId)
+    ?? snapshot.responseHistory.find((message) => message.messageId === messageId)
+    ?? snapshot.sentMessageSnapshots[messageId];
 }
 
 function preview(text: string): string {
@@ -46,11 +60,18 @@ export function PlanReviewSourcesBrowser({
   onMobileClose: () => void;
 }) {
   const [tab, setTab] = useState<'messages' | 'files'>(snapshot.selected?.kind === 'file' ? 'files' : 'messages');
+  const [fileQuery, setFileQuery] = useState('');
   useEffect(() => {
     if (snapshot.selected?.kind === 'file') setTab('files');
     else if (snapshot.selected?.kind === 'message') setTab('messages');
   }, [snapshot.selected?.kind]);
-  const messageHistory = useMemo(() => Object.values(snapshot.sentMessageSnapshots).filter((message) => !snapshot.messages.some((current) => current.messageId === message.messageId)), [snapshot]);
+  const responseHistory = snapshot.responseHistory;
+  const responseHistoryIds = useMemo(() => new Set(responseHistory.map((message) => message.messageId)), [responseHistory]);
+  const earlierMessages = useMemo(
+    () => snapshot.messages.filter((message) => !responseHistoryIds.has(message.messageId)).reverse(),
+    [responseHistoryIds, snapshot.messages],
+  );
+  const filteredFiles = useMemo(() => filterPlanReviewFiles(snapshot.files, fileQuery), [fileQuery, snapshot.files]);
   const fileHistory = useMemo(() => Object.entries(snapshot.sentFileSnapshots).filter(([key, file]) => {
     const current = snapshot.fileSnapshots[file.path];
     return !current || key !== planFileSnapshotKey(current.path, current.contentHash);
@@ -71,14 +92,29 @@ export function PlanReviewSourcesBrowser({
     </div>
     <OverlayScrollArea className="flex-1 min-h-0">
       <div className="p-2">{tab === 'messages' ? <div className="space-y-0.5">
-        <p className="px-2 pt-1 pb-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Assistant responses</p>
-        {snapshot.messages.map((message, index) => <SourceButton key={message.messageId} active={snapshot.selected?.kind === 'message' && snapshot.selected.messageId === message.messageId} label={`#${index + 1}${index === 0 ? ' ★' : ''}`} text={preview(message.text)} count={messageCount(message.messageId)} onClick={() => onSelect({ kind: 'message', messageId: message.messageId })} />)}
-        {messageHistory.length > 0 && <p className="px-2 pt-4 pb-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Sent history</p>}
-        {messageHistory.map((message) => <SourceButton key={message.messageId} active={snapshot.selected?.kind === 'message' && snapshot.selected.messageId === message.messageId} label="Sent" text={preview(message.text)} count={messageCount(message.messageId)} onClick={() => onSelect({ kind: 'message', messageId: message.messageId })} />)}
+        <p className="px-2 pt-1 pb-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Recent assistant responses</p>
+        {responseHistory.map((message, index) => <SourceButton key={message.messageId} active={snapshot.selected?.kind === 'message' && snapshot.selected.messageId === message.messageId} label={`#${index + 1}${index === responseHistory.length - 1 ? ' ★' : ''}`} text={preview(message.text)} count={messageCount(message.messageId)} onClick={() => onSelect({ kind: 'message', messageId: message.messageId })} />)}
+        {earlierMessages.length > 0 && <p className="px-2 pt-4 pb-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Earlier assistant responses</p>}
+        {earlierMessages.map((message) => <SourceButton key={message.messageId} active={snapshot.selected?.kind === 'message' && snapshot.selected.messageId === message.messageId} label="Earlier" text={preview(message.text)} count={messageCount(message.messageId)} onClick={() => onSelect({ kind: 'message', messageId: message.messageId })} />)}
       </div> : <div className="space-y-0.5">
-        <p className="px-2 pt-1 pb-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Plan folder</p>
+        <div className="px-2 pt-1 pb-2">
+          <p className="pb-2 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Plan folder</p>
+          <label className="block text-[10px] font-medium text-muted-foreground" htmlFor="plan-review-file-filter">Filter files</label>
+          <input
+            id="plan-review-file-filter"
+            type="search"
+            value={fileQuery}
+            onChange={(event) => setFileQuery(event.target.value)}
+            onKeyDown={(event) => { if (event.key === 'Escape' && fileQuery) { event.preventDefault(); setFileQuery(''); } }}
+            placeholder="Search paths"
+            aria-describedby="plan-review-file-filter-status"
+            className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary/50"
+          />
+          <p id="plan-review-file-filter-status" className="sr-only" aria-live="polite">{filteredFiles.length} of {snapshot.files.length} files shown.</p>
+        </div>
         {snapshot.files.length === 0 && <p className="px-2 py-4 text-xs text-muted-foreground">No Plan Files found.</p>}
-        {snapshot.files.map((file) => {
+        {snapshot.files.length > 0 && filteredFiles.length === 0 && <p className="px-2 py-4 text-xs text-muted-foreground" role="status">No files match “{fileQuery}”.</p>}
+        {filteredFiles.map((file) => {
           const current = snapshot.fileSnapshots[file.path];
           const count = current ? fileCount(file.path, current.contentHash) : 0;
           return <button key={file.path} type="button" disabled={!file.supported} onClick={() => onSelect({ kind: 'file', path: file.path })} className={`flex w-full items-center gap-2 rounded border px-2 py-1.5 text-left text-xs transition-colors ${snapshot.selected?.kind === 'file' && snapshot.selected.path === file.path && current?.contentHash === snapshot.selected.contentHash ? 'border-primary/30 bg-primary/10 text-primary' : 'border-transparent hover:bg-muted/50'} disabled:cursor-not-allowed disabled:opacity-45`}><span className="min-w-0 flex-1 truncate font-mono">{file.path}</span>{!file.supported && <span className="text-[10px] text-muted-foreground">Unsupported</span>}{count > 0 && <Badge count={count} />}</button>;

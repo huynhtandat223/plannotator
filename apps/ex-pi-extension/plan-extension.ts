@@ -108,6 +108,10 @@ export default function exPlannotatorPlan(
 			if (activeServer !== server || !activeFolderPath || roundTransitionInFlight) return;
 			const folderPath = activeFolderPath;
 			const messages = getRecentAssistantMessages(ctx, 25);
+			// History belongs to the Plan-review session, not to sent feedback: a
+			// response is available for later inspection even when the user starts
+			// another response round without annotating it.
+			server.recordResponseHistory(messages);
 			if (!server.hasNewResponse(messages)) return;
 			roundTransitionInFlight = true;
 			try {

@@ -76,7 +76,7 @@ import { isFileBrowserEnabled, getFileBrowserSettings } from '@plannotator/ui/ut
 import { generateId } from '@plannotator/ui/utils/generateId';
 import { SidebarTabs } from '@plannotator/ui/components/sidebar/SidebarTabs';
 import { SidebarContainer } from '@plannotator/ui/components/sidebar/SidebarContainer';
-import { PlanReviewSourcesBrowser, planFileSnapshotKey, type PlanReviewSnapshot, type PlanReviewSelection } from './components/PlanReviewSourcesBrowser';
+import { PlanReviewSourcesBrowser, planFileSnapshotKey, resolvePlanReviewMessage, type PlanReviewSnapshot, type PlanReviewSelection } from './components/PlanReviewSourcesBrowser';
 import type { ArchivedPlan } from '@plannotator/ui/components/sidebar/ArchiveBrowser';
 import type { PickerMessage } from '@plannotator/ui/components/sidebar/MessagesBrowser';
 import { PlanDiffViewer } from '@plannotator/ui/components/plan-diff/PlanDiffViewer';
@@ -2521,7 +2521,7 @@ const App: React.FC = () => {
     const { snapshot } = planReview;
     const selected = snapshot.selected;
     const message = selected?.kind === 'message'
-      ? snapshot.messages.find((item) => item.messageId === selected.messageId) ?? snapshot.sentMessageSnapshots[selected.messageId]
+      ? resolvePlanReviewMessage(snapshot, selected.messageId)
       : undefined;
     const file = selected?.kind === 'file'
       ? snapshot.fileSnapshots[selected.path]?.contentHash === selected.contentHash

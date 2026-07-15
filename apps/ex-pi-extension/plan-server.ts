@@ -19,6 +19,7 @@ export type PlanReviewServer = {
 	setStopHandler(handler: () => void): void;
 	markAgentStarted(): void;
 	markAgentStopped(): void;
+	recordResponseHistory(messages: LiveAssistantMessage[]): void;
 	hasNewResponse(messages: LiveAssistantMessage[]): boolean;
 	advanceRound(messages: LiveAssistantMessage[], files: PlanFile[], readFile: (file: PlanFile) => Promise<PlanFileSnapshot>): boolean;
 	stop(): void;
@@ -78,6 +79,7 @@ export async function startPlanReviewServer(options: {
 			const selected = snapshot.selected;
 			const message = selected?.kind === "message"
 				? snapshot.messages.find((candidate) => candidate.messageId === selected.messageId)
+					?? snapshot.responseHistory.find((candidate) => candidate.messageId === selected.messageId)
 					?? snapshot.sentMessageSnapshots[selected.messageId]
 				: undefined;
 			const file = selected?.kind === "file"
@@ -215,6 +217,7 @@ export async function startPlanReviewServer(options: {
 		setStopHandler(handler) { if (!stopped) stopHandler = handler; },
 		markAgentStarted() { if (!stopped) session.markAgentStarted(); },
 		markAgentStopped() { if (!stopped) session.markAgentStopped(); },
+		recordResponseHistory(messages) { if (!stopped) session.recordResponseHistory(messages); },
 		hasNewResponse(messages) { return !stopped && session.hasNewResponse(messages); },
 		advanceRound(messages, files, readFile) { return !stopped && session.advanceRound(messages, files, readFile); },
 		stop,

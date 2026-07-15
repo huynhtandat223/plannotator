@@ -37,6 +37,7 @@ describe("Plan review server", () => {
 					fileSnapshots: {},
 					draftsByMessageId: {},
 					sentAnnotationsByMessageId: {},
+					responseHistory: messages,
 					sentMessageSnapshots: {},
 					draftsByFileSnapshot: {},
 					sentAnnotationsByFileSnapshot: {},
@@ -46,6 +47,41 @@ describe("Plan review server", () => {
 				},
 			},
 		});
+	});
+
+	test("keeps four chronological response-history entries across unannotated round transitions", async () => {
+		const initialMessages = Array.from({ length: 4 }, (_, index) => ({
+			messageId: `m${4 - index}`,
+			text: `Response ${4 - index}`,
+		}));
+		const server = await startPlanReviewServer({
+			htmlContent: "<!doctype html><title>Ex-Plannotator Plan</title>",
+			messages: initialMessages,
+			files: [],
+			readFile: async () => { throw new Error("No file should be read"); },
+		});
+		servers.push(server);
+
+		server.recordResponseHistory([
+			{ messageId: "m5", text: "Response 5" },
+			...initialMessages,
+		]);
+		server.recordResponseHistory([
+			{ messageId: "m6", text: "Response 6" },
+			{ messageId: "m5", text: "Response 5" },
+			...initialMessages,
+		]);
+
+		const snapshot = await (await fetch(`http://127.0.0.1:${server.port}/api/session`)).json() as {
+			responseHistory: Array<{ messageId: string }>;
+		};
+		expect(snapshot.responseHistory.map((message) => message.messageId)).toEqual(["m3", "m4", "m5", "m6"]);
+		expect((await fetch(`http://127.0.0.1:${server.port}/api/session/selection`, {
+			method: "PUT", headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ kind: "message", messageId: "m5" }),
+		})).status).toBe(200);
+		const plan = await (await fetch(`http://127.0.0.1:${server.port}/api/plan`)).json() as { plan: string };
+		expect(plan.plan).toBe("Response 5");
 	});
 
 	test("aggregates message and file drafts, preserves sent snapshots, and keeps sent annotations immutable", async () => {
