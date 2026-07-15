@@ -400,6 +400,10 @@ const App: React.FC = () => {
   const [liveReviewUpdateStatus, setLiveReviewUpdateStatus] = useState<string | null>(null);
   const [isLiveReviewActionPending, setIsLiveReviewActionPending] = useState(false);
   const liveDraftSaveQueuesRef = useRef<Map<string, Promise<void>>>(new Map());
+  // Save responses are snapshots, so track the newest write issued for each
+  // source. A delayed acknowledgement for an older write must not replace the
+  // newer local draft that is still queued behind it.
+  const liveDraftSaveVersionsRef = useRef<Map<string, number>>(new Map());
   const liveSnapshotRevisionRef = useRef(-1);
   const planReviewSelectedIsHistorical = (() => {
     if (!planReview?.snapshot.selected) return false;
@@ -1122,7 +1126,12 @@ const App: React.FC = () => {
 
   // File browser file selection: open via linked doc system
   // For vault dirs (isVault), use the Obsidian doc endpoint; otherwise use generic /api/doc
-  const applyLiveReviewSnapshot = React.useCallback((snapshot: LiveMessageReviewSnapshot, options?: { announceLiveUpdate?: boolean; applySelection?: boolean; replaceDrafts?: boolean }) => {
+  const applyLiveReviewSnapshot = React.useCallback((snapshot: LiveMessageReviewSnapshot, options?: {
+    announceLiveUpdate?: boolean;
+    applySelection?: boolean;
+    replaceDrafts?: boolean;
+    preservePendingDraftsForMessageIds?: ReadonlySet<string>;
+  }) => {
     if (snapshot.revision !== undefined) {
       if (snapshot.revision < liveSnapshotRevisionRef.current) return;
       liveSnapshotRevisionRef.current = snapshot.revision;
@@ -1149,11 +1158,16 @@ const App: React.FC = () => {
         ...Object.keys(snapshot.codeDraftsByMessageId ?? {}),
         ...Object.keys(snapshot.attachmentsByMessageId ?? {}),
         ...Object.keys(snapshot.linkedDocDraftsByMessageId ?? {}),
+        // A successful delivery removes attachment-only and linked-document-only
+        // sources from the server snapshot. Clear their local cache too, so a
+        // source that later returns to the compact picker cannot be resent.
+        ...(options?.replaceDrafts ? states.keys() : []),
       ]);
       for (const messageId of serverStateIds) {
         const message = messagesById.get(messageId) ?? states.get(messageId);
         if (!message) continue;
         const state = states.get(messageId) ?? createEmptyMessageState(message);
+        const preservePendingDrafts = options?.preservePendingDraftsForMessageIds?.has(messageId) ?? false;
         const linkedDocuments = snapshot.linkedDocDraftsByMessageId?.[messageId];
         states.set(messageId, normalizeMessageState({
           ...state,
@@ -1161,17 +1175,25 @@ const App: React.FC = () => {
             ...state.linkedDocSession,
             root: {
               ...state.linkedDocSession.root,
-              annotations: snapshot.draftsByMessageId?.[messageId] ?? (options?.replaceDrafts ? [] : state.linkedDocSession.root.annotations),
-              globalAttachments: snapshot.attachmentsByMessageId?.[messageId] ?? (options?.replaceDrafts ? [] : state.linkedDocSession.root.globalAttachments),
+              annotations: preservePendingDrafts
+                ? state.linkedDocSession.root.annotations
+                : snapshot.draftsByMessageId?.[messageId] ?? (options?.replaceDrafts ? [] : state.linkedDocSession.root.annotations),
+              globalAttachments: preservePendingDrafts
+                ? state.linkedDocSession.root.globalAttachments
+                : snapshot.attachmentsByMessageId?.[messageId] ?? (options?.replaceDrafts ? [] : state.linkedDocSession.root.globalAttachments),
             },
-            docs: linkedDocuments === undefined
+            docs: preservePendingDrafts
+              ? state.linkedDocSession.docs
+              : linkedDocuments === undefined
               ? options?.replaceDrafts ? new Map() : state.linkedDocSession.docs
               : new Map(linkedDocuments.map((document) => [document.filepath, {
                   annotations: document.annotations,
                   globalAttachments: document.globalAttachments,
                 }])),
           },
-          codeAnnotations: snapshot.codeDraftsByMessageId?.[messageId] ?? (options?.replaceDrafts ? [] : state.codeAnnotations),
+          codeAnnotations: preservePendingDrafts
+            ? state.codeAnnotations
+            : snapshot.codeDraftsByMessageId?.[messageId] ?? (options?.replaceDrafts ? [] : state.codeAnnotations),
         }, message));
       }
     }
@@ -1183,7 +1205,7 @@ const App: React.FC = () => {
     if (!targetMessage) return;
     const targetState = states.get(nextSelectedMessageId) ?? createEmptyMessageState(targetMessage);
     const selectedChanged = nextSelectedMessageId !== selectedMessageId;
-    if (selectedChanged || snapshot.draftsByMessageId?.[nextSelectedMessageId] || snapshot.codeDraftsByMessageId?.[nextSelectedMessageId] || snapshot.attachmentsByMessageId?.[nextSelectedMessageId] || snapshot.linkedDocDraftsByMessageId?.[nextSelectedMessageId]) {
+    if (selectedChanged || options?.replaceDrafts || snapshot.draftsByMessageId?.[nextSelectedMessageId] || snapshot.codeDraftsByMessageId?.[nextSelectedMessageId] || snapshot.attachmentsByMessageId?.[nextSelectedMessageId] || snapshot.linkedDocDraftsByMessageId?.[nextSelectedMessageId]) {
       setSelectedMessageId(nextSelectedMessageId);
       linkedDocHook.restoreSession(targetState.linkedDocSession);
       setCodeAnnotations([...targetState.codeAnnotations]);
@@ -1232,7 +1254,7 @@ const App: React.FC = () => {
       const response = await fetch(path, { method: 'POST' });
       const body = await response.json().catch(() => ({})) as LiveMessageReviewSnapshot & { error?: string };
       if (!response.ok) throw new Error(body.error || 'Live review action failed.');
-      applyLiveReviewSnapshot(body);
+      applyLiveReviewSnapshot(body, { replaceDrafts: path === '/api/session/feedback/retry' });
     } catch (error) {
       toast.error('Live review action failed', {
         description: error instanceof Error ? error.message : String(error),
@@ -3071,6 +3093,10 @@ const App: React.FC = () => {
         // it to submit every outstanding draft, including sources aged out of
         // the four-row picker.
         await saveLiveReviewDrafts(selectedMessageId);
+        // Mutations for earlier picker selections are serialized independently.
+        // Do not create the all-source batch until every one has reached the
+        // server, otherwise a recent source switch can omit feedback.
+        await Promise.all([...liveDraftSaveQueuesRef.current.values()]);
         const response = await fetch('/api/session/feedback', { method: 'POST' });
         const snapshot = await response.json().catch(() => null) as LiveMessageReviewSnapshot | null;
         if (!response.ok || !snapshot) throw new Error('Live review feedback could not be delivered');
@@ -3329,6 +3355,8 @@ const App: React.FC = () => {
 
   const saveLiveReviewDrafts = useCallback((messageId: string, state = buildCurrentMessageState()): Promise<void> => {
     if (!state || state.messageId !== messageId) return Promise.reject(new Error('No live review state is selected.'));
+    const saveVersion = (liveDraftSaveVersionsRef.current.get(messageId) ?? 0) + 1;
+    liveDraftSaveVersionsRef.current.set(messageId, saveVersion);
     const linkedDocuments = Array.from(state.linkedDocSession.docs.entries()).map(([filepath, document]) => ({
       filepath,
       annotations: document.annotations,
@@ -3350,7 +3378,13 @@ const App: React.FC = () => {
           }),
         });
         if (!response.ok) throw new Error('Could not save live review annotations');
-        applyLiveReviewSnapshot(await response.json() as LiveMessageReviewSnapshot, { applySelection: false });
+        const snapshot = await response.json() as LiveMessageReviewSnapshot;
+        applyLiveReviewSnapshot(snapshot, {
+          applySelection: false,
+          preservePendingDraftsForMessageIds: liveDraftSaveVersionsRef.current.get(messageId)! > saveVersion
+            ? new Set([messageId])
+            : undefined,
+        });
       });
     liveDraftSaveQueuesRef.current.set(messageId, save);
     void save.then(

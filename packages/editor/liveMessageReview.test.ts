@@ -33,10 +33,15 @@ test('live feedback saves the current source before submitting all retained draf
   );
 
   expect(callback).toContain('saveLiveReviewDrafts(selectedMessageId)');
+  expect(callback).toContain('Promise.all([...liveDraftSaveQueuesRef.current.values()])');
   expect(callback).toContain("fetch('/api/session/feedback'");
   expect(source).toContain('const saveLiveReviewDrafts');
   expect(source).toContain('liveDraftSaveQueuesRef');
+  expect(source).toContain('liveDraftSaveVersionsRef');
+  expect(source).toContain('preservePendingDraftsForMessageIds');
+  expect(source).toContain("replaceDrafts: path === '/api/session/feedback/retry'");
+  expect(source).toContain('...(options?.replaceDrafts ? states.keys() : [])');
   expect(source).toContain('globalAttachments: state.linkedDocSession.root.globalAttachments');
   expect(source).toContain('linkedDocuments');
-  expect(source).toContain('applyLiveReviewSnapshot(await response.json() as LiveMessageReviewSnapshot, { applySelection: false })');
+  expect(source).toContain('applyLiveReviewSnapshot(snapshot, {');
 });

@@ -18,6 +18,7 @@ export type LiveCodeDraftAnnotation = LiveDraftAnnotation & {
 	lineStart?: number;
 	lineEnd?: number;
 	originalCode?: string;
+	images?: LiveImageAttachment[];
 };
 
 export type LiveImageAttachment = {
@@ -140,6 +141,7 @@ function formatCodeAnnotation(annotation: LiveCodeDraftAnnotation, position: num
 	let output = `### Code feedback ${position}. ${filePath}${lineRange}\n`;
 	if (originalCode) output += `\`\`\`\n${originalCode}\n\`\`\`\n`;
 	if (comment) output += `> ${comment}\n`;
+	output += formatAttachments(annotation.images ?? []);
 	return output;
 }
 

@@ -324,6 +324,7 @@ describe("LiveMessageReviewSession", () => {
 			lineEnd: 5,
 			originalCode: "const value = 1;",
 			text: "Use the configured value.",
+			images: [{ path: "/tmp/code-reference.png", name: "code reference" }],
 		}]);
 
 		session.reconcile(
@@ -335,6 +336,23 @@ describe("LiveMessageReviewSession", () => {
 		expect(await session.submitFeedback(async (batch) => { output = formatLiveFeedbackBatch(batch); })).toBe(true);
 		expect(output).toContain("src/example.ts (lines 4-5)");
 		expect(output).toContain("Use the configured value.");
+		expect(output).toContain("[code reference] `/tmp/code-reference.png`");
+	});
+
+	test("keeps code annotation images in the batch retried after a failed delivery", async () => {
+		const session = sessionWith([{ messageId: "m1", text: "First response" }]);
+		session.replaceDrafts("m1", [], [{
+			id: "code-image",
+			filePath: "src/example.ts",
+			lineStart: 1,
+			lineEnd: 1,
+			images: [{ path: "/tmp/retry-reference.png", name: "retry reference" }],
+		}]);
+
+		await expect(session.submitFeedback(async () => { throw new Error("Pi unavailable"); })).rejects.toThrow("Pi unavailable");
+		let output = "";
+		expect(await session.retryFeedback(async (batch) => { output = formatLiveFeedbackBatch(batch); })).toBe(true);
+		expect(output).toContain("[retry reference] `/tmp/retry-reference.png`");
 	});
 
 	test("retains attachments and linked-document drafts after their response leaves the compact picker", async () => {
