@@ -30,9 +30,9 @@ export function planFileSnapshotKey(path: string, contentHash: string): string {
 }
 
 export function filterPlanReviewFiles(files: PlanReviewFile[], query: string): PlanReviewFile[] {
-  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const normalizedQuery = query.trim().toLowerCase();
   if (!normalizedQuery) return files;
-  return files.filter((file) => file.path.toLocaleLowerCase().includes(normalizedQuery));
+  return files.filter((file) => file.path.toLowerCase().includes(normalizedQuery));
 }
 
 export function resolvePlanReviewMessage(snapshot: PlanReviewSnapshot, messageId: string): PlanReviewMessage | undefined {
