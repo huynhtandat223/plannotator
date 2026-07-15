@@ -9,9 +9,9 @@ Ex-Plannotator provides two independent Pi commands that can coexist with Offici
 
 `/ex-plannotator-plan` resolves an optional `[folder]` relative to the current Pi session cwd. It defaults to `./plan`. Paths inserted through Pi's `@` file picker are also accepted, for example `/ex-plannotator-plan @.pi/agent/`.
 
-At the start of each Review Round, Ex-Plannotator recursively lists every regular file below that folder, including hidden files. It applies no ignore list and does not follow directory symlinks. Markdown and MDX files can be opened for read-only annotation; other discovered files remain visible in the Files tab and are marked unsupported.
+At the start of each Review Round, Ex-Plannotator recursively lists every regular file below that folder, including hidden files. It applies no ignore list and does not follow directory symlinks. Markdown and MDX files can be opened for read-only annotation; other discovered files remain visible in the Files tab and are marked unsupported. The Files tab has an accessible, case-insensitive path filter that only narrows this server-provided discovery list.
 
-A file's content is read lazily only when opened, then retained as that round's snapshot. One **Send feedback** action atomically includes drafts across both Messages and Files. After Pi accepts the batch, the current round remains readable while annotation input waits for the next completed assistant response. On that first finalized response, Ex-Plannotator re-scans the Plan Folder once, opens the next round with the newest response selected, and lazily reads files again. Added and removed paths appear then; there are no filesystem watchers, file diffs, badges, rename detection, or stale-draft remapping.
+A file's content is read lazily only when opened, then retained as that round's snapshot. The Messages tab retains the latest four assistant responses in chronological order for the lifetime of the browser session, including unannotated responses; selecting history does not depend on feedback submission. One **Send feedback** action atomically includes drafts across both Messages and Files. After Pi accepts the batch, the current round remains readable while annotation input waits for the next completed assistant response. On that first finalized response, Ex-Plannotator re-scans the Plan Folder once, opens the next round with the newest response selected, and lazily reads files again. Added and removed paths appear then; there are no filesystem watchers, file diffs, badges, rename detection, or stale-draft remapping.
 
 The browser never edits Plan Files. Feedback asks the agent to make file changes.
 
@@ -25,7 +25,7 @@ bun run build:plan   # Plan asset only: ex-plannotator-plan.html
 bun run build:package # Both, sequentially
 ```
 
-`prepublishOnly` runs both independent build entries before packaging. The package explicitly discovers `index.ts` for Last and `plan-extension.ts` for Plan; the Plan build only writes `ex-plannotator-plan.html` and does not route through Official Plannotator assets.
+`prepublishOnly` runs both independent build entries before packaging. The package explicitly discovers `index.ts` for Last and `plan-extension.ts` for Plan; the Plan build writes `ex-plannotator-plan.html` and does not route through Official Plannotator assets.
 
 Then load or install `apps/ex-pi-extension` as a Pi package. Official `@plannotator/pi-extension` can remain installed.
 

@@ -106,8 +106,13 @@ export default function exPlannotatorPlan(
 		pendingResponseTransition = setTimeout(async () => {
 			pendingResponseTransition = null;
 			if (activeServer !== server || !activeFolderPath || roundTransitionInFlight) return;
+			if (!sessionIdAtOpen || currentSessionId !== sessionIdAtOpen) return;
 			const folderPath = activeFolderPath;
 			const messages = getRecentAssistantMessages(ctx, 25);
+			// History belongs to the Plan-review session, not to sent feedback: a
+			// response is available for later inspection even when the user starts
+			// another response round without annotating it.
+			server.recordResponseHistory(messages);
 			if (!server.hasNewResponse(messages)) return;
 			roundTransitionInFlight = true;
 			try {

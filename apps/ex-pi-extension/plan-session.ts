@@ -9,6 +9,8 @@ import {
 } from "./session.js";
 import type { PlanFile, PlanFileSnapshot } from "./plan-folder.js";
 
+export const PLAN_RESPONSE_HISTORY_LIMIT = 4;
+
 export type PlanReviewSelection =
 	| { kind: "message"; messageId: string }
 	| { kind: "file"; path: string; contentHash: string };
@@ -28,6 +30,8 @@ export type PlanFeedbackBatch = {
 
 export type PlanReviewSnapshot = {
 	messages: LiveAssistantMessage[];
+	/** The latest assistant responses, ordered oldest to newest for display. */
+	responseHistory: LiveAssistantMessage[];
 	files: PlanFile[];
 	selected: PlanReviewSelection | null;
 	fileSnapshots: Record<string, PlanFileSnapshot>;
@@ -58,6 +62,18 @@ function annotationRecord(annotations: Map<string, Annotation[]>): Record<string
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The branch reader returns newest-first responses. Keep the presentation
+ * history separate from annotation snapshots: it includes every completed
+ * response round, even when that response never received feedback.
+ */
+function responseHistory(messages: LiveAssistantMessage[]): LiveAssistantMessage[] {
+	return messages
+		.slice(0, PLAN_RESPONSE_HISTORY_LIMIT)
+		.reverse()
+		.map((message) => ({ ...message }));
 }
 
 /**
@@ -93,6 +109,7 @@ export function formatPlanFeedbackBatch(batch: PlanFeedbackBatch): string {
 
 export class PlanReviewSession {
 	private readonly subscribers = new Set<SnapshotSubscriber>();
+	private responseHistory: LiveAssistantMessage[];
 	private readonly fileSnapshots = new Map<string, PlanFileSnapshot>();
 	private readonly draftsByMessageId = new Map<string, Annotation[]>();
 	private readonly sentAnnotationsByMessageId = new Map<string, Annotation[]>();
@@ -112,12 +129,14 @@ export class PlanReviewSession {
 		private files: PlanFile[],
 		private readFile: (file: PlanFile) => Promise<PlanFileSnapshot>,
 	) {
+		this.responseHistory = responseHistory(messages);
 		this.selected = messages[0] ? { kind: "message", messageId: messages[0].messageId } : null;
 	}
 
 	snapshot(): PlanReviewSnapshot {
 		return {
 			messages: this.messages.map((message) => ({ ...message })),
+			responseHistory: this.responseHistory.map((message) => ({ ...message })),
 			files: this.files.map((file) => ({ ...file })),
 			selected: this.selected ? { ...this.selected } : null,
 			fileSnapshots: Object.fromEntries([...this.fileSnapshots].map(([path, snapshot]) => [path, { ...snapshot }])),
@@ -133,10 +152,23 @@ export class PlanReviewSession {
 	}
 
 	selectMessage(messageId: string): boolean {
-		if (!this.messages.some((message) => message.messageId === messageId) && !this.sentMessageSnapshots.has(messageId)) return false;
+		if (!this.messages.some((message) => message.messageId === messageId)
+			&& !this.responseHistory.some((message) => message.messageId === messageId)
+			&& !this.sentMessageSnapshots.has(messageId)) return false;
 		this.selected = { kind: "message", messageId };
 		this.publish();
 		return true;
+	}
+
+	/** Records finalized responses even while no feedback is being submitted. */
+	recordResponseHistory(messages: LiveAssistantMessage[]): void {
+		const next = responseHistory(messages);
+		if (next.length === this.responseHistory.length && next.every((message, index) => {
+			const current = this.responseHistory[index];
+			return current?.messageId === message.messageId && current.text === message.text && current.timestamp === message.timestamp;
+		})) return;
+		this.responseHistory = next;
+		this.publish();
 	}
 
 	async selectFile(path: string, contentHash?: string): Promise<boolean> {
@@ -325,6 +357,7 @@ export class PlanReviewSession {
 
 	private openNextRound(round: { messages: LiveAssistantMessage[]; files: PlanFile[]; readFile: (file: PlanFile) => Promise<PlanFileSnapshot> }): void {
 		this.messages = round.messages;
+		this.responseHistory = responseHistory(round.messages);
 		this.files = round.files;
 		this.readFile = round.readFile;
 		this.fileSnapshots.clear();
