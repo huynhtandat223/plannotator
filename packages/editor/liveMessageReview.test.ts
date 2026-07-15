@@ -32,11 +32,11 @@ test('live feedback saves the current source before submitting all retained draf
     source.indexOf('const handleAnnotateApprove'),
   );
 
-  expect(callback).toContain("fetch('/api/session/drafts'");
+  expect(callback).toContain('saveLiveReviewDrafts(selectedMessageId)');
   expect(callback).toContain("fetch('/api/session/feedback'");
-  expect(callback).toContain('saveLiveReviewDrafts(selectedMessageId, allAnnotations, codeAnnotations)');
   expect(source).toContain('const saveLiveReviewDrafts');
   expect(source).toContain('liveDraftSaveQueuesRef');
-  expect(source).toContain('codeAnnotations: nextCodeAnnotations');
-  expect(source).toContain('saveLiveReviewDrafts(selectedMessageId, next, codeAnnotations)');
+  expect(source).toContain('globalAttachments: state.linkedDocSession.root.globalAttachments');
+  expect(source).toContain('linkedDocuments');
+  expect(source).toContain('applyLiveReviewSnapshot(await response.json() as LiveMessageReviewSnapshot, { applySelection: false })');
 });

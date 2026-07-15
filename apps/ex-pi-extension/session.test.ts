@@ -337,6 +337,32 @@ describe("LiveMessageReviewSession", () => {
 		expect(output).toContain("Use the configured value.");
 	});
 
+	test("retains attachments and linked-document drafts after their response leaves the compact picker", async () => {
+		const messages = Array.from({ length: 5 }, (_, index) => ({
+			messageId: `m${5 - index}`,
+			text: `Response ${5 - index}`,
+		}));
+		const session = sessionWith(messages);
+		session.replaceDrafts("m2", [], [], [{ path: "/tmp/mockup.png", name: "mockup" }], [{
+			filepath: "docs/design.md",
+			annotations: [{ id: "linked-draft", type: "COMMENT", originalText: "Original", text: "Clarify this" }],
+			globalAttachments: [{ path: "/tmp/linked.png", name: "linked" }],
+		}]);
+
+		session.reconcile(
+			[{ messageId: "m6", text: "Response 6" }, ...messages],
+			["m6", "m5", "m4", "m3", "m2", "m1"],
+		);
+
+		expect(session.snapshot().retainedMessages).toEqual([{ messageId: "m2", text: "Response 2" }]);
+		let output = "";
+		expect(await session.submitFeedback(async (batch) => { output = formatLiveFeedbackBatch(batch); })).toBe(true);
+		expect(output).toContain("[mockup] `/tmp/mockup.png`");
+		expect(output).toContain("Linked document: docs/design.md");
+		expect(output).toContain("[linked] `/tmp/linked.png`");
+		expect(output).toContain("Clarify this");
+	});
+
 	test("reconcile selects the newest message and unlocks round after waiting", async () => {
 		const session = sessionWith([
 			{ messageId: "m1", text: "First response" },
@@ -490,11 +516,15 @@ describe("Live Message Review Session snapshot", () => {
 		];
 
 		expect(createLiveMessageReviewSnapshot(newestFirstMessages)).toEqual({
+			revision: 0,
 			messages: [...newestFirstMessages].reverse(),
+			retainedMessages: [],
 			selectedMessageId: "new",
 			unreadMessageIds: [],
 			draftsByMessageId: {},
 			codeDraftsByMessageId: {},
+			attachmentsByMessageId: {},
+			linkedDocDraftsByMessageId: {},
 			sentAnnotationsByMessageId: {},
 			sentCodeAnnotationsByMessageId: {},
 			reviewRoundStatus: "open",

@@ -20,11 +20,24 @@ export type LiveCodeDraftAnnotation = LiveDraftAnnotation & {
 	originalCode?: string;
 };
 
+export type LiveImageAttachment = {
+	path: string;
+	name: string;
+};
+
+export type LiveLinkedDocumentDraft = {
+	filepath: string;
+	annotations: LiveDraftAnnotation[];
+	globalAttachments: LiveImageAttachment[];
+};
+
 export type LiveFeedbackBatchMessage = {
 	messageId: string;
 	messageText: string;
 	annotations: LiveDraftAnnotation[];
 	codeAnnotations?: LiveCodeDraftAnnotation[];
+	globalAttachments?: LiveImageAttachment[];
+	linkedDocuments?: LiveLinkedDocumentDraft[];
 };
 
 export type LiveFeedbackBatch = {
@@ -35,12 +48,15 @@ export type LiveFeedbackBatch = {
 export type ReviewRoundStatus = "open" | "submitting" | "delivery_failed" | "waiting" | "agent_stopped";
 
 export type LiveMessageReviewSnapshot = {
-	/** Current compact response picker, ordered oldest to newest for display. */
+	revision: number;
 	messages: LiveAssistantMessage[];
+	retainedMessages: LiveAssistantMessage[];
 	selectedMessageId: string | null;
 	unreadMessageIds: string[];
 	draftsByMessageId: Record<string, LiveDraftAnnotation[]>;
 	codeDraftsByMessageId: Record<string, LiveCodeDraftAnnotation[]>;
+	attachmentsByMessageId: Record<string, LiveImageAttachment[]>;
+	linkedDocDraftsByMessageId: Record<string, LiveLinkedDocumentDraft[]>;
 	sentAnnotationsByMessageId: Record<string, LiveDraftAnnotation[]>;
 	sentCodeAnnotationsByMessageId: Record<string, LiveCodeDraftAnnotation[]>;
 	reviewRoundStatus: ReviewRoundStatus;
@@ -67,13 +83,13 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function annotationsRecord(
-	annotationsByMessageId: Map<string, LiveDraftAnnotation[]>,
-): Record<string, LiveDraftAnnotation[]> {
+function annotationsRecord<T extends LiveDraftAnnotation | LiveImageAttachment | LiveLinkedDocumentDraft>(
+	annotationsByMessageId: Map<string, T[]>,
+): Record<string, T[]> {
 	return Object.fromEntries(
 		[...annotationsByMessageId].map(([messageId, annotations]) => [
 			messageId,
-			cloneAnnotations(annotations),
+			structuredClone(annotations),
 		]),
 	);
 }
@@ -127,6 +143,15 @@ function formatCodeAnnotation(annotation: LiveCodeDraftAnnotation, position: num
 	return output;
 }
 
+function formatAttachments(attachments: LiveImageAttachment[]): string {
+	if (attachments.length === 0) return "";
+	let output = "### Reference Images\nPlease review these reference images:\n";
+	for (const [index, attachment] of attachments.entries()) {
+		output += `${index + 1}. [${attachment.name}] \`${attachment.path}\`\n`;
+	}
+	return `${output}\n`;
+}
+
 /**
  * Creates the user message delivered to Pi. Every source response is named by
  * its stable Pi identity and quoted so feedback stays understandable after the
@@ -140,8 +165,17 @@ export function formatLiveFeedbackBatch(batch: LiveFeedbackBatch): string {
 		output += `\n## Assistant response (Pi message ID: \`${message.messageId}\`)\n\n`;
 		output += "This feedback applies to the earlier assistant response excerpted below:\n\n";
 		output += `${quote(excerpt(message.messageText))}\n\n`;
+		output += formatAttachments(message.globalAttachments ?? []);
 		for (const [index, annotation] of message.annotations.entries()) {
 			output += `${formatAnnotation(annotation, index + 1)}\n`;
+		}
+		for (const linkedDocument of message.linkedDocuments ?? []) {
+			if (linkedDocument.annotations.length === 0 && linkedDocument.globalAttachments.length === 0) continue;
+			output += `### Linked document: ${linkedDocument.filepath}\n\n`;
+			output += formatAttachments(linkedDocument.globalAttachments);
+			for (const [index, annotation] of linkedDocument.annotations.entries()) {
+				output += `${formatAnnotation(annotation, index + 1)}\n`;
+			}
 		}
 		for (const [index, annotation] of (message.codeAnnotations ?? []).entries()) {
 			output += `${formatCodeAnnotation(annotation, index + 1)}\n`;
@@ -160,11 +194,15 @@ export function createLiveMessageReviewSnapshot(
 		.slice(0, LIVE_RESPONSE_HISTORY_LIMIT)
 		.reverse();
 	return {
+		revision: 0,
 		messages: recentMessages.map((message) => ({ ...message })),
+		retainedMessages: [],
 		selectedMessageId: recentMessages.at(-1)?.messageId ?? null,
 		unreadMessageIds: [],
 		draftsByMessageId: {},
 		codeDraftsByMessageId: {},
+		attachmentsByMessageId: {},
+		linkedDocDraftsByMessageId: {},
 		sentAnnotationsByMessageId: {},
 		sentCodeAnnotationsByMessageId: {},
 		reviewRoundStatus: "open",
@@ -181,6 +219,8 @@ export class LiveMessageReviewSession {
 	private readonly unreadMessageIds = new Set<string>();
 	private readonly draftsByMessageId = new Map<string, LiveDraftAnnotation[]>();
 	private readonly codeDraftsByMessageId = new Map<string, LiveCodeDraftAnnotation[]>();
+	private readonly attachmentsByMessageId = new Map<string, LiveImageAttachment[]>();
+	private readonly linkedDocDraftsByMessageId = new Map<string, LiveLinkedDocumentDraft[]>();
 	private readonly sentAnnotationsByMessageId = new Map<string, LiveDraftAnnotation[]>();
 	private readonly sentCodeAnnotationsByMessageId = new Map<string, LiveCodeDraftAnnotation[]>();
 	private readonly messagesReceivedWhileSubmitting = new Set<string>();
@@ -188,6 +228,7 @@ export class LiveMessageReviewSession {
 	private failedBatch: LiveFeedbackBatch | null = null;
 	private deliveryError: string | null = null;
 	private reviewRoundStatus: ReviewRoundStatus = "open";
+	private revision = 0;
 
 	constructor(messages: LiveAssistantMessage[]) {
 		const initial = createLiveMessageReviewSnapshot(messages);
@@ -198,13 +239,20 @@ export class LiveMessageReviewSession {
 
 	snapshot(): LiveMessageReviewSnapshot {
 		return {
+			revision: this.revision,
 			messages: this.messages.map((message) => ({ ...message })),
+			retainedMessages: [...this.messageSnapshots.values()]
+				.filter((message) => !this.messages.some((visible) => visible.messageId === message.messageId))
+				.filter((message) => this.draftsByMessageId.has(message.messageId) || this.codeDraftsByMessageId.has(message.messageId) || this.attachmentsByMessageId.has(message.messageId) || this.linkedDocDraftsByMessageId.has(message.messageId) || this.sentAnnotationsByMessageId.has(message.messageId) || this.sentCodeAnnotationsByMessageId.has(message.messageId))
+				.map((message) => ({ ...message })),
 			selectedMessageId: this.selectedMessageId,
 			unreadMessageIds: this.messages
 				.filter((message) => this.unreadMessageIds.has(message.messageId))
 				.map((message) => message.messageId),
 			draftsByMessageId: annotationsRecord(this.draftsByMessageId),
 			codeDraftsByMessageId: annotationsRecord(this.codeDraftsByMessageId),
+			attachmentsByMessageId: annotationsRecord(this.attachmentsByMessageId),
+			linkedDocDraftsByMessageId: annotationsRecord(this.linkedDocDraftsByMessageId),
 			sentAnnotationsByMessageId: annotationsRecord(this.sentAnnotationsByMessageId),
 			sentCodeAnnotationsByMessageId: annotationsRecord(this.sentCodeAnnotationsByMessageId),
 			reviewRoundStatus: this.reviewRoundStatus,
@@ -223,6 +271,8 @@ export class LiveMessageReviewSession {
 			...this.messageSnapshots.keys(),
 			...this.draftsByMessageId.keys(),
 			...this.codeDraftsByMessageId.keys(),
+			...this.attachmentsByMessageId.keys(),
+			...this.linkedDocDraftsByMessageId.keys(),
 			...this.sentAnnotationsByMessageId.keys(),
 			...this.sentCodeAnnotationsByMessageId.keys(),
 			...(this.failedBatch?.messages.map((message) => message.messageId) ?? []),
@@ -246,6 +296,8 @@ export class LiveMessageReviewSession {
 			this.unreadMessageIds.delete(messageId);
 			this.draftsByMessageId.delete(messageId);
 			this.codeDraftsByMessageId.delete(messageId);
+			this.attachmentsByMessageId.delete(messageId);
+			this.linkedDocDraftsByMessageId.delete(messageId);
 			this.sentAnnotationsByMessageId.delete(messageId);
 			this.sentCodeAnnotationsByMessageId.delete(messageId);
 			this.messageSnapshots.delete(messageId);
@@ -259,6 +311,10 @@ export class LiveMessageReviewSession {
 			...this.messages.map((message) => message.messageId),
 			...this.draftsByMessageId.keys(),
 			...this.codeDraftsByMessageId.keys(),
+			...this.attachmentsByMessageId.keys(),
+			...this.linkedDocDraftsByMessageId.keys(),
+			...this.sentAnnotationsByMessageId.keys(),
+			...this.sentCodeAnnotationsByMessageId.keys(),
 			...(this.failedBatch?.messages.map((message) => message.messageId) ?? []),
 		]);
 		for (const messageId of this.messageSnapshots.keys()) {
@@ -290,6 +346,8 @@ export class LiveMessageReviewSession {
 		messageId: string,
 		annotations: LiveDraftAnnotation[],
 		codeAnnotations: LiveCodeDraftAnnotation[] = [],
+		attachments: LiveImageAttachment[] = [],
+		linkedDocuments: LiveLinkedDocumentDraft[] = [],
 	): boolean {
 		if (this.reviewRoundStatus !== "open") return false;
 		if (!this.messageSnapshots.has(messageId)) return false;
@@ -297,6 +355,10 @@ export class LiveMessageReviewSession {
 		else this.draftsByMessageId.set(messageId, cloneAnnotations(annotations));
 		if (codeAnnotations.length === 0) this.codeDraftsByMessageId.delete(messageId);
 		else this.codeDraftsByMessageId.set(messageId, cloneAnnotations(codeAnnotations));
+		if (attachments.length === 0) this.attachmentsByMessageId.delete(messageId);
+		else this.attachmentsByMessageId.set(messageId, structuredClone(attachments));
+		if (linkedDocuments.length === 0) this.linkedDocDraftsByMessageId.delete(messageId);
+		else this.linkedDocDraftsByMessageId.set(messageId, structuredClone(linkedDocuments));
 		this.publish();
 		return true;
 	}
@@ -305,12 +367,22 @@ export class LiveMessageReviewSession {
 		const sourceIds = new Set([
 			...this.draftsByMessageId.keys(),
 			...this.codeDraftsByMessageId.keys(),
+			...this.attachmentsByMessageId.keys(),
+			...this.linkedDocDraftsByMessageId.keys(),
 		]);
 		const messages = [...sourceIds].flatMap((messageId) => {
 			const annotations = this.draftsByMessageId.get(messageId) ?? [];
 			const codeAnnotations = this.codeDraftsByMessageId.get(messageId) ?? [];
-			return annotations.length || codeAnnotations.length
-				? [{ messageId, annotations, ...(codeAnnotations.length ? { codeAnnotations } : {}) }]
+			const globalAttachments = this.attachmentsByMessageId.get(messageId) ?? [];
+			const linkedDocuments = this.linkedDocDraftsByMessageId.get(messageId) ?? [];
+			return annotations.length || codeAnnotations.length || globalAttachments.length || linkedDocuments.length
+				? [{
+					messageId,
+					annotations,
+					...(codeAnnotations.length ? { codeAnnotations } : {}),
+					...(globalAttachments.length ? { globalAttachments } : {}),
+					...(linkedDocuments.length ? { linkedDocuments } : {}),
+				}]
 				: [];
 		});
 		return this.submitFeedbackBatch(messages, deliver, true);
@@ -326,6 +398,8 @@ export class LiveMessageReviewSession {
 			messageId: string;
 			annotations: LiveDraftAnnotation[];
 			codeAnnotations?: LiveCodeDraftAnnotation[];
+			globalAttachments?: LiveImageAttachment[];
+			linkedDocuments?: LiveLinkedDocumentDraft[];
 		}>,
 		deliver: FeedbackDelivery,
 		includeRetainedSources = false,
@@ -336,16 +410,22 @@ export class LiveMessageReviewSession {
 		for (const entry of annotationsByMessage) {
 			const message = messagesById.get(entry.messageId);
 			const codeAnnotations = entry.codeAnnotations ?? [];
-			if (!message || (entry.annotations.length === 0 && codeAnnotations.length === 0)) return false;
+			const globalAttachments = entry.globalAttachments ?? [];
+			const linkedDocuments = entry.linkedDocuments ?? [];
+			if (!message || (entry.annotations.length === 0 && codeAnnotations.length === 0 && globalAttachments.length === 0 && linkedDocuments.length === 0)) return false;
 			const existing = messages.find((candidate) => candidate.messageId === entry.messageId);
 			if (existing) {
 				existing.annotations.push(...cloneAnnotations(entry.annotations));
 				(existing.codeAnnotations ??= []).push(...cloneAnnotations(codeAnnotations));
+				(existing.globalAttachments ??= []).push(...structuredClone(globalAttachments));
+				(existing.linkedDocuments ??= []).push(...structuredClone(linkedDocuments));
 			} else messages.push({
 				messageId: message.messageId,
 				messageText: message.text,
 				annotations: cloneAnnotations(entry.annotations),
 				...(codeAnnotations.length ? { codeAnnotations: cloneAnnotations(codeAnnotations) } : {}),
+				...(globalAttachments.length ? { globalAttachments: structuredClone(globalAttachments) } : {}),
+				...(linkedDocuments.length ? { linkedDocuments: structuredClone(linkedDocuments) } : {}),
 			});
 		}
 		if (messages.length === 0) return false;
@@ -443,6 +523,8 @@ export class LiveMessageReviewSession {
 		for (const message of batch.messages) {
 			this.draftsByMessageId.delete(message.messageId);
 			this.codeDraftsByMessageId.delete(message.messageId);
+			this.attachmentsByMessageId.delete(message.messageId);
+			this.linkedDocDraftsByMessageId.delete(message.messageId);
 		}
 		const responseReceivedDuringDelivery = [...this.messages].reverse().find((message) => (
 			this.messagesReceivedWhileSubmitting.has(message.messageId)
@@ -461,6 +543,7 @@ export class LiveMessageReviewSession {
 	}
 
 	private publish(): void {
+		this.revision += 1;
 		const snapshot = this.snapshot();
 		for (const subscriber of this.subscribers) subscriber(snapshot);
 	}

@@ -5,6 +5,8 @@ import {
 	type LiveAssistantMessage,
 	type LiveCodeDraftAnnotation,
 	type LiveDraftAnnotation,
+	type LiveImageAttachment,
+	type LiveLinkedDocumentDraft,
 	type LiveFeedbackBatch,
 	type LiveMessageReviewSnapshot,
 } from "./session.js";
@@ -54,6 +56,25 @@ type OfficialFeedbackPayload = {
 	selectedMessageId?: unknown;
 	feedbackScope?: unknown;
 };
+
+function isDraftAnnotation(annotation: unknown): annotation is LiveDraftAnnotation {
+	return !!annotation && typeof annotation === "object" && typeof (annotation as { id?: unknown }).id === "string";
+}
+
+function isImageAttachment(attachment: unknown): attachment is LiveImageAttachment {
+	return !!attachment && typeof attachment === "object" &&
+		typeof (attachment as { path?: unknown }).path === "string" &&
+		typeof (attachment as { name?: unknown }).name === "string";
+}
+
+function isLinkedDocumentDraft(document: unknown): document is LiveLinkedDocumentDraft {
+	return !!document && typeof document === "object" &&
+		typeof (document as { filepath?: unknown }).filepath === "string" &&
+		Array.isArray((document as { annotations?: unknown }).annotations) &&
+		(document as { annotations: unknown[] }).annotations.every(isDraftAnnotation) &&
+		Array.isArray((document as { globalAttachments?: unknown }).globalAttachments) &&
+		(document as { globalAttachments: unknown[] }).globalAttachments.every(isImageAttachment);
+}
 
 function annotationMessageId(annotation: unknown): string | null {
 	if (!annotation || typeof annotation !== "object") return null;
@@ -190,28 +211,32 @@ export async function startLiveMessageReviewServer(options: {
 					messageId?: unknown;
 					annotations?: unknown;
 					codeAnnotations?: unknown;
+					globalAttachments?: unknown;
+					linkedDocuments?: unknown;
 				} | null;
-				const validAnnotations = Array.isArray(body?.annotations) && body.annotations.every(
-					(annotation): annotation is LiveDraftAnnotation => (
-						!!annotation && typeof annotation === "object" && typeof (annotation as { id?: unknown }).id === "string"
-					),
-				);
+				const validAnnotations = Array.isArray(body?.annotations) && body.annotations.every(isDraftAnnotation);
 				const validCodeAnnotations = body?.codeAnnotations === undefined || (
-					Array.isArray(body.codeAnnotations) && body.codeAnnotations.every(
-						(annotation): annotation is LiveCodeDraftAnnotation => (
-							!!annotation && typeof annotation === "object" && typeof (annotation as { id?: unknown }).id === "string"
-						),
-					)
+					Array.isArray(body.codeAnnotations) && body.codeAnnotations.every(isDraftAnnotation)
+				);
+				const validAttachments = body?.globalAttachments === undefined || (
+					Array.isArray(body.globalAttachments) && body.globalAttachments.every(isImageAttachment)
+				);
+				const validLinkedDocuments = body?.linkedDocuments === undefined || (
+					Array.isArray(body.linkedDocuments) && body.linkedDocuments.every(isLinkedDocumentDraft)
 				);
 				if (
 					!body ||
 					typeof body.messageId !== "string" ||
 					!validAnnotations ||
 					!validCodeAnnotations ||
+					!validAttachments ||
+					!validLinkedDocuments ||
 					!session.replaceDrafts(
 						body.messageId,
 						body.annotations as LiveDraftAnnotation[],
 						(body.codeAnnotations ?? []) as LiveCodeDraftAnnotation[],
+						(body.globalAttachments ?? []) as LiveImageAttachment[],
+						(body.linkedDocuments ?? []) as LiveLinkedDocumentDraft[],
 					)
 				) {
 					writeJson(response, 400, { error: "Invalid draft state" });

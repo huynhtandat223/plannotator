@@ -47,11 +47,15 @@ describe("Live Message Review Session server", () => {
 		const response = await fetch(`${server.url}/api/session`);
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual({
+			revision: 0,
 			messages: messages.slice(0, 4).reverse(),
+			retainedMessages: [],
 			selectedMessageId: "message-1",
 			unreadMessageIds: [],
 			draftsByMessageId: {},
 			codeDraftsByMessageId: {},
+			attachmentsByMessageId: {},
+			linkedDocDraftsByMessageId: {},
 			sentAnnotationsByMessageId: {},
 			sentCodeAnnotationsByMessageId: {},
 			reviewRoundStatus: "open",
@@ -188,11 +192,15 @@ describe("Live Message Review Session server", () => {
 
 		const reconnected = await fetch(`${server.url}/api/session`);
 		expect(await reconnected.json()).toEqual({
+			revision: 3,
 			messages: [older, newest, arrival],
+			retainedMessages: [],
 			selectedMessageId: "arrival",
 			unreadMessageIds: [],
 			draftsByMessageId: { older: [draft] },
 			codeDraftsByMessageId: {},
+			attachmentsByMessageId: {},
+			linkedDocDraftsByMessageId: {},
 			sentAnnotationsByMessageId: {},
 			sentCodeAnnotationsByMessageId: {},
 			reviewRoundStatus: "open",
@@ -252,11 +260,17 @@ describe("Live Message Review Session server", () => {
 			const readSnapshot = createSseSnapshotReader(reader!);
 
 			expect(await readSnapshot()).toEqual({
+				revision: 3,
 				messages: [older, newest, arrival],
+				retainedMessages: [],
 				selectedMessageId: "arrival",
 				unreadMessageIds: [],
 				draftsByMessageId: { older: [draft] },
+				codeDraftsByMessageId: {},
+				attachmentsByMessageId: {},
+				linkedDocDraftsByMessageId: {},
 				sentAnnotationsByMessageId: {},
+				sentCodeAnnotationsByMessageId: {},
 				reviewRoundStatus: "open",
 				deliveryError: null,
 			});
