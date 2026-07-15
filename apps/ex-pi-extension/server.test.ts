@@ -51,7 +51,9 @@ describe("Live Message Review Session server", () => {
 			selectedMessageId: "message-1",
 			unreadMessageIds: [],
 			draftsByMessageId: {},
+			codeDraftsByMessageId: {},
 			sentAnnotationsByMessageId: {},
+			sentCodeAnnotationsByMessageId: {},
 			reviewRoundStatus: "open",
 			deliveryError: null,
 		});
@@ -190,7 +192,9 @@ describe("Live Message Review Session server", () => {
 			selectedMessageId: "arrival",
 			unreadMessageIds: [],
 			draftsByMessageId: { older: [draft] },
+			codeDraftsByMessageId: {},
 			sentAnnotationsByMessageId: {},
+			sentCodeAnnotationsByMessageId: {},
 			reviewRoundStatus: "open",
 			deliveryError: null,
 		});

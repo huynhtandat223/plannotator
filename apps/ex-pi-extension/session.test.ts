@@ -272,6 +272,24 @@ describe("LiveMessageReviewSession", () => {
 		expect(session.replaceDrafts("m7", [{ id: "editable" }])).toBe(true);
 	});
 
+	test("preserves a draft when a visible response is updated in place", async () => {
+		const session = sessionWith([{ messageId: "m1", text: "Original response" }]);
+		session.replaceDrafts("m1", [{ id: "draft", type: "COMMENT", text: "Keep this" }]);
+
+		session.reconcile([{ messageId: "m1", text: "Updated response" }], ["m1"]);
+
+		expect(session.snapshot().draftsByMessageId).toEqual({
+			m1: [{ id: "draft", type: "COMMENT", text: "Keep this" }],
+		});
+		let delivered: LiveFeedbackBatchMessage[] = [];
+		await session.submitFeedback(async (batch) => { delivered = batch.messages; });
+		expect(delivered).toEqual([{
+			messageId: "m1",
+			messageText: "Updated response",
+			annotations: [{ id: "draft", type: "COMMENT", text: "Keep this" }],
+		}]);
+	});
+
 	test("retains and delivers a draft after its response leaves the compact picker", async () => {
 		const messages = Array.from({ length: 5 }, (_, index) => ({
 			messageId: `m${5 - index}`,
@@ -291,6 +309,32 @@ describe("LiveMessageReviewSession", () => {
 		expect(delivered).toEqual([
 			{ messageId: "m2", messageText: "Response 2", annotations: [{ id: "retained" }] },
 		]);
+	});
+
+	test("retains code drafts after their response leaves the compact picker", async () => {
+		const messages = Array.from({ length: 5 }, (_, index) => ({
+			messageId: `m${5 - index}`,
+			text: `Response ${5 - index}`,
+		}));
+		const session = sessionWith(messages);
+		session.replaceDrafts("m2", [], [{
+			id: "code-draft",
+			filePath: "src/example.ts",
+			lineStart: 4,
+			lineEnd: 5,
+			originalCode: "const value = 1;",
+			text: "Use the configured value.",
+		}]);
+
+		session.reconcile(
+			[{ messageId: "m6", text: "Response 6" }, ...messages],
+			["m6", "m5", "m4", "m3", "m2", "m1"],
+		);
+
+		let output = "";
+		expect(await session.submitFeedback(async (batch) => { output = formatLiveFeedbackBatch(batch); })).toBe(true);
+		expect(output).toContain("src/example.ts (lines 4-5)");
+		expect(output).toContain("Use the configured value.");
 	});
 
 	test("reconcile selects the newest message and unlocks round after waiting", async () => {
@@ -450,7 +494,9 @@ describe("Live Message Review Session snapshot", () => {
 			selectedMessageId: "new",
 			unreadMessageIds: [],
 			draftsByMessageId: {},
+			codeDraftsByMessageId: {},
 			sentAnnotationsByMessageId: {},
+			sentCodeAnnotationsByMessageId: {},
 			reviewRoundStatus: "open",
 			deliveryError: null,
 		});

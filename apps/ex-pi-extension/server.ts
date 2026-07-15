@@ -3,6 +3,7 @@ import { getExPlannotatorBindHost, getExPlannotatorUrl } from "./network.js";
 import {
 	LiveMessageReviewSession,
 	type LiveAssistantMessage,
+	type LiveCodeDraftAnnotation,
 	type LiveDraftAnnotation,
 	type LiveFeedbackBatch,
 	type LiveMessageReviewSnapshot,
@@ -188,17 +189,30 @@ export async function startLiveMessageReviewServer(options: {
 				const body = await readJson(request) as {
 					messageId?: unknown;
 					annotations?: unknown;
+					codeAnnotations?: unknown;
 				} | null;
 				const validAnnotations = Array.isArray(body?.annotations) && body.annotations.every(
 					(annotation): annotation is LiveDraftAnnotation => (
 						!!annotation && typeof annotation === "object" && typeof (annotation as { id?: unknown }).id === "string"
 					),
 				);
+				const validCodeAnnotations = body?.codeAnnotations === undefined || (
+					Array.isArray(body.codeAnnotations) && body.codeAnnotations.every(
+						(annotation): annotation is LiveCodeDraftAnnotation => (
+							!!annotation && typeof annotation === "object" && typeof (annotation as { id?: unknown }).id === "string"
+						),
+					)
+				);
 				if (
 					!body ||
 					typeof body.messageId !== "string" ||
 					!validAnnotations ||
-					!session.replaceDrafts(body.messageId, body.annotations as LiveDraftAnnotation[])
+					!validCodeAnnotations ||
+					!session.replaceDrafts(
+						body.messageId,
+						body.annotations as LiveDraftAnnotation[],
+						(body.codeAnnotations ?? []) as LiveCodeDraftAnnotation[],
+					)
 				) {
 					writeJson(response, 400, { error: "Invalid draft state" });
 					return;

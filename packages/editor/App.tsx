@@ -173,6 +173,7 @@ type LiveMessageReviewSnapshot = {
   messages: PickerMessage[];
   selectedMessageId: string | null;
   draftsByMessageId?: Record<string, Annotation[]>;
+  codeDraftsByMessageId?: Record<string, CodeAnnotation[]>;
   reviewRoundStatus: LiveReviewRoundStatus;
   deliveryError: string | null;
 };
@@ -390,6 +391,7 @@ const App: React.FC = () => {
   const [liveReviewUpdateError, setLiveReviewUpdateError] = useState<string | null>(null);
   const [liveReviewUpdateStatus, setLiveReviewUpdateStatus] = useState<string | null>(null);
   const [isLiveReviewActionPending, setIsLiveReviewActionPending] = useState(false);
+  const liveDraftSaveQueuesRef = useRef<Map<string, Promise<void>>>(new Map());
   const planReviewSelectedIsHistorical = (() => {
     if (!planReview?.snapshot.selected) return false;
     const selected = planReview.snapshot.selected;
@@ -1093,17 +1095,21 @@ const App: React.FC = () => {
     const states = saveCurrentMessageState();
     const existingState = states.get(nextSelectedMessageId) ?? createEmptyMessageState(targetMessage);
     const serverDrafts = snapshot.draftsByMessageId?.[nextSelectedMessageId];
+    const serverCodeDrafts = snapshot.codeDraftsByMessageId?.[nextSelectedMessageId];
     const targetState = normalizeMessageState(
-      serverDrafts
+      serverDrafts || serverCodeDrafts
         ? {
             ...existingState,
-            linkedDocSession: {
-              ...existingState.linkedDocSession,
-              root: {
-                ...existingState.linkedDocSession.root,
-                annotations: serverDrafts,
-              },
-            },
+            linkedDocSession: serverDrafts
+              ? {
+                  ...existingState.linkedDocSession,
+                  root: {
+                    ...existingState.linkedDocSession.root,
+                    annotations: serverDrafts,
+                  },
+                }
+              : existingState.linkedDocSession,
+            codeAnnotations: serverCodeDrafts ?? existingState.codeAnnotations,
           }
         : existingState,
       targetMessage,
@@ -1115,7 +1121,7 @@ const App: React.FC = () => {
     setCachedMessageAnnotationCounts(buildMessageAnnotationCounts(messageStateCacheRef.current));
 
     const selectedChanged = nextSelectedMessageId !== selectedMessageId;
-    if (selectedChanged || serverDrafts) {
+    if (selectedChanged || serverDrafts || serverCodeDrafts) {
       setSelectedMessageId(nextSelectedMessageId);
       linkedDocHook.restoreSession(targetState.linkedDocSession);
       setCodeAnnotations([...targetState.codeAnnotations]);
@@ -3000,15 +3006,7 @@ const App: React.FC = () => {
         // The live session owns draft retention. Save this source before asking
         // it to submit every outstanding draft, including sources aged out of
         // the four-row picker.
-        const drafts = await fetch('/api/session/drafts', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messageId: selectedMessageId, annotations: allAnnotations }),
-        });
-        if (!drafts.ok) {
-          const body = await drafts.json().catch(() => ({})) as { error?: string };
-          throw new Error(body.error || 'Could not save live review annotations');
-        }
+        await saveLiveReviewDrafts(selectedMessageId, allAnnotations, codeAnnotations);
         const response = await fetch('/api/session/feedback', { method: 'POST' });
         const snapshot = await response.json().catch(() => null) as LiveMessageReviewSnapshot | null;
         if (!response.ok || !snapshot) throw new Error('Live review feedback could not be delivered');
@@ -3265,16 +3263,31 @@ const App: React.FC = () => {
       .catch((error) => toast.error('Could not save annotation', { description: error instanceof Error ? error.message : String(error) }));
   }, [planReview, planReviewReadOnly]);
 
-  const saveLiveReviewDrafts = useCallback((messageId: string, next: Annotation[]) => {
-    void fetch('/api/session/drafts', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messageId, annotations: next }),
-    }).then(async (response) => {
-      if (!response.ok) throw new Error('Could not save live review annotations');
-      return response.json() as Promise<LiveMessageReviewSnapshot>;
-    }).then((snapshot) => applyLiveReviewSnapshot(snapshot)).catch(() => {
+  const saveLiveReviewDrafts = useCallback((messageId: string, next: Annotation[], nextCodeAnnotations: CodeAnnotation[]): Promise<void> => {
+    const previous = liveDraftSaveQueuesRef.current.get(messageId) ?? Promise.resolve();
+    const save = previous
+      .catch(() => {})
+      .then(async () => {
+        const response = await fetch('/api/session/drafts', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messageId, annotations: next, codeAnnotations: nextCodeAnnotations }),
+        });
+        if (!response.ok) throw new Error('Could not save live review annotations');
+        applyLiveReviewSnapshot(await response.json() as LiveMessageReviewSnapshot);
+      });
+    liveDraftSaveQueuesRef.current.set(messageId, save);
+    void save.then(
+      () => {
+        if (liveDraftSaveQueuesRef.current.get(messageId) === save) liveDraftSaveQueuesRef.current.delete(messageId);
+      },
+      () => {
+        if (liveDraftSaveQueuesRef.current.get(messageId) === save) liveDraftSaveQueuesRef.current.delete(messageId);
+      },
+    );
+    return save.catch(() => {
       setLiveReviewUpdateError('Could not save annotations. Keep this page open and try again.');
+      throw new Error('Could not save live review annotations');
     });
   }, [applyLiveReviewSnapshot]);
 
@@ -3288,7 +3301,7 @@ const App: React.FC = () => {
     } else if (liveMessageReview && selectedMessageId) {
       const next = [...annotations, ann];
       setAnnotations(next);
-      saveLiveReviewDrafts(selectedMessageId, next);
+      void saveLiveReviewDrafts(selectedMessageId, next, codeAnnotations).catch(() => {});
     } else setAnnotations(prev => [...prev, ann]);
     setSelectedAnnotationId(ann.id);
     setSelectedCodeAnnotationId(null);
@@ -3316,10 +3329,12 @@ const App: React.FC = () => {
       createdAt: Date.now(),
       author: configStore.get('displayName') || undefined,
     };
-    setCodeAnnotations(prev => [...prev, annotation]);
+    const next = [...codeAnnotations, annotation];
+    setCodeAnnotations(next);
     setSelectedAnnotationId(null);
     setSelectedCodeAnnotationId(annotation.id);
-  }, []);
+    if (liveMessageReview && selectedMessageId) void saveLiveReviewDrafts(selectedMessageId, annotations, next).catch(() => {});
+  }, [annotations, codeAnnotations, liveMessageReview, selectedMessageId, saveLiveReviewDrafts]);
 
   // The code popout is full-viewport modal — the annotation panel is behind it.
   // This handler only fires when the popout is closed (sidebar visible), so
@@ -3334,13 +3349,17 @@ const App: React.FC = () => {
   }, [codeAnnotations, codeFilePopout.open, isMobile, wideModeType]);
 
   const handleDeleteCodeAnnotation = React.useCallback((id: string) => {
-    setCodeAnnotations(prev => prev.filter(a => a.id !== id));
+    const next = codeAnnotations.filter((annotation) => annotation.id !== id);
+    setCodeAnnotations(next);
     if (selectedCodeAnnotationId === id) setSelectedCodeAnnotationId(null);
-  }, [selectedCodeAnnotationId]);
+    if (liveMessageReview && selectedMessageId) void saveLiveReviewDrafts(selectedMessageId, annotations, next).catch(() => {});
+  }, [annotations, codeAnnotations, liveMessageReview, selectedCodeAnnotationId, selectedMessageId, saveLiveReviewDrafts]);
 
   const handleEditCodeAnnotation = React.useCallback((id: string, updates: Partial<CodeAnnotation>) => {
-    setCodeAnnotations(prev => prev.map(a => a.id === id ? { ...a, ...updates } : a));
-  }, []);
+    const next = codeAnnotations.map((annotation) => annotation.id === id ? { ...annotation, ...updates } : annotation);
+    setCodeAnnotations(next);
+    if (liveMessageReview && selectedMessageId) void saveLiveReviewDrafts(selectedMessageId, annotations, next).catch(() => {});
+  }, [annotations, codeAnnotations, liveMessageReview, selectedMessageId, saveLiveReviewDrafts]);
 
   // Core annotation removal — highlight cleanup + state filter + selection clear
   const removeAnnotation = (id: string) => {
@@ -3371,7 +3390,7 @@ const App: React.FC = () => {
       viewerRef.current?.removeHighlight(id);
       setAnnotations(next);
       if (selectedAnnotationId === id) setSelectedAnnotationId(null);
-      saveLiveReviewDrafts(selectedMessageId, next);
+      void saveLiveReviewDrafts(selectedMessageId, next, codeAnnotations).catch(() => {});
       return;
     }
     const ann = allAnnotations.find(a => a.id === id);
@@ -3404,7 +3423,7 @@ const App: React.FC = () => {
     if (liveMessageReview && selectedMessageId) {
       const next = annotations.map((annotation) => annotation.id === id ? { ...annotation, ...updates } : annotation);
       setAnnotations(next);
-      saveLiveReviewDrafts(selectedMessageId, next);
+      void saveLiveReviewDrafts(selectedMessageId, next, codeAnnotations).catch(() => {});
       return;
     }
     const ann = allAnnotations.find(a => a.id === id);

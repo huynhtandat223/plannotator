@@ -34,7 +34,9 @@ test('live feedback saves the current source before submitting all retained draf
 
   expect(callback).toContain("fetch('/api/session/drafts'");
   expect(callback).toContain("fetch('/api/session/feedback'");
-  expect(callback).toContain('annotations: allAnnotations');
+  expect(callback).toContain('saveLiveReviewDrafts(selectedMessageId, allAnnotations, codeAnnotations)');
   expect(source).toContain('const saveLiveReviewDrafts');
-  expect(source).toContain('saveLiveReviewDrafts(selectedMessageId, next)');
+  expect(source).toContain('liveDraftSaveQueuesRef');
+  expect(source).toContain('codeAnnotations: nextCodeAnnotations');
+  expect(source).toContain('saveLiveReviewDrafts(selectedMessageId, next, codeAnnotations)');
 });

@@ -13,10 +13,18 @@ export type LiveDraftAnnotation = {
 	[key: string]: unknown;
 };
 
+export type LiveCodeDraftAnnotation = LiveDraftAnnotation & {
+	filePath?: string;
+	lineStart?: number;
+	lineEnd?: number;
+	originalCode?: string;
+};
+
 export type LiveFeedbackBatchMessage = {
 	messageId: string;
 	messageText: string;
 	annotations: LiveDraftAnnotation[];
+	codeAnnotations?: LiveCodeDraftAnnotation[];
 };
 
 export type LiveFeedbackBatch = {
@@ -32,7 +40,9 @@ export type LiveMessageReviewSnapshot = {
 	selectedMessageId: string | null;
 	unreadMessageIds: string[];
 	draftsByMessageId: Record<string, LiveDraftAnnotation[]>;
+	codeDraftsByMessageId: Record<string, LiveCodeDraftAnnotation[]>;
 	sentAnnotationsByMessageId: Record<string, LiveDraftAnnotation[]>;
+	sentCodeAnnotationsByMessageId: Record<string, LiveCodeDraftAnnotation[]>;
 	reviewRoundStatus: ReviewRoundStatus;
 	deliveryError: string | null;
 };
@@ -102,6 +112,21 @@ function formatAnnotation(annotation: LiveDraftAnnotation, position: number): st
 	return output;
 }
 
+function formatCodeAnnotation(annotation: LiveCodeDraftAnnotation, position: number): string {
+	const filePath = stringValue(annotation, "filePath") ?? "referenced code";
+	const lineStart = typeof annotation.lineStart === "number" ? annotation.lineStart : undefined;
+	const lineEnd = typeof annotation.lineEnd === "number" ? annotation.lineEnd : lineStart;
+	const lineRange = lineStart === undefined
+		? ""
+		: lineEnd === lineStart ? ` (line ${lineStart})` : ` (lines ${lineStart}-${lineEnd})`;
+	const originalCode = stringValue(annotation, "originalCode");
+	const comment = stringValue(annotation, "text") ?? "";
+	let output = `### Code feedback ${position}. ${filePath}${lineRange}\n`;
+	if (originalCode) output += `\`\`\`\n${originalCode}\n\`\`\`\n`;
+	if (comment) output += `> ${comment}\n`;
+	return output;
+}
+
 /**
  * Creates the user message delivered to Pi. Every source response is named by
  * its stable Pi identity and quoted so feedback stays understandable after the
@@ -117,6 +142,9 @@ export function formatLiveFeedbackBatch(batch: LiveFeedbackBatch): string {
 		output += `${quote(excerpt(message.messageText))}\n\n`;
 		for (const [index, annotation] of message.annotations.entries()) {
 			output += `${formatAnnotation(annotation, index + 1)}\n`;
+		}
+		for (const [index, annotation] of (message.codeAnnotations ?? []).entries()) {
+			output += `${formatCodeAnnotation(annotation, index + 1)}\n`;
 		}
 	}
 
@@ -136,7 +164,9 @@ export function createLiveMessageReviewSnapshot(
 		selectedMessageId: recentMessages.at(-1)?.messageId ?? null,
 		unreadMessageIds: [],
 		draftsByMessageId: {},
+		codeDraftsByMessageId: {},
 		sentAnnotationsByMessageId: {},
+		sentCodeAnnotationsByMessageId: {},
 		reviewRoundStatus: "open",
 		deliveryError: null,
 	};
@@ -150,7 +180,9 @@ export class LiveMessageReviewSession {
 	private selectedMessageId: string | null;
 	private readonly unreadMessageIds = new Set<string>();
 	private readonly draftsByMessageId = new Map<string, LiveDraftAnnotation[]>();
+	private readonly codeDraftsByMessageId = new Map<string, LiveCodeDraftAnnotation[]>();
 	private readonly sentAnnotationsByMessageId = new Map<string, LiveDraftAnnotation[]>();
+	private readonly sentCodeAnnotationsByMessageId = new Map<string, LiveCodeDraftAnnotation[]>();
 	private readonly messagesReceivedWhileSubmitting = new Set<string>();
 	private agentStoppedWhileSubmitting = false;
 	private failedBatch: LiveFeedbackBatch | null = null;
@@ -159,7 +191,7 @@ export class LiveMessageReviewSession {
 
 	constructor(messages: LiveAssistantMessage[]) {
 		const initial = createLiveMessageReviewSnapshot(messages);
-		for (const message of uniqueMessages(messages)) this.messageSnapshots.set(message.messageId, { ...message });
+		for (const message of initial.messages) this.messageSnapshots.set(message.messageId, { ...message });
 		this.messages = initial.messages;
 		this.selectedMessageId = initial.selectedMessageId;
 	}
@@ -172,7 +204,9 @@ export class LiveMessageReviewSession {
 				.filter((message) => this.unreadMessageIds.has(message.messageId))
 				.map((message) => message.messageId),
 			draftsByMessageId: annotationsRecord(this.draftsByMessageId),
+			codeDraftsByMessageId: annotationsRecord(this.codeDraftsByMessageId),
 			sentAnnotationsByMessageId: annotationsRecord(this.sentAnnotationsByMessageId),
+			sentCodeAnnotationsByMessageId: annotationsRecord(this.sentCodeAnnotationsByMessageId),
 			reviewRoundStatus: this.reviewRoundStatus,
 			deliveryError: this.deliveryError,
 		};
@@ -185,13 +219,25 @@ export class LiveMessageReviewSession {
 		// Compare against every retained source, not just the four visible rows.
 		// A response returning to the compact picker is not a new arrival.
 		const newMessages = incoming.filter((message) => !this.messageSnapshots.has(message.messageId));
-		const removedMessageIds = [...this.messageSnapshots.keys()].filter((messageId) => !activeIds.has(messageId));
-		if (newMessages.length === 0 && removedMessageIds.length === 0) return;
+		const retainedStateIds = new Set([
+			...this.messageSnapshots.keys(),
+			...this.draftsByMessageId.keys(),
+			...this.codeDraftsByMessageId.keys(),
+			...this.sentAnnotationsByMessageId.keys(),
+			...this.sentCodeAnnotationsByMessageId.keys(),
+			...(this.failedBatch?.messages.map((message) => message.messageId) ?? []),
+		]);
+		const removedMessageIds = [...retainedStateIds].filter((messageId) => !activeIds.has(messageId));
+		const visibleMessagesChanged = incoming.length !== this.messages.length || incoming.some((message, index) => {
+			const current = this.messages[this.messages.length - index - 1];
+			return !current || current.messageId !== message.messageId || current.text !== message.text || current.timestamp !== message.timestamp;
+		});
+		if (newMessages.length === 0 && removedMessageIds.length === 0 && !visibleMessagesChanged) return;
 
 		const wasOpen = this.reviewRoundStatus === "open";
 		const wasSubmitting = this.reviewRoundStatus === "submitting";
 		const wasWaitingForAgent = this.reviewRoundStatus === "waiting" || this.reviewRoundStatus === "agent_stopped";
-		for (const message of activeMessages) this.messageSnapshots.set(message.messageId, { ...message });
+		for (const message of incoming) this.messageSnapshots.set(message.messageId, { ...message });
 		this.messages = incoming
 			.reverse()
 			.map((message) => ({ ...message }));
@@ -199,13 +245,24 @@ export class LiveMessageReviewSession {
 		for (const messageId of removedMessageIds) {
 			this.unreadMessageIds.delete(messageId);
 			this.draftsByMessageId.delete(messageId);
+			this.codeDraftsByMessageId.delete(messageId);
 			this.sentAnnotationsByMessageId.delete(messageId);
+			this.sentCodeAnnotationsByMessageId.delete(messageId);
 			this.messageSnapshots.delete(messageId);
 			this.messagesReceivedWhileSubmitting.delete(messageId);
 		}
 		for (const message of newMessages) {
 			this.unreadMessageIds.add(message.messageId);
 			if (wasSubmitting) this.messagesReceivedWhileSubmitting.add(message.messageId);
+		}
+		const retainedMessageIds = new Set([
+			...this.messages.map((message) => message.messageId),
+			...this.draftsByMessageId.keys(),
+			...this.codeDraftsByMessageId.keys(),
+			...(this.failedBatch?.messages.map((message) => message.messageId) ?? []),
+		]);
+		for (const messageId of this.messageSnapshots.keys()) {
+			if (!retainedMessageIds.has(messageId)) this.messageSnapshots.delete(messageId);
 		}
 		const newestArrival = newMessages[0];
 		if (newestArrival && (wasWaitingForAgent || wasOpen)) {
@@ -229,19 +286,32 @@ export class LiveMessageReviewSession {
 		return true;
 	}
 
-	replaceDrafts(messageId: string, annotations: LiveDraftAnnotation[]): boolean {
+	replaceDrafts(
+		messageId: string,
+		annotations: LiveDraftAnnotation[],
+		codeAnnotations: LiveCodeDraftAnnotation[] = [],
+	): boolean {
 		if (this.reviewRoundStatus !== "open") return false;
 		if (!this.messageSnapshots.has(messageId)) return false;
 		if (annotations.length === 0) this.draftsByMessageId.delete(messageId);
 		else this.draftsByMessageId.set(messageId, cloneAnnotations(annotations));
+		if (codeAnnotations.length === 0) this.codeDraftsByMessageId.delete(messageId);
+		else this.codeDraftsByMessageId.set(messageId, cloneAnnotations(codeAnnotations));
 		this.publish();
 		return true;
 	}
 
 	async submitFeedback(deliver: FeedbackDelivery): Promise<boolean> {
-		const messages = [...this.draftsByMessageId.entries()].flatMap(([messageId, annotations]) => {
-			const message = this.messageSnapshots.get(messageId);
-			return message && annotations.length ? [{ messageId, annotations }] : [];
+		const sourceIds = new Set([
+			...this.draftsByMessageId.keys(),
+			...this.codeDraftsByMessageId.keys(),
+		]);
+		const messages = [...sourceIds].flatMap((messageId) => {
+			const annotations = this.draftsByMessageId.get(messageId) ?? [];
+			const codeAnnotations = this.codeDraftsByMessageId.get(messageId) ?? [];
+			return annotations.length || codeAnnotations.length
+				? [{ messageId, annotations, ...(codeAnnotations.length ? { codeAnnotations } : {}) }]
+				: [];
 		});
 		return this.submitFeedbackBatch(messages, deliver, true);
 	}
@@ -252,7 +322,11 @@ export class LiveMessageReviewSession {
 	 * the same retryable delivery state machine as the live-session UI.
 	 */
 	async submitFeedbackBatch(
-		annotationsByMessage: Array<{ messageId: string; annotations: LiveDraftAnnotation[] }>,
+		annotationsByMessage: Array<{
+			messageId: string;
+			annotations: LiveDraftAnnotation[];
+			codeAnnotations?: LiveCodeDraftAnnotation[];
+		}>,
 		deliver: FeedbackDelivery,
 		includeRetainedSources = false,
 	): Promise<boolean> {
@@ -261,13 +335,17 @@ export class LiveMessageReviewSession {
 		const messages: LiveFeedbackBatchMessage[] = [];
 		for (const entry of annotationsByMessage) {
 			const message = messagesById.get(entry.messageId);
-			if (!message || entry.annotations.length === 0) return false;
+			const codeAnnotations = entry.codeAnnotations ?? [];
+			if (!message || (entry.annotations.length === 0 && codeAnnotations.length === 0)) return false;
 			const existing = messages.find((candidate) => candidate.messageId === entry.messageId);
-			if (existing) existing.annotations.push(...cloneAnnotations(entry.annotations));
-			else messages.push({
+			if (existing) {
+				existing.annotations.push(...cloneAnnotations(entry.annotations));
+				(existing.codeAnnotations ??= []).push(...cloneAnnotations(codeAnnotations));
+			} else messages.push({
 				messageId: message.messageId,
 				messageText: message.text,
 				annotations: cloneAnnotations(entry.annotations),
+				...(codeAnnotations.length ? { codeAnnotations: cloneAnnotations(codeAnnotations) } : {}),
 			});
 		}
 		if (messages.length === 0) return false;
@@ -354,8 +432,18 @@ export class LiveMessageReviewSession {
 				...existing,
 				...cloneAnnotations(message.annotations),
 			]);
+			if (message.codeAnnotations?.length) {
+				const existingCode = this.sentCodeAnnotationsByMessageId.get(message.messageId) ?? [];
+				this.sentCodeAnnotationsByMessageId.set(message.messageId, [
+					...existingCode,
+					...cloneAnnotations(message.codeAnnotations),
+				]);
+			}
 		}
-		for (const message of batch.messages) this.draftsByMessageId.delete(message.messageId);
+		for (const message of batch.messages) {
+			this.draftsByMessageId.delete(message.messageId);
+			this.codeDraftsByMessageId.delete(message.messageId);
+		}
 		const responseReceivedDuringDelivery = [...this.messages].reverse().find((message) => (
 			this.messagesReceivedWhileSubmitting.has(message.messageId)
 		));
