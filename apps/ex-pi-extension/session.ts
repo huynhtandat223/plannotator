@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-export const RECENT_MESSAGE_LIMIT = 25;
+export const LIVE_RESPONSE_HISTORY_LIMIT = 4;
 
 export type LiveAssistantMessage = {
 	messageId: string;
@@ -27,6 +27,7 @@ export type LiveFeedbackBatch = {
 export type ReviewRoundStatus = "open" | "submitting" | "delivery_failed" | "waiting" | "agent_stopped";
 
 export type LiveMessageReviewSnapshot = {
+	/** Current compact response picker, ordered oldest to newest for display. */
 	messages: LiveAssistantMessage[];
 	selectedMessageId: string | null;
 	unreadMessageIds: string[];
@@ -125,10 +126,14 @@ export function formatLiveFeedbackBatch(batch: LiveFeedbackBatch): string {
 export function createLiveMessageReviewSnapshot(
 	messages: LiveAssistantMessage[],
 ): LiveMessageReviewSnapshot {
-	const recentMessages = uniqueMessages(messages).slice(0, RECENT_MESSAGE_LIMIT);
+	// Pi exposes the active branch newest-first. Keep the live picker compact
+	// and chronological, with the newest response selected below.
+	const recentMessages = uniqueMessages(messages)
+		.slice(0, LIVE_RESPONSE_HISTORY_LIMIT)
+		.reverse();
 	return {
 		messages: recentMessages.map((message) => ({ ...message })),
-		selectedMessageId: recentMessages[0]?.messageId ?? null,
+		selectedMessageId: recentMessages.at(-1)?.messageId ?? null,
 		unreadMessageIds: [],
 		draftsByMessageId: {},
 		sentAnnotationsByMessageId: {},
@@ -139,6 +144,8 @@ export function createLiveMessageReviewSnapshot(
 
 export class LiveMessageReviewSession {
 	private readonly subscribers = new Set<SnapshotSubscriber>();
+	/** Retains sources with existing drafts outside the compact visible picker. */
+	private readonly messageSnapshots = new Map<string, LiveAssistantMessage>();
 	private messages: LiveAssistantMessage[];
 	private selectedMessageId: string | null;
 	private readonly unreadMessageIds = new Set<string>();
@@ -152,6 +159,7 @@ export class LiveMessageReviewSession {
 
 	constructor(messages: LiveAssistantMessage[]) {
 		const initial = createLiveMessageReviewSnapshot(messages);
+		for (const message of uniqueMessages(messages)) this.messageSnapshots.set(message.messageId, { ...message });
 		this.messages = initial.messages;
 		this.selectedMessageId = initial.selectedMessageId;
 	}
@@ -171,45 +179,42 @@ export class LiveMessageReviewSession {
 	}
 
 	reconcile(activeBranchMessages: LiveAssistantMessage[], activeBranchMessageIds: string[]): void {
-		const incoming = uniqueMessages(activeBranchMessages);
+		const activeMessages = uniqueMessages(activeBranchMessages);
+		const incoming = activeMessages.slice(0, LIVE_RESPONSE_HISTORY_LIMIT);
 		const activeIds = new Set(activeBranchMessageIds);
-		const currentIds = new Set(this.messages.map((message) => message.messageId));
-		const newMessages = incoming.filter((message) => !currentIds.has(message.messageId));
-		const removedMessageIds = this.messages
-			.filter((message) => !activeIds.has(message.messageId))
-			.map((message) => message.messageId);
+		// Compare against every retained source, not just the four visible rows.
+		// A response returning to the compact picker is not a new arrival.
+		const newMessages = incoming.filter((message) => !this.messageSnapshots.has(message.messageId));
+		const removedMessageIds = [...this.messageSnapshots.keys()].filter((messageId) => !activeIds.has(messageId));
 		if (newMessages.length === 0 && removedMessageIds.length === 0) return;
 
-		const previousNewestId = this.messages[0]?.messageId ?? null;
-		const hasDrafts = [...this.draftsByMessageId.values()].some((annotations) => annotations.length > 0);
-		const passivelyWaiting = !hasDrafts && this.selectedMessageId === previousNewestId;
+		const wasOpen = this.reviewRoundStatus === "open";
 		const wasSubmitting = this.reviewRoundStatus === "submitting";
 		const wasWaitingForAgent = this.reviewRoundStatus === "waiting" || this.reviewRoundStatus === "agent_stopped";
-		const incomingIds = new Set(incoming.map((message) => message.messageId));
-		this.messages = [
-			...incoming.map((message) => ({ ...message })),
-			...this.messages.filter((message) => (
-				activeIds.has(message.messageId) && !incomingIds.has(message.messageId)
-			)),
-		];
+		for (const message of activeMessages) this.messageSnapshots.set(message.messageId, { ...message });
+		this.messages = incoming
+			.reverse()
+			.map((message) => ({ ...message }));
 
 		for (const messageId of removedMessageIds) {
 			this.unreadMessageIds.delete(messageId);
 			this.draftsByMessageId.delete(messageId);
 			this.sentAnnotationsByMessageId.delete(messageId);
+			this.messageSnapshots.delete(messageId);
 			this.messagesReceivedWhileSubmitting.delete(messageId);
 		}
 		for (const message of newMessages) {
 			this.unreadMessageIds.add(message.messageId);
 			if (wasSubmitting) this.messagesReceivedWhileSubmitting.add(message.messageId);
 		}
-		if (wasWaitingForAgent && newMessages.length > 0) {
-			this.reviewRoundStatus = "open";
-			this.selectedMessageId = newMessages[0].messageId;
-		} else if (passivelyWaiting && newMessages.length > 0) {
-			this.selectedMessageId = newMessages[0].messageId;
+		const newestArrival = newMessages[0];
+		if (newestArrival && (wasWaitingForAgent || wasOpen)) {
+			// An open live review follows a completed assistant response so it is
+			// immediately editable; existing drafts remain keyed to their source.
+			if (wasWaitingForAgent) this.reviewRoundStatus = "open";
+			this.selectedMessageId = newestArrival.messageId;
 		} else if (!this.messages.some((message) => message.messageId === this.selectedMessageId)) {
-			this.selectedMessageId = this.messages[0]?.messageId ?? null;
+			this.selectedMessageId = this.messages.at(-1)?.messageId ?? null;
 		}
 		if (this.selectedMessageId) this.unreadMessageIds.delete(this.selectedMessageId);
 		this.publish();
@@ -226,7 +231,7 @@ export class LiveMessageReviewSession {
 
 	replaceDrafts(messageId: string, annotations: LiveDraftAnnotation[]): boolean {
 		if (this.reviewRoundStatus !== "open") return false;
-		if (!this.messages.some((message) => message.messageId === messageId)) return false;
+		if (!this.messageSnapshots.has(messageId)) return false;
 		if (annotations.length === 0) this.draftsByMessageId.delete(messageId);
 		else this.draftsByMessageId.set(messageId, cloneAnnotations(annotations));
 		this.publish();
@@ -234,13 +239,11 @@ export class LiveMessageReviewSession {
 	}
 
 	async submitFeedback(deliver: FeedbackDelivery): Promise<boolean> {
-		const messages = this.messages.flatMap((message) => {
-			const annotations = this.draftsByMessageId.get(message.messageId);
-			return annotations?.length
-				? [{ messageId: message.messageId, annotations }]
-				: [];
+		const messages = [...this.draftsByMessageId.entries()].flatMap(([messageId, annotations]) => {
+			const message = this.messageSnapshots.get(messageId);
+			return message && annotations.length ? [{ messageId, annotations }] : [];
 		});
-		return this.submitFeedbackBatch(messages, deliver);
+		return this.submitFeedbackBatch(messages, deliver, true);
 	}
 
 	/**
@@ -251,9 +254,10 @@ export class LiveMessageReviewSession {
 	async submitFeedbackBatch(
 		annotationsByMessage: Array<{ messageId: string; annotations: LiveDraftAnnotation[] }>,
 		deliver: FeedbackDelivery,
+		includeRetainedSources = false,
 	): Promise<boolean> {
 		if (this.reviewRoundStatus !== "open") return false;
-		const messagesById = new Map(this.messages.map((message) => [message.messageId, message]));
+		const messagesById = includeRetainedSources ? this.messageSnapshots : new Map(this.messages.map((message) => [message.messageId, message]));
 		const messages: LiveFeedbackBatchMessage[] = [];
 		for (const entry of annotationsByMessage) {
 			const message = messagesById.get(entry.messageId);
@@ -351,8 +355,8 @@ export class LiveMessageReviewSession {
 				...cloneAnnotations(message.annotations),
 			]);
 		}
-		this.draftsByMessageId.clear();
-		const responseReceivedDuringDelivery = this.messages.find((message) => (
+		for (const message of batch.messages) this.draftsByMessageId.delete(message.messageId);
+		const responseReceivedDuringDelivery = [...this.messages].reverse().find((message) => (
 			this.messagesReceivedWhileSubmitting.has(message.messageId)
 		));
 		this.messagesReceivedWhileSubmitting.clear();

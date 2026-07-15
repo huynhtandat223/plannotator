@@ -169,8 +169,10 @@ type MessageAnnotationState = {
 type LiveReviewRoundStatus = 'open' | 'submitting' | 'delivery_failed' | 'waiting' | 'agent_stopped';
 
 type LiveMessageReviewSnapshot = {
+  /** Compact latest-four picker, ordered oldest to newest. */
   messages: PickerMessage[];
   selectedMessageId: string | null;
+  draftsByMessageId?: Record<string, Annotation[]>;
   reviewRoundStatus: LiveReviewRoundStatus;
   deliveryError: string | null;
 };
@@ -385,6 +387,8 @@ const App: React.FC = () => {
   const [planReviewSourcesOpen, setPlanReviewSourcesOpen] = useState(false);
   const [liveReviewRoundStatus, setLiveReviewRoundStatus] = useState<LiveReviewRoundStatus>('open');
   const [liveReviewDeliveryError, setLiveReviewDeliveryError] = useState<string | null>(null);
+  const [liveReviewUpdateError, setLiveReviewUpdateError] = useState<string | null>(null);
+  const [liveReviewUpdateStatus, setLiveReviewUpdateStatus] = useState<string | null>(null);
   const [isLiveReviewActionPending, setIsLiveReviewActionPending] = useState(false);
   const planReviewSelectedIsHistorical = (() => {
     if (!planReview?.snapshot.selected) return false;
@@ -1015,6 +1019,9 @@ const App: React.FC = () => {
 
   const buildMessageAnnotationEntries = React.useCallback((): MessageAnnotationEntry[] => {
     if (annotateSource !== 'message' || recentMessages.length === 0) return [];
+    // Live Last keeps the picker compact, but its session server owns retained
+    // drafts outside that picker. They are sent through /api/session/feedback.
+    if (liveMessageReview) return [];
     // Must be a PURE read: this runs on the render path via
     // currentFeedbackPayload (useMemo) -> getCurrentFeedbackPayload ->
     // buildFullAnnotationsOutput. saveCurrentMessageState() writes React state
@@ -1043,7 +1050,7 @@ const App: React.FC = () => {
         codeAnnotations: state.codeAnnotations,
       };
     });
-  }, [annotateSource, recentMessages, getMessageStatesWithCurrent]);
+  }, [annotateSource, recentMessages, getMessageStatesWithCurrent, liveMessageReview]);
 
   const activeMessageAnnotationCounts = React.useMemo(() => {
     const counts = new Map(cachedMessageAnnotationCounts);
@@ -1068,20 +1075,67 @@ const App: React.FC = () => {
 
   // File browser file selection: open via linked doc system
   // For vault dirs (isVault), use the Obsidian doc endpoint; otherwise use generic /api/doc
-  const handleSelectMessage = React.useCallback((messageId: string) => {
-    const msg = recentMessages.find((m) => m.messageId === messageId);
-    if (!msg || messageId === selectedMessageId) return;
+  const applyLiveReviewSnapshot = React.useCallback((snapshot: LiveMessageReviewSnapshot, options?: { announceLiveUpdate?: boolean }) => {
+    const nextSelectedMessageId = snapshot.selectedMessageId !== null && snapshot.messages.some(
+      (message) => message.messageId === snapshot.selectedMessageId,
+    ) ? snapshot.selectedMessageId : null;
+    const targetMessage = nextSelectedMessageId
+      ? snapshot.messages.find((message) => message.messageId === nextSelectedMessageId)
+      : undefined;
+
+    setLiveReviewRoundStatus(snapshot.reviewRoundStatus);
+    setLiveReviewDeliveryError(snapshot.deliveryError);
+    setRecentMessages(snapshot.messages);
+    setLiveReviewUpdateError(null);
+
+    if (!nextSelectedMessageId || !targetMessage) return;
 
     const states = saveCurrentMessageState();
+    const existingState = states.get(nextSelectedMessageId) ?? createEmptyMessageState(targetMessage);
+    const serverDrafts = snapshot.draftsByMessageId?.[nextSelectedMessageId];
     const targetState = normalizeMessageState(
-      states.get(messageId) ?? createEmptyMessageState(msg),
-      msg,
+      serverDrafts
+        ? {
+            ...existingState,
+            linkedDocSession: {
+              ...existingState.linkedDocSession,
+              root: {
+                ...existingState.linkedDocSession.root,
+                annotations: serverDrafts,
+              },
+            },
+          }
+        : existingState,
+      targetMessage,
     );
+    // Server snapshots are authoritative across reconnects. Preserve their
+    // draft for the selected source before a picker action can save stale local
+    // state back over it.
+    messageStateCacheRef.current = new Map(states).set(nextSelectedMessageId, targetState);
+    setCachedMessageAnnotationCounts(buildMessageAnnotationCounts(messageStateCacheRef.current));
 
-    setSelectedMessageId(messageId);
-    linkedDocHook.restoreSession(targetState.linkedDocSession);
-    setCodeAnnotations([...targetState.codeAnnotations]);
-    setSelectedCodeAnnotationId(targetState.selectedCodeAnnotationId);
+    const selectedChanged = nextSelectedMessageId !== selectedMessageId;
+    if (selectedChanged || serverDrafts) {
+      setSelectedMessageId(nextSelectedMessageId);
+      linkedDocHook.restoreSession(targetState.linkedDocSession);
+      setCodeAnnotations([...targetState.codeAnnotations]);
+      setSelectedCodeAnnotationId(targetState.selectedCodeAnnotationId);
+      setEditGeneration((generation) => generation + 1);
+    }
+    if (options?.announceLiveUpdate && snapshot.reviewRoundStatus === 'open' && selectedChanged) {
+      setLiveReviewUpdateStatus('New assistant response ready to review.');
+    }
+  }, [selectedMessageId, saveCurrentMessageState, linkedDocHook.restoreSession]);
+
+  const handleSelectMessage = React.useCallback((messageId: string) => {
+    const msg = recentMessages.find((message) => message.messageId === messageId);
+    if (!msg || messageId === selectedMessageId) return;
+    applyLiveReviewSnapshot({
+      messages: recentMessages,
+      selectedMessageId: messageId,
+      reviewRoundStatus: liveReviewRoundStatus,
+      deliveryError: liveReviewDeliveryError,
+    });
     // Ex-Plannotator owns selection in its live snapshot. Keep the normal
     // annotate-last picker local unless that explicit capability is present.
     if (liveMessageReview) {
@@ -1089,48 +1143,18 @@ const App: React.FC = () => {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messageId }),
+      }).catch(() => {
+        setLiveReviewUpdateError('Could not save the selected response. You can keep reviewing it and try again later.');
       });
     }
   }, [
+    applyLiveReviewSnapshot,
     recentMessages,
     selectedMessageId,
-    saveCurrentMessageState,
-    linkedDocHook.restoreSession,
+    liveReviewRoundStatus,
+    liveReviewDeliveryError,
     liveMessageReview,
   ]);
-
-  // Applies the Ex-only server snapshot without changing the normal
-  // annotate-last state flow. Existing message states stay keyed by messageId,
-  // so newly-arrived messages never discard drafts for older messages.
-  const applyLiveReviewSnapshot = React.useCallback((snapshot: LiveMessageReviewSnapshot) => {
-    const hasSelectedMessage = snapshot.selectedMessageId !== null && snapshot.messages.some(
-      (message) => message.messageId === snapshot.selectedMessageId,
-    );
-    const nextSelectedMessageId = hasSelectedMessage ? snapshot.selectedMessageId : null;
-
-    setLiveReviewRoundStatus(snapshot.reviewRoundStatus);
-    setLiveReviewDeliveryError(snapshot.deliveryError);
-    setRecentMessages(snapshot.messages);
-
-    if (!nextSelectedMessageId || nextSelectedMessageId === selectedMessageId) return;
-    const targetMessage = snapshot.messages.find((message) => message.messageId === nextSelectedMessageId);
-    if (!targetMessage) return;
-
-    const states = saveCurrentMessageState();
-    const targetState = normalizeMessageState(
-      states.get(nextSelectedMessageId) ?? createEmptyMessageState(targetMessage),
-      targetMessage,
-    );
-    setSelectedMessageId(nextSelectedMessageId);
-    linkedDocHook.restoreSession(targetState.linkedDocSession);
-    setCodeAnnotations([...targetState.codeAnnotations]);
-    setSelectedCodeAnnotationId(targetState.selectedCodeAnnotationId);
-
-    if (snapshot.reviewRoundStatus === 'open') {
-      toast('Agent response received', { description: 'Reloading the latest review state.' });
-      window.location.reload();
-    }
-  }, [selectedMessageId, saveCurrentMessageState, linkedDocHook.restoreSession]);
 
   const handleLiveReviewAction = React.useCallback(async (
     path: '/api/session/feedback/retry' | '/api/session/resume' | '/api/session/cancel-waiting',
@@ -2410,9 +2434,8 @@ const App: React.FC = () => {
           messageStateCacheRef.current = new Map();
           setCachedMessageAnnotationCounts(new Map());
           setRecentMessages(data.recentMessages);
-          // Live Ex sessions provide their canonical selection in /api/plan.
-          // This makes the first SSE snapshot after an automatic reload a
-          // no-op instead of immediately triggering another reload.
+          // Live Ex sessions provide their canonical selection in /api/plan;
+          // later SSE snapshots replace the active source in place.
           const initialSelectedMessageId = data.liveMessageReview === true &&
             typeof data.selectedMessageId === 'string' &&
             data.recentMessages.some((message) => message.messageId === data.selectedMessageId)
@@ -2489,15 +2512,16 @@ const App: React.FC = () => {
     const source = new EventSource('/api/session/events');
     source.onmessage = (event) => {
       try {
-        applyLiveReviewSnapshot(JSON.parse(event.data) as LiveMessageReviewSnapshot);
+        applyLiveReviewSnapshot(JSON.parse(event.data) as LiveMessageReviewSnapshot, { announceLiveUpdate: true });
       } catch {
-        // A reconnect will receive a full snapshot; keep the current review UI
-        // usable if an intermediary produced malformed event data.
+        // EventSource reconnects with a full snapshot. Keep the existing source
+        // editable and report a non-blocking recovery status meanwhile.
+        setLiveReviewUpdateError('Live response update was unavailable. Reconnecting…');
       }
     };
     source.onerror = () => {
-      // EventSource reconnects by itself. Do not replace live review state with
-      // an error state because delivery failures belong to the server snapshot.
+      // EventSource reconnects by itself; delivery failures remain session-owned.
+      setLiveReviewUpdateError('Live response updates disconnected. Reconnecting…');
     };
     return () => source.close();
   }, [annotateSource, applyLiveReviewSnapshot, isApiMode, liveMessageReview, planReview]);
@@ -2971,6 +2995,28 @@ const App: React.FC = () => {
     setIsSubmitting(true);
     try {
       snapshotActiveEditableDocument();
+      if (liveMessageReview) {
+        if (!selectedMessageId) throw new Error('No assistant response is selected.');
+        // The live session owns draft retention. Save this source before asking
+        // it to submit every outstanding draft, including sources aged out of
+        // the four-row picker.
+        const drafts = await fetch('/api/session/drafts', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messageId: selectedMessageId, annotations: allAnnotations }),
+        });
+        if (!drafts.ok) {
+          const body = await drafts.json().catch(() => ({})) as { error?: string };
+          throw new Error(body.error || 'Could not save live review annotations');
+        }
+        const response = await fetch('/api/session/feedback', { method: 'POST' });
+        const snapshot = await response.json().catch(() => null) as LiveMessageReviewSnapshot | null;
+        if (!response.ok || !snapshot) throw new Error('Live review feedback could not be delivered');
+        applyLiveReviewSnapshot(snapshot);
+        dismissDraft();
+        setIsSubmitting(false);
+        return;
+      }
       const checkedSavedFileChanges = await validateSavedFileChangesBeforeSubmit();
       if (checkedSavedFileChanges === null) {
         setIsSubmitting(false);
@@ -3219,6 +3265,19 @@ const App: React.FC = () => {
       .catch((error) => toast.error('Could not save annotation', { description: error instanceof Error ? error.message : String(error) }));
   }, [planReview, planReviewReadOnly]);
 
+  const saveLiveReviewDrafts = useCallback((messageId: string, next: Annotation[]) => {
+    void fetch('/api/session/drafts', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messageId, annotations: next }),
+    }).then(async (response) => {
+      if (!response.ok) throw new Error('Could not save live review annotations');
+      return response.json() as Promise<LiveMessageReviewSnapshot>;
+    }).then((snapshot) => applyLiveReviewSnapshot(snapshot)).catch(() => {
+      setLiveReviewUpdateError('Could not save annotations. Keep this page open and try again.');
+    });
+  }, [applyLiveReviewSnapshot]);
+
   const handleAddAnnotation = (ann: Annotation) => {
     if (planReview?.snapshot.selected) {
       const selected = planReview.snapshot.selected;
@@ -3226,6 +3285,10 @@ const App: React.FC = () => {
         ? planReview.snapshot.draftsByMessageId[selected.messageId] ?? []
         : planReview.snapshot.draftsByFileSnapshot[planFileSnapshotKey(selected.path, selected.contentHash)] ?? [];
       savePlanReviewDrafts(selected, [...existing, ann]);
+    } else if (liveMessageReview && selectedMessageId) {
+      const next = [...annotations, ann];
+      setAnnotations(next);
+      saveLiveReviewDrafts(selectedMessageId, next);
     } else setAnnotations(prev => [...prev, ann]);
     setSelectedAnnotationId(ann.id);
     setSelectedCodeAnnotationId(null);
@@ -3303,6 +3366,14 @@ const App: React.FC = () => {
       if (drafts.some((annotation) => annotation.id === id)) savePlanReviewDrafts(selected, drafts.filter((annotation) => annotation.id !== id));
       return;
     }
+    if (liveMessageReview && selectedMessageId) {
+      const next = annotations.filter((annotation) => annotation.id !== id);
+      viewerRef.current?.removeHighlight(id);
+      setAnnotations(next);
+      if (selectedAnnotationId === id) setSelectedAnnotationId(null);
+      saveLiveReviewDrafts(selectedMessageId, next);
+      return;
+    }
     const ann = allAnnotations.find(a => a.id === id);
     // External annotations (live in SSE hook) route to the SSE hook, not local state.
     // Check membership by ID — source alone is insufficient because share-imported
@@ -3328,6 +3399,12 @@ const App: React.FC = () => {
         ? planReview.snapshot.draftsByMessageId[selected.messageId] ?? []
         : planReview.snapshot.draftsByFileSnapshot[planFileSnapshotKey(selected.path, selected.contentHash)] ?? [];
       if (drafts.some((annotation) => annotation.id === id)) savePlanReviewDrafts(selected, drafts.map((annotation) => annotation.id === id ? { ...annotation, ...updates } : annotation));
+      return;
+    }
+    if (liveMessageReview && selectedMessageId) {
+      const next = annotations.map((annotation) => annotation.id === id ? { ...annotation, ...updates } : annotation);
+      setAnnotations(next);
+      saveLiveReviewDrafts(selectedMessageId, next);
       return;
     }
     const ann = allAnnotations.find(a => a.id === id);
@@ -4251,6 +4328,16 @@ const App: React.FC = () => {
             Keep this window open while it runs. Close Plannotator when you're done.
           </div>
         )}
+        {liveMessageReview && liveReviewUpdateError && (
+          <div className="border-b border-warning/25 bg-warning/10 px-4 py-2 text-xs text-warning-foreground" role="status" aria-live="polite">
+            {liveReviewUpdateError}
+          </div>
+        )}
+        {liveMessageReview && liveReviewUpdateStatus && !liveReviewUpdateError && (
+          <div className="border-b border-primary/20 bg-primary/5 px-4 py-2 text-xs text-muted-foreground" role="status" aria-live="polite">
+            {liveReviewUpdateStatus}
+          </div>
+        )}
         {(liveMessageReview || planReview) && (() => {
           const status = planReview?.snapshot.reviewRoundStatus ?? liveReviewRoundStatus;
           const error = planReview?.snapshot.deliveryError ?? liveReviewDeliveryError;
@@ -4329,7 +4416,7 @@ const App: React.FC = () => {
               hasDiff={planDiff.hasPreviousVersion}
               showVersionsTab={!isHtmlSurface && versionInfo !== null && versionInfo.totalVersions > 1}
               showFilesTab={showFilesTab && !archive.archiveMode}
-              showMessagesTab={annotateSource === 'message' && recentMessages.length > 1}
+              showMessagesTab={annotateSource === 'message' && (liveMessageReview || recentMessages.length > 1)}
               showAgentTerminalTab={showAgentTerminalControls}
               isAgentTerminalOpen={isAgentTerminalOpen}
               isAgentTerminalRunning={isAgentTerminalRunning}
@@ -4408,11 +4495,12 @@ const App: React.FC = () => {
                   archive.select(...args);
                 }}
                 isLoadingArchive={archive.isLoading}
-                showMessagesTab={annotateSource === 'message' && recentMessages.length > 1}
+                showMessagesTab={annotateSource === 'message' && (liveMessageReview || recentMessages.length > 1)}
                 messages={recentMessages}
                 selectedMessageId={selectedMessageId}
                 onSelectMessage={handleSelectMessage}
                 messageAnnotationCounts={activeMessageAnnotationCounts}
+                messagesChronological={liveMessageReview}
               />
               <ResizeHandle {...tocResize.handleProps} className="hidden lg:block z-[55]" side="left" hideHoverTrack tooltip={RESIZE_HANDLE_TOOLTIP} onCollapse={sidebar.close} />
             </div>

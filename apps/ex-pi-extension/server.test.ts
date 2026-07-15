@@ -47,7 +47,7 @@ describe("Live Message Review Session server", () => {
 		const response = await fetch(`${server.url}/api/session`);
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual({
-			messages: messages.slice(0, 25),
+			messages: messages.slice(0, 4).reverse(),
 			selectedMessageId: "message-1",
 			unreadMessageIds: [],
 			draftsByMessageId: {},
@@ -70,7 +70,7 @@ describe("Live Message Review Session server", () => {
 		expect(await response.json()).toEqual({
 			mode: "annotate-last",
 			plan: "Newest response",
-			recentMessages: messages,
+			recentMessages: [...messages].reverse(),
 			selectedMessageId: "newest",
 			origin: "pi",
 			gate: false,
@@ -96,6 +96,22 @@ describe("Live Message Review Session server", () => {
 		expect(await response.json()).toMatchObject({
 			plan: "New response",
 			selectedMessageId: "arrival",
+		});
+	});
+
+	test("serves the compact latest-four picker oldest-to-newest with the newest response selected", async () => {
+		const messages = Array.from({ length: 6 }, (_, index) => ({
+			messageId: `m${6 - index}`,
+			text: `Response ${6 - index}`,
+		}));
+		const server = await startLiveMessageReviewServer({ htmlContent: "<!doctype html>", messages });
+		servers.push(server);
+
+		const response = await fetch(`${server.url}/api/plan`);
+		expect(await response.json()).toMatchObject({
+			recentMessages: [messages[3], messages[2], messages[1], messages[0]],
+			selectedMessageId: "m6",
+			plan: "Response 6",
 		});
 	});
 
@@ -170,9 +186,9 @@ describe("Live Message Review Session server", () => {
 
 		const reconnected = await fetch(`${server.url}/api/session`);
 		expect(await reconnected.json()).toEqual({
-			messages: [arrival, newest, older],
-			selectedMessageId: "older",
-			unreadMessageIds: ["arrival"],
+			messages: [older, newest, arrival],
+			selectedMessageId: "arrival",
+			unreadMessageIds: [],
 			draftsByMessageId: { older: [draft] },
 			sentAnnotationsByMessageId: {},
 			reviewRoundStatus: "open",
@@ -232,9 +248,9 @@ describe("Live Message Review Session server", () => {
 			const readSnapshot = createSseSnapshotReader(reader!);
 
 			expect(await readSnapshot()).toEqual({
-				messages: [arrival, newest, older],
-				selectedMessageId: "older",
-				unreadMessageIds: ["arrival"],
+				messages: [older, newest, arrival],
+				selectedMessageId: "arrival",
+				unreadMessageIds: [],
 				draftsByMessageId: { older: [draft] },
 				sentAnnotationsByMessageId: {},
 				reviewRoundStatus: "open",
@@ -264,8 +280,8 @@ describe("Live Message Review Session server", () => {
 		server.reconcile([arrival, newest, older], ["arrival", "newest", "older"]);
 
 		expect(await (await fetch(`${server.url}/api/session`)).json()).toMatchObject({
-			selectedMessageId: "older",
-			unreadMessageIds: ["arrival"],
+			selectedMessageId: "arrival",
+			unreadMessageIds: [],
 		});
 	});
 
@@ -303,7 +319,7 @@ describe("Live Message Review Session server", () => {
 		);
 
 		expect(await (await fetch(`${server.url}/api/session`)).json()).toMatchObject({
-			messages: [branchBNewest, shared, oldActive],
+			messages: [shared, branchBNewest],
 			selectedMessageId: "branch-b-newest",
 		});
 	});
@@ -433,7 +449,7 @@ describe("Live Message Review Session server", () => {
 			expect((await fetch(`${server.url}/api/session/feedback`, { method: "POST" })).status).toBe(200);
 			await readSnapshot(); // submitting
 			const waiting = await readSnapshot();
-			expect(deliveredBatch?.messages.map((message) => message.messageId)).toEqual(["m2", "m1"]);
+			expect(deliveredBatch?.messages.map((message) => message.messageId)).toEqual(["m1", "m2"]);
 			expect(waiting).toMatchObject({
 				reviewRoundStatus: "waiting",
 				draftsByMessageId: {},
@@ -486,7 +502,7 @@ describe("Live Message Review Session server", () => {
 			deliveredBatch = batch;
 		});
 		expect((await fetch(`${url}/api/session/feedback`, { method: "POST" })).status).toBe(200);
-		expect(deliveredBatch?.messages.map((message) => message.messageId)).toEqual(["m2", "m1"]);
+		expect(deliveredBatch?.messages.map((message) => message.messageId)).toEqual(["m1", "m2"]);
 
 		const waiting = await (await fetch(`${url}/api/session`)).json() as LiveMessageReviewSnapshot;
 		expect(waiting).toMatchObject({

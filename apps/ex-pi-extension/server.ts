@@ -107,14 +107,13 @@ export async function startLiveMessageReviewServer(options: {
 		if (request.method === "GET" && url.pathname === "/api/plan") {
 			const snapshot = session.snapshot();
 			const selected = snapshot.messages.find((message) => message.messageId === snapshot.selectedMessageId)
-				?? snapshot.messages[0];
+				?? snapshot.messages.at(-1);
 			writeJson(response, 200, {
 				mode: "annotate-last",
 				plan: selected?.text ?? "",
 				recentMessages: snapshot.messages,
-				// The initial editor selection must match the live snapshot. Without
-				// this, the first SSE event after an automatic reload would select the
-				// same response again and cause another reload.
+				// Keep the initial editor selection aligned with the session-owned
+				// compact response picker. Later SSE snapshots update it in place.
 				selectedMessageId: snapshot.selectedMessageId,
 				origin: "pi",
 				gate: false,
