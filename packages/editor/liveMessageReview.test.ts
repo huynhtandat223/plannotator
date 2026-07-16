@@ -39,6 +39,10 @@ test('live feedback saves the current source before submitting all retained draf
   expect(source).toContain('liveDraftSaveQueuesRef');
   expect(source).toContain('liveDraftSaveVersionsRef');
   expect(source).toContain('preservePendingDraftsForMessageIds');
+  expect(source).toContain('liveDeliveredDraftMessageIdsRef');
+  expect(source).toContain('return createEmptyMessageState(msg)');
+  expect(source).toContain('liveDeliveredDraftMessageIdsRef.current.add(selectedMessageId)');
+  expect(source).toContain('liveDeliveredDraftMessageIdsRef.current.delete(messageId)');
   expect(source).toContain("replaceDrafts: path === '/api/session/feedback/retry'");
   expect(source).toContain('...(options?.replaceDrafts ? states.keys() : [])');
   expect(source).toContain('globalAttachments: state.linkedDocSession.root.globalAttachments');

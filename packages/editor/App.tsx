@@ -404,6 +404,11 @@ const App: React.FC = () => {
   // source. A delayed acknowledgement for an older write must not replace the
   // newer local draft that is still queued behind it.
   const liveDraftSaveVersionsRef = useRef<Map<string, number>>(new Map());
+  // React applies the restore below asynchronously. Keep a synchronous
+  // tombstone for a source whose feedback was accepted so an SSE snapshot in
+  // that gap cannot snapshot the old attachments, linked docs, or code drafts
+  // back into the local message cache.
+  const liveDeliveredDraftMessageIdsRef = useRef<Set<string>>(new Set());
   const liveSnapshotRevisionRef = useRef(-1);
   const planReviewSelectedIsHistorical = (() => {
     if (!planReview?.snapshot.selected) return false;
@@ -1000,6 +1005,9 @@ const App: React.FC = () => {
     if (annotateSource !== 'message' || !selectedMessageId) return null;
     const msg = recentMessages.find((m) => m.messageId === selectedMessageId);
     if (!msg) return null;
+    if (liveDeliveredDraftMessageIdsRef.current.has(msg.messageId)) {
+      return createEmptyMessageState(msg);
+    }
     const snapshot = linkedDocHook.snapshotSession();
     return normalizeMessageState({
       messageId: msg.messageId,
@@ -1025,6 +1033,9 @@ const App: React.FC = () => {
     const state = buildCurrentMessageState();
     const message = recentMessages.find((candidate) => candidate.messageId === messageId);
     if (!state || !message || state.messageId !== messageId) return null;
+    // A later open round can accept a new user mutation for this source. It
+    // deliberately replaces the delivery tombstone with the new draft.
+    liveDeliveredDraftMessageIdsRef.current.delete(messageId);
     const activeDocument = linkedDocHook.filepath;
     if (activeDocument) {
       const docs = new Map(state.linkedDocSession.docs);
@@ -1140,6 +1151,10 @@ const App: React.FC = () => {
       (message) => message.messageId === snapshot.selectedMessageId,
     ) ? snapshot.selectedMessageId : null;
     const applySelection = options?.applySelection ?? true;
+    if (options?.replaceDrafts) {
+      if (selectedMessageId) liveDeliveredDraftMessageIdsRef.current.add(selectedMessageId);
+      if (nextSelectedMessageId) liveDeliveredDraftMessageIdsRef.current.add(nextSelectedMessageId);
+    }
 
     setLiveReviewRoundStatus(snapshot.reviewRoundStatus);
     setLiveReviewDeliveryError(snapshot.deliveryError);

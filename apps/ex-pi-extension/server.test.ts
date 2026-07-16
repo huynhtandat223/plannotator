@@ -1,9 +1,15 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { createServer } from "node:http";
 import { startLiveMessageReviewServer, type LiveMessageReviewServer } from "./server";
 import type { LiveMessageReviewSnapshot, LiveFeedbackBatch } from "./session";
 
 const servers: LiveMessageReviewServer[] = [];
+const previousExPlannotatorHost = process.env.EX_PLANNOTATOR_HOST;
+
+// The production server advertises WSL's LAN address so a Windows browser can
+// reach it. That address cannot reliably connect back into the same WSL
+// process, so tests explicitly use the listener's loopback route instead.
+process.env.EX_PLANNOTATOR_HOST = "127.0.0.1";
 
 function createSseSnapshotReader(reader: ReadableStreamDefaultReader<Uint8Array>): () => Promise<LiveMessageReviewSnapshot> {
 	const decoder = new TextDecoder();
@@ -25,6 +31,11 @@ function createSseSnapshotReader(reader: ReadableStreamDefaultReader<Uint8Array>
 
 afterEach(() => {
 	for (const server of servers.splice(0)) server.stop();
+});
+
+afterAll(() => {
+	if (previousExPlannotatorHost === undefined) delete process.env.EX_PLANNOTATOR_HOST;
+	else process.env.EX_PLANNOTATOR_HOST = previousExPlannotatorHost;
 });
 
 describe("Live Message Review Session server", () => {
