@@ -67,6 +67,13 @@ function isImageAttachment(attachment: unknown): attachment is LiveImageAttachme
 		typeof (attachment as { name?: unknown }).name === "string";
 }
 
+function isCodeDraftAnnotation(annotation: unknown): annotation is LiveCodeDraftAnnotation {
+	return isDraftAnnotation(annotation) && (
+		annotation.images === undefined ||
+		(Array.isArray(annotation.images) && annotation.images.every(isImageAttachment))
+	);
+}
+
 function isLinkedDocumentDraft(document: unknown): document is LiveLinkedDocumentDraft {
 	return !!document && typeof document === "object" &&
 		typeof (document as { filepath?: unknown }).filepath === "string" &&
@@ -216,7 +223,7 @@ export async function startLiveMessageReviewServer(options: {
 				} | null;
 				const validAnnotations = Array.isArray(body?.annotations) && body.annotations.every(isDraftAnnotation);
 				const validCodeAnnotations = body?.codeAnnotations === undefined || (
-					Array.isArray(body.codeAnnotations) && body.codeAnnotations.every(isDraftAnnotation)
+					Array.isArray(body.codeAnnotations) && body.codeAnnotations.every(isCodeDraftAnnotation)
 				);
 				const validAttachments = body?.globalAttachments === undefined || (
 					Array.isArray(body.globalAttachments) && body.globalAttachments.every(isImageAttachment)

@@ -39,7 +39,9 @@ test('live feedback saves the current source before submitting all retained draf
   expect(source).toContain('liveDraftSaveQueuesRef');
   expect(source).toContain('liveDraftSaveVersionsRef');
   expect(source).toContain('preservePendingDraftsForMessageIds');
+  expect(source).toContain('liveDraftSaveQueuesRef.current.keys()');
   expect(source).toContain('liveDeliveredDraftMessageIdsRef');
+  expect(source).toContain('snapshot.sentMessageIds');
   expect(source).toContain('return createEmptyMessageState(msg)');
   expect(source).toContain('liveDeliveredDraftMessageIdsRef.current.add(selectedMessageId)');
   expect(source).toContain('liveDeliveredDraftMessageIdsRef.current.delete(messageId)');

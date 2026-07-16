@@ -182,6 +182,7 @@ type LiveMessageReviewSnapshot = {
     annotations: Annotation[];
     globalAttachments: ImageAttachment[];
   }>>;
+  sentMessageIds?: string[];
   reviewRoundStatus: LiveReviewRoundStatus;
   deliveryError: string | null;
 };
@@ -1151,10 +1152,19 @@ const App: React.FC = () => {
       (message) => message.messageId === snapshot.selectedMessageId,
     ) ? snapshot.selectedMessageId : null;
     const applySelection = options?.applySelection ?? true;
+    const deliveredMessageIds = new Set(snapshot.sentMessageIds ?? []);
     if (options?.replaceDrafts) {
       if (selectedMessageId) liveDeliveredDraftMessageIdsRef.current.add(selectedMessageId);
       if (nextSelectedMessageId) liveDeliveredDraftMessageIdsRef.current.add(nextSelectedMessageId);
     }
+    for (const messageId of deliveredMessageIds) liveDeliveredDraftMessageIdsRef.current.add(messageId);
+
+    const pendingDraftMessageIds = options?.replaceDrafts
+      ? new Set<string>()
+      : new Set([
+        ...liveDraftSaveQueuesRef.current.keys(),
+        ...(options?.preservePendingDraftsForMessageIds ?? []),
+      ]);
 
     setLiveReviewRoundStatus(snapshot.reviewRoundStatus);
     setLiveReviewDeliveryError(snapshot.deliveryError);
@@ -1173,6 +1183,7 @@ const App: React.FC = () => {
         ...Object.keys(snapshot.codeDraftsByMessageId ?? {}),
         ...Object.keys(snapshot.attachmentsByMessageId ?? {}),
         ...Object.keys(snapshot.linkedDocDraftsByMessageId ?? {}),
+        ...deliveredMessageIds,
         // A successful delivery removes attachment-only and linked-document-only
         // sources from the server snapshot. Clear their local cache too, so a
         // source that later returns to the compact picker cannot be resent.
@@ -1182,7 +1193,8 @@ const App: React.FC = () => {
         const message = messagesById.get(messageId) ?? states.get(messageId);
         if (!message) continue;
         const state = states.get(messageId) ?? createEmptyMessageState(message);
-        const preservePendingDrafts = options?.preservePendingDraftsForMessageIds?.has(messageId) ?? false;
+        const preservePendingDrafts = pendingDraftMessageIds.has(messageId);
+        const replaceDrafts = options?.replaceDrafts || deliveredMessageIds.has(messageId);
         const linkedDocuments = snapshot.linkedDocDraftsByMessageId?.[messageId];
         states.set(messageId, normalizeMessageState({
           ...state,
@@ -1192,15 +1204,15 @@ const App: React.FC = () => {
               ...state.linkedDocSession.root,
               annotations: preservePendingDrafts
                 ? state.linkedDocSession.root.annotations
-                : snapshot.draftsByMessageId?.[messageId] ?? (options?.replaceDrafts ? [] : state.linkedDocSession.root.annotations),
+                : snapshot.draftsByMessageId?.[messageId] ?? (replaceDrafts ? [] : state.linkedDocSession.root.annotations),
               globalAttachments: preservePendingDrafts
                 ? state.linkedDocSession.root.globalAttachments
-                : snapshot.attachmentsByMessageId?.[messageId] ?? (options?.replaceDrafts ? [] : state.linkedDocSession.root.globalAttachments),
+                : snapshot.attachmentsByMessageId?.[messageId] ?? (replaceDrafts ? [] : state.linkedDocSession.root.globalAttachments),
             },
             docs: preservePendingDrafts
               ? state.linkedDocSession.docs
               : linkedDocuments === undefined
-              ? options?.replaceDrafts ? new Map() : state.linkedDocSession.docs
+              ? replaceDrafts ? new Map() : state.linkedDocSession.docs
               : new Map(linkedDocuments.map((document) => [document.filepath, {
                   annotations: document.annotations,
                   globalAttachments: document.globalAttachments,
@@ -1208,7 +1220,7 @@ const App: React.FC = () => {
           },
           codeAnnotations: preservePendingDrafts
             ? state.codeAnnotations
-            : snapshot.codeDraftsByMessageId?.[messageId] ?? (options?.replaceDrafts ? [] : state.codeAnnotations),
+            : snapshot.codeDraftsByMessageId?.[messageId] ?? (replaceDrafts ? [] : state.codeAnnotations),
         }, message));
       }
     }

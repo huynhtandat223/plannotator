@@ -69,6 +69,7 @@ describe("Live Message Review Session server", () => {
 			linkedDocDraftsByMessageId: {},
 			sentAnnotationsByMessageId: {},
 			sentCodeAnnotationsByMessageId: {},
+			sentMessageIds: [],
 			reviewRoundStatus: "open",
 			deliveryError: null,
 		});
@@ -214,6 +215,7 @@ describe("Live Message Review Session server", () => {
 			linkedDocDraftsByMessageId: {},
 			sentAnnotationsByMessageId: {},
 			sentCodeAnnotationsByMessageId: {},
+			sentMessageIds: [],
 			reviewRoundStatus: "open",
 			deliveryError: null,
 		});
@@ -282,6 +284,7 @@ describe("Live Message Review Session server", () => {
 				linkedDocDraftsByMessageId: {},
 				sentAnnotationsByMessageId: {},
 				sentCodeAnnotationsByMessageId: {},
+				sentMessageIds: [],
 				reviewRoundStatus: "open",
 				deliveryError: null,
 			});
@@ -443,6 +446,29 @@ describe("Live Message Review Session server", () => {
 		expect(deliveredBatch!.messages).toHaveLength(2);
 		expect(deliveredBatch!.messages[0].messageId).toBe("m1");
 		expect(deliveredBatch!.messages[1].messageId).toBe("m2");
+	});
+
+	test("rejects code draft images that are not valid attachments", async () => {
+		const server = await startLiveMessageReviewServer({
+			htmlContent: "<!doctype html><title>Ex-Plannotator</title>",
+			messages: [{ messageId: "m1", text: "First response" }],
+		});
+		servers.push(server);
+
+		const response = await fetch(`${server.url}/api/session/drafts`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				messageId: "m1",
+				annotations: [],
+				codeAnnotations: [{ id: "code-1", images: { path: "/tmp/reference.png", name: "reference" } }],
+			}),
+		});
+
+		expect(response.status).toBe(400);
+		expect((await (await fetch(`${server.url}/api/session`)).json()) as LiveMessageReviewSnapshot).toMatchObject({
+			codeDraftsByMessageId: {},
+		});
 	});
 
 	test("broadcasts a complete Review Round to an SSE client", async () => {

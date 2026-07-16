@@ -60,6 +60,7 @@ export type LiveMessageReviewSnapshot = {
 	linkedDocDraftsByMessageId: Record<string, LiveLinkedDocumentDraft[]>;
 	sentAnnotationsByMessageId: Record<string, LiveDraftAnnotation[]>;
 	sentCodeAnnotationsByMessageId: Record<string, LiveCodeDraftAnnotation[]>;
+	sentMessageIds: string[];
 	reviewRoundStatus: ReviewRoundStatus;
 	deliveryError: string | null;
 };
@@ -207,6 +208,7 @@ export function createLiveMessageReviewSnapshot(
 		linkedDocDraftsByMessageId: {},
 		sentAnnotationsByMessageId: {},
 		sentCodeAnnotationsByMessageId: {},
+		sentMessageIds: [],
 		reviewRoundStatus: "open",
 		deliveryError: null,
 	};
@@ -225,6 +227,7 @@ export class LiveMessageReviewSession {
 	private readonly linkedDocDraftsByMessageId = new Map<string, LiveLinkedDocumentDraft[]>();
 	private readonly sentAnnotationsByMessageId = new Map<string, LiveDraftAnnotation[]>();
 	private readonly sentCodeAnnotationsByMessageId = new Map<string, LiveCodeDraftAnnotation[]>();
+	private readonly sentMessageIds = new Set<string>();
 	private readonly messagesReceivedWhileSubmitting = new Set<string>();
 	private agentStoppedWhileSubmitting = false;
 	private failedBatch: LiveFeedbackBatch | null = null;
@@ -245,7 +248,7 @@ export class LiveMessageReviewSession {
 			messages: this.messages.map((message) => ({ ...message })),
 			retainedMessages: [...this.messageSnapshots.values()]
 				.filter((message) => !this.messages.some((visible) => visible.messageId === message.messageId))
-				.filter((message) => this.draftsByMessageId.has(message.messageId) || this.codeDraftsByMessageId.has(message.messageId) || this.attachmentsByMessageId.has(message.messageId) || this.linkedDocDraftsByMessageId.has(message.messageId) || this.sentAnnotationsByMessageId.has(message.messageId) || this.sentCodeAnnotationsByMessageId.has(message.messageId))
+				.filter((message) => this.draftsByMessageId.has(message.messageId) || this.codeDraftsByMessageId.has(message.messageId) || this.attachmentsByMessageId.has(message.messageId) || this.linkedDocDraftsByMessageId.has(message.messageId) || this.sentAnnotationsByMessageId.has(message.messageId) || this.sentCodeAnnotationsByMessageId.has(message.messageId) || this.sentMessageIds.has(message.messageId))
 				.map((message) => ({ ...message })),
 			selectedMessageId: this.selectedMessageId,
 			unreadMessageIds: this.messages
@@ -257,6 +260,7 @@ export class LiveMessageReviewSession {
 			linkedDocDraftsByMessageId: annotationsRecord(this.linkedDocDraftsByMessageId),
 			sentAnnotationsByMessageId: annotationsRecord(this.sentAnnotationsByMessageId),
 			sentCodeAnnotationsByMessageId: annotationsRecord(this.sentCodeAnnotationsByMessageId),
+			sentMessageIds: [...this.sentMessageIds],
 			reviewRoundStatus: this.reviewRoundStatus,
 			deliveryError: this.deliveryError,
 		};
@@ -277,6 +281,7 @@ export class LiveMessageReviewSession {
 			...this.linkedDocDraftsByMessageId.keys(),
 			...this.sentAnnotationsByMessageId.keys(),
 			...this.sentCodeAnnotationsByMessageId.keys(),
+			...this.sentMessageIds,
 			...(this.failedBatch?.messages.map((message) => message.messageId) ?? []),
 		]);
 		const removedMessageIds = [...retainedStateIds].filter((messageId) => !activeIds.has(messageId));
@@ -302,6 +307,7 @@ export class LiveMessageReviewSession {
 			this.linkedDocDraftsByMessageId.delete(messageId);
 			this.sentAnnotationsByMessageId.delete(messageId);
 			this.sentCodeAnnotationsByMessageId.delete(messageId);
+			this.sentMessageIds.delete(messageId);
 			this.messageSnapshots.delete(messageId);
 			this.messagesReceivedWhileSubmitting.delete(messageId);
 		}
@@ -317,6 +323,7 @@ export class LiveMessageReviewSession {
 			...this.linkedDocDraftsByMessageId.keys(),
 			...this.sentAnnotationsByMessageId.keys(),
 			...this.sentCodeAnnotationsByMessageId.keys(),
+			...this.sentMessageIds,
 			...(this.failedBatch?.messages.map((message) => message.messageId) ?? []),
 		]);
 		for (const messageId of this.messageSnapshots.keys()) {
@@ -353,6 +360,7 @@ export class LiveMessageReviewSession {
 	): boolean {
 		if (this.reviewRoundStatus !== "open") return false;
 		if (!this.messageSnapshots.has(messageId)) return false;
+		this.sentMessageIds.delete(messageId);
 		if (annotations.length === 0) this.draftsByMessageId.delete(messageId);
 		else this.draftsByMessageId.set(messageId, cloneAnnotations(annotations));
 		if (codeAnnotations.length === 0) this.codeDraftsByMessageId.delete(messageId);
@@ -509,6 +517,7 @@ export class LiveMessageReviewSession {
 		this.failedBatch = null;
 		this.deliveryError = null;
 		for (const message of batch.messages) {
+			this.sentMessageIds.add(message.messageId);
 			const existing = this.sentAnnotationsByMessageId.get(message.messageId) ?? [];
 			this.sentAnnotationsByMessageId.set(message.messageId, [
 				...existing,

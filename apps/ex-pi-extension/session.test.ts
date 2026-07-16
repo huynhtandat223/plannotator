@@ -545,6 +545,7 @@ describe("Live Message Review Session snapshot", () => {
 			linkedDocDraftsByMessageId: {},
 			sentAnnotationsByMessageId: {},
 			sentCodeAnnotationsByMessageId: {},
+			sentMessageIds: [],
 			reviewRoundStatus: "open",
 			deliveryError: null,
 		});
