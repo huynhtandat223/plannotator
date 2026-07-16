@@ -3,7 +3,8 @@
  *
  * Used by annotate-last. Lets the user pick which assistant message to
  * annotate when the newest transcript entry isn't the one they intended
- * (e.g., after `/rewind`).
+ * (e.g., after `/rewind`). Ex-Plannotator live sessions pass their compact
+ * current latest-four history oldest-to-newest; other hosts retain their order.
  */
 
 import React from "react";
@@ -19,6 +20,8 @@ interface MessagesBrowserProps {
   selectedMessageId: string | null;
   onSelect: (messageId: string) => void;
   annotationCounts?: Map<string, number>;
+  /** Ex-Plannotator's live compact history is chronological; normal hosts are newest-first. */
+  chronological?: boolean;
 }
 
 // Hard cap for browsers where line-clamp is unavailable, and to avoid huge sidebar text nodes.
@@ -48,11 +51,12 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   selectedMessageId,
   onSelect,
   annotationCounts,
+  chronological = false,
 }) => {
   if (messages.length === 0) {
     return (
       <div className="p-4 text-xs text-muted-foreground text-center">
-        No recent assistant messages found.
+        No recent assistant responses available yet.
       </div>
     );
   }
@@ -60,18 +64,20 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   return (
     <div className="p-2">
       <div className="px-2 pt-1 pb-2 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-        Recent messages — newest first
+        Recent responses — {chronological ? 'oldest first' : 'newest first'}
       </div>
       <div className="space-y-0.5">
         {messages.map((msg, idx) => {
           const isSelected = msg.messageId === selectedMessageId;
-          const isDefault = idx === 0;
+          const isDefault = chronological ? idx === messages.length - 1 : idx === 0;
           const ts = formatTimestamp(msg.timestamp);
           const annotationCount = annotationCounts?.get(msg.messageId) ?? 0;
           return (
             <button
               key={msg.messageId}
               onClick={() => onSelect(msg.messageId)}
+              aria-current={isSelected ? 'true' : undefined}
+              aria-pressed={isSelected}
               className={`w-full text-left px-2 py-1.5 rounded text-xs transition-colors flex items-start gap-2 ${
                 isSelected
                   ? "bg-primary/10 text-primary border border-primary/30"

@@ -1,9 +1,15 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { createServer } from "node:http";
 import { startLiveMessageReviewServer, type LiveMessageReviewServer } from "./server";
 import type { LiveMessageReviewSnapshot, LiveFeedbackBatch } from "./session";
 
 const servers: LiveMessageReviewServer[] = [];
+const previousExPlannotatorHost = process.env.EX_PLANNOTATOR_HOST;
+
+// The production server advertises WSL's LAN address so a Windows browser can
+// reach it. That address cannot reliably connect back into the same WSL
+// process, so tests explicitly use the listener's loopback route instead.
+process.env.EX_PLANNOTATOR_HOST = "127.0.0.1";
 
 function createSseSnapshotReader(reader: ReadableStreamDefaultReader<Uint8Array>): () => Promise<LiveMessageReviewSnapshot> {
 	const decoder = new TextDecoder();
@@ -27,6 +33,11 @@ afterEach(() => {
 	for (const server of servers.splice(0)) server.stop();
 });
 
+afterAll(() => {
+	if (previousExPlannotatorHost === undefined) delete process.env.EX_PLANNOTATOR_HOST;
+	else process.env.EX_PLANNOTATOR_HOST = previousExPlannotatorHost;
+});
+
 describe("Live Message Review Session server", () => {
 	test("serves the independent browser and a stable recent-message snapshot", async () => {
 		const messages = Array.from({ length: 30 }, (_, index) => ({
@@ -47,11 +58,18 @@ describe("Live Message Review Session server", () => {
 		const response = await fetch(`${server.url}/api/session`);
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual({
-			messages: messages.slice(0, 25),
+			revision: 0,
+			messages: messages.slice(0, 4).reverse(),
+			retainedMessages: [],
 			selectedMessageId: "message-1",
 			unreadMessageIds: [],
 			draftsByMessageId: {},
+			codeDraftsByMessageId: {},
+			attachmentsByMessageId: {},
+			linkedDocDraftsByMessageId: {},
 			sentAnnotationsByMessageId: {},
+			sentCodeAnnotationsByMessageId: {},
+			sentMessageIds: [],
 			reviewRoundStatus: "open",
 			deliveryError: null,
 		});
@@ -70,7 +88,7 @@ describe("Live Message Review Session server", () => {
 		expect(await response.json()).toEqual({
 			mode: "annotate-last",
 			plan: "Newest response",
-			recentMessages: messages,
+			recentMessages: [...messages].reverse(),
 			selectedMessageId: "newest",
 			origin: "pi",
 			gate: false,
@@ -96,6 +114,22 @@ describe("Live Message Review Session server", () => {
 		expect(await response.json()).toMatchObject({
 			plan: "New response",
 			selectedMessageId: "arrival",
+		});
+	});
+
+	test("serves the compact latest-four picker oldest-to-newest with the newest response selected", async () => {
+		const messages = Array.from({ length: 6 }, (_, index) => ({
+			messageId: `m${6 - index}`,
+			text: `Response ${6 - index}`,
+		}));
+		const server = await startLiveMessageReviewServer({ htmlContent: "<!doctype html>", messages });
+		servers.push(server);
+
+		const response = await fetch(`${server.url}/api/plan`);
+		expect(await response.json()).toMatchObject({
+			recentMessages: [messages[3], messages[2], messages[1], messages[0]],
+			selectedMessageId: "m6",
+			plan: "Response 6",
 		});
 	});
 
@@ -170,11 +204,18 @@ describe("Live Message Review Session server", () => {
 
 		const reconnected = await fetch(`${server.url}/api/session`);
 		expect(await reconnected.json()).toEqual({
-			messages: [arrival, newest, older],
-			selectedMessageId: "older",
-			unreadMessageIds: ["arrival"],
+			revision: 3,
+			messages: [older, newest, arrival],
+			retainedMessages: [],
+			selectedMessageId: "arrival",
+			unreadMessageIds: [],
 			draftsByMessageId: { older: [draft] },
+			codeDraftsByMessageId: {},
+			attachmentsByMessageId: {},
+			linkedDocDraftsByMessageId: {},
 			sentAnnotationsByMessageId: {},
+			sentCodeAnnotationsByMessageId: {},
+			sentMessageIds: [],
 			reviewRoundStatus: "open",
 			deliveryError: null,
 		});
@@ -232,11 +273,18 @@ describe("Live Message Review Session server", () => {
 			const readSnapshot = createSseSnapshotReader(reader!);
 
 			expect(await readSnapshot()).toEqual({
-				messages: [arrival, newest, older],
-				selectedMessageId: "older",
-				unreadMessageIds: ["arrival"],
+				revision: 3,
+				messages: [older, newest, arrival],
+				retainedMessages: [],
+				selectedMessageId: "arrival",
+				unreadMessageIds: [],
 				draftsByMessageId: { older: [draft] },
+				codeDraftsByMessageId: {},
+				attachmentsByMessageId: {},
+				linkedDocDraftsByMessageId: {},
 				sentAnnotationsByMessageId: {},
+				sentCodeAnnotationsByMessageId: {},
+				sentMessageIds: [],
 				reviewRoundStatus: "open",
 				deliveryError: null,
 			});
@@ -264,8 +312,8 @@ describe("Live Message Review Session server", () => {
 		server.reconcile([arrival, newest, older], ["arrival", "newest", "older"]);
 
 		expect(await (await fetch(`${server.url}/api/session`)).json()).toMatchObject({
-			selectedMessageId: "older",
-			unreadMessageIds: ["arrival"],
+			selectedMessageId: "arrival",
+			unreadMessageIds: [],
 		});
 	});
 
@@ -303,7 +351,7 @@ describe("Live Message Review Session server", () => {
 		);
 
 		expect(await (await fetch(`${server.url}/api/session`)).json()).toMatchObject({
-			messages: [branchBNewest, shared, oldActive],
+			messages: [shared, branchBNewest],
 			selectedMessageId: "branch-b-newest",
 		});
 	});
@@ -400,6 +448,29 @@ describe("Live Message Review Session server", () => {
 		expect(deliveredBatch!.messages[1].messageId).toBe("m2");
 	});
 
+	test("rejects code draft images that are not valid attachments", async () => {
+		const server = await startLiveMessageReviewServer({
+			htmlContent: "<!doctype html><title>Ex-Plannotator</title>",
+			messages: [{ messageId: "m1", text: "First response" }],
+		});
+		servers.push(server);
+
+		const response = await fetch(`${server.url}/api/session/drafts`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				messageId: "m1",
+				annotations: [],
+				codeAnnotations: [{ id: "code-1", images: { path: "/tmp/reference.png", name: "reference" } }],
+			}),
+		});
+
+		expect(response.status).toBe(400);
+		expect((await (await fetch(`${server.url}/api/session`)).json()) as LiveMessageReviewSnapshot).toMatchObject({
+			codeDraftsByMessageId: {},
+		});
+	});
+
 	test("broadcasts a complete Review Round to an SSE client", async () => {
 		const initial = [
 			{ messageId: "m2", text: "Second response" },
@@ -433,7 +504,7 @@ describe("Live Message Review Session server", () => {
 			expect((await fetch(`${server.url}/api/session/feedback`, { method: "POST" })).status).toBe(200);
 			await readSnapshot(); // submitting
 			const waiting = await readSnapshot();
-			expect(deliveredBatch?.messages.map((message) => message.messageId)).toEqual(["m2", "m1"]);
+			expect(deliveredBatch?.messages.map((message) => message.messageId)).toEqual(["m1", "m2"]);
 			expect(waiting).toMatchObject({
 				reviewRoundStatus: "waiting",
 				draftsByMessageId: {},
@@ -486,7 +557,7 @@ describe("Live Message Review Session server", () => {
 			deliveredBatch = batch;
 		});
 		expect((await fetch(`${url}/api/session/feedback`, { method: "POST" })).status).toBe(200);
-		expect(deliveredBatch?.messages.map((message) => message.messageId)).toEqual(["m2", "m1"]);
+		expect(deliveredBatch?.messages.map((message) => message.messageId)).toEqual(["m1", "m2"]);
 
 		const waiting = await (await fetch(`${url}/api/session`)).json() as LiveMessageReviewSnapshot;
 		expect(waiting).toMatchObject({

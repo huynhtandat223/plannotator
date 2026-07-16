@@ -3,7 +3,10 @@ import { getExPlannotatorBindHost, getExPlannotatorUrl } from "./network.js";
 import {
 	LiveMessageReviewSession,
 	type LiveAssistantMessage,
+	type LiveCodeDraftAnnotation,
 	type LiveDraftAnnotation,
+	type LiveImageAttachment,
+	type LiveLinkedDocumentDraft,
 	type LiveFeedbackBatch,
 	type LiveMessageReviewSnapshot,
 } from "./session.js";
@@ -53,6 +56,32 @@ type OfficialFeedbackPayload = {
 	selectedMessageId?: unknown;
 	feedbackScope?: unknown;
 };
+
+function isDraftAnnotation(annotation: unknown): annotation is LiveDraftAnnotation {
+	return !!annotation && typeof annotation === "object" && typeof (annotation as { id?: unknown }).id === "string";
+}
+
+function isImageAttachment(attachment: unknown): attachment is LiveImageAttachment {
+	return !!attachment && typeof attachment === "object" &&
+		typeof (attachment as { path?: unknown }).path === "string" &&
+		typeof (attachment as { name?: unknown }).name === "string";
+}
+
+function isCodeDraftAnnotation(annotation: unknown): annotation is LiveCodeDraftAnnotation {
+	return isDraftAnnotation(annotation) && (
+		annotation.images === undefined ||
+		(Array.isArray(annotation.images) && annotation.images.every(isImageAttachment))
+	);
+}
+
+function isLinkedDocumentDraft(document: unknown): document is LiveLinkedDocumentDraft {
+	return !!document && typeof document === "object" &&
+		typeof (document as { filepath?: unknown }).filepath === "string" &&
+		Array.isArray((document as { annotations?: unknown }).annotations) &&
+		(document as { annotations: unknown[] }).annotations.every(isDraftAnnotation) &&
+		Array.isArray((document as { globalAttachments?: unknown }).globalAttachments) &&
+		(document as { globalAttachments: unknown[] }).globalAttachments.every(isImageAttachment);
+}
 
 function annotationMessageId(annotation: unknown): string | null {
 	if (!annotation || typeof annotation !== "object") return null;
@@ -107,14 +136,13 @@ export async function startLiveMessageReviewServer(options: {
 		if (request.method === "GET" && url.pathname === "/api/plan") {
 			const snapshot = session.snapshot();
 			const selected = snapshot.messages.find((message) => message.messageId === snapshot.selectedMessageId)
-				?? snapshot.messages[0];
+				?? snapshot.messages.at(-1);
 			writeJson(response, 200, {
 				mode: "annotate-last",
 				plan: selected?.text ?? "",
 				recentMessages: snapshot.messages,
-				// The initial editor selection must match the live snapshot. Without
-				// this, the first SSE event after an automatic reload would select the
-				// same response again and cause another reload.
+				// Keep the initial editor selection aligned with the session-owned
+				// compact response picker. Later SSE snapshots update it in place.
 				selectedMessageId: snapshot.selectedMessageId,
 				origin: "pi",
 				gate: false,
@@ -189,17 +217,34 @@ export async function startLiveMessageReviewServer(options: {
 				const body = await readJson(request) as {
 					messageId?: unknown;
 					annotations?: unknown;
+					codeAnnotations?: unknown;
+					globalAttachments?: unknown;
+					linkedDocuments?: unknown;
 				} | null;
-				const validAnnotations = Array.isArray(body?.annotations) && body.annotations.every(
-					(annotation): annotation is LiveDraftAnnotation => (
-						!!annotation && typeof annotation === "object" && typeof (annotation as { id?: unknown }).id === "string"
-					),
+				const validAnnotations = Array.isArray(body?.annotations) && body.annotations.every(isDraftAnnotation);
+				const validCodeAnnotations = body?.codeAnnotations === undefined || (
+					Array.isArray(body.codeAnnotations) && body.codeAnnotations.every(isCodeDraftAnnotation)
+				);
+				const validAttachments = body?.globalAttachments === undefined || (
+					Array.isArray(body.globalAttachments) && body.globalAttachments.every(isImageAttachment)
+				);
+				const validLinkedDocuments = body?.linkedDocuments === undefined || (
+					Array.isArray(body.linkedDocuments) && body.linkedDocuments.every(isLinkedDocumentDraft)
 				);
 				if (
 					!body ||
 					typeof body.messageId !== "string" ||
 					!validAnnotations ||
-					!session.replaceDrafts(body.messageId, body.annotations as LiveDraftAnnotation[])
+					!validCodeAnnotations ||
+					!validAttachments ||
+					!validLinkedDocuments ||
+					!session.replaceDrafts(
+						body.messageId,
+						body.annotations as LiveDraftAnnotation[],
+						(body.codeAnnotations ?? []) as LiveCodeDraftAnnotation[],
+						(body.globalAttachments ?? []) as LiveImageAttachment[],
+						(body.linkedDocuments ?? []) as LiveLinkedDocumentDraft[],
+					)
 				) {
 					writeJson(response, 400, { error: "Invalid draft state" });
 					return;

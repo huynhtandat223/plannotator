@@ -71,6 +71,7 @@ interface SidebarContainerProps {
   selectedMessageId?: string | null;
   onSelectMessage?: (messageId: string) => void;
   messageAnnotationCounts?: Map<string, number>;
+  messagesChronological?: boolean;
 }
 
 export const SidebarContainer: React.FC<SidebarContainerProps> = ({
@@ -120,6 +121,7 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
   selectedMessageId,
   onSelectMessage,
   messageAnnotationCounts,
+  messagesChronological,
 }) => {
   return (
     <aside
@@ -296,6 +298,7 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
             selectedMessageId={selectedMessageId ?? null}
             onSelect={onSelectMessage}
             annotationCounts={messageAnnotationCounts}
+            chronological={messagesChronological}
           />
         )}
       </OverlayScrollArea>

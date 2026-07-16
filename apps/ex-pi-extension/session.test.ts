@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	LIVE_RESPONSE_HISTORY_LIMIT,
 	createLiveMessageReviewSnapshot,
 	formatLiveFeedbackBatch,
 	LiveMessageReviewSession,
@@ -249,6 +250,137 @@ describe("LiveMessageReviewSession", () => {
 		expect(second).toBe(false);
 	});
 
+	test("keeps a compact chronological latest-four picker and makes a live response editable", () => {
+		const session = sessionWith(Array.from({ length: 6 }, (_, index) => ({
+			messageId: `m${6 - index}`,
+			text: `Response ${6 - index}`,
+		})));
+
+		let snapshot = session.snapshot();
+		expect(LIVE_RESPONSE_HISTORY_LIMIT).toBe(4);
+		expect(snapshot.messages.map((message) => message.messageId)).toEqual(["m3", "m4", "m5", "m6"]);
+		expect(snapshot.selectedMessageId).toBe("m6");
+
+		session.reconcile([
+			{ messageId: "m7", text: "Response 7" },
+			...Array.from({ length: 6 }, (_, index) => ({ messageId: `m${6 - index}`, text: `Response ${6 - index}` })),
+	], ["m7", "m6", "m5", "m4", "m3", "m2", "m1"]);
+
+		snapshot = session.snapshot();
+		expect(snapshot.messages.map((message) => message.messageId)).toEqual(["m4", "m5", "m6", "m7"]);
+		expect(snapshot.selectedMessageId).toBe("m7");
+		expect(session.replaceDrafts("m7", [{ id: "editable" }])).toBe(true);
+	});
+
+	test("preserves a draft when a visible response is updated in place", async () => {
+		const session = sessionWith([{ messageId: "m1", text: "Original response" }]);
+		session.replaceDrafts("m1", [{ id: "draft", type: "COMMENT", text: "Keep this" }]);
+
+		session.reconcile([{ messageId: "m1", text: "Updated response" }], ["m1"]);
+
+		expect(session.snapshot().draftsByMessageId).toEqual({
+			m1: [{ id: "draft", type: "COMMENT", text: "Keep this" }],
+		});
+		let delivered: LiveFeedbackBatchMessage[] = [];
+		await session.submitFeedback(async (batch) => { delivered = batch.messages; });
+		expect(delivered).toEqual([{
+			messageId: "m1",
+			messageText: "Updated response",
+			annotations: [{ id: "draft", type: "COMMENT", text: "Keep this" }],
+		}]);
+	});
+
+	test("retains and delivers a draft after its response leaves the compact picker", async () => {
+		const messages = Array.from({ length: 5 }, (_, index) => ({
+			messageId: `m${5 - index}`,
+			text: `Response ${5 - index}`,
+		}));
+		const session = sessionWith(messages);
+		expect(session.replaceDrafts("m2", [{ id: "retained" }])).toBe(true);
+
+		session.reconcile(
+			[{ messageId: "m6", text: "Response 6" }, ...messages],
+			["m6", "m5", "m4", "m3", "m2", "m1"],
+		);
+		expect(session.snapshot().messages.map((message) => message.messageId)).toEqual(["m3", "m4", "m5", "m6"]);
+
+		let delivered: LiveFeedbackBatchMessage[] = [];
+		expect(await session.submitFeedback(async (batch) => { delivered = batch.messages; })).toBe(true);
+		expect(delivered).toEqual([
+			{ messageId: "m2", messageText: "Response 2", annotations: [{ id: "retained" }] },
+		]);
+	});
+
+	test("retains code drafts after their response leaves the compact picker", async () => {
+		const messages = Array.from({ length: 5 }, (_, index) => ({
+			messageId: `m${5 - index}`,
+			text: `Response ${5 - index}`,
+		}));
+		const session = sessionWith(messages);
+		session.replaceDrafts("m2", [], [{
+			id: "code-draft",
+			filePath: "src/example.ts",
+			lineStart: 4,
+			lineEnd: 5,
+			originalCode: "const value = 1;",
+			text: "Use the configured value.",
+			images: [{ path: "/tmp/code-reference.png", name: "code reference" }],
+		}]);
+
+		session.reconcile(
+			[{ messageId: "m6", text: "Response 6" }, ...messages],
+			["m6", "m5", "m4", "m3", "m2", "m1"],
+		);
+
+		let output = "";
+		expect(await session.submitFeedback(async (batch) => { output = formatLiveFeedbackBatch(batch); })).toBe(true);
+		expect(output).toContain("src/example.ts (lines 4-5)");
+		expect(output).toContain("Use the configured value.");
+		expect(output).toContain("[code reference] `/tmp/code-reference.png`");
+	});
+
+	test("keeps code annotation images in the batch retried after a failed delivery", async () => {
+		const session = sessionWith([{ messageId: "m1", text: "First response" }]);
+		session.replaceDrafts("m1", [], [{
+			id: "code-image",
+			filePath: "src/example.ts",
+			lineStart: 1,
+			lineEnd: 1,
+			images: [{ path: "/tmp/retry-reference.png", name: "retry reference" }],
+		}]);
+
+		await expect(session.submitFeedback(async () => { throw new Error("Pi unavailable"); })).rejects.toThrow("Pi unavailable");
+		let output = "";
+		expect(await session.retryFeedback(async (batch) => { output = formatLiveFeedbackBatch(batch); })).toBe(true);
+		expect(output).toContain("[retry reference] `/tmp/retry-reference.png`");
+	});
+
+	test("retains attachments and linked-document drafts after their response leaves the compact picker", async () => {
+		const messages = Array.from({ length: 5 }, (_, index) => ({
+			messageId: `m${5 - index}`,
+			text: `Response ${5 - index}`,
+		}));
+		const session = sessionWith(messages);
+		session.replaceDrafts("m2", [], [], [{ path: "/tmp/mockup.png", name: "mockup" }], [{
+			filepath: "docs/design.md",
+			annotations: [{ id: "linked-draft", type: "COMMENT", originalText: "Original", text: "Clarify this" }],
+			globalAttachments: [{ path: "/tmp/linked.png", name: "linked" }],
+		}]);
+
+		session.reconcile(
+			[{ messageId: "m6", text: "Response 6" }, ...messages],
+			["m6", "m5", "m4", "m3", "m2", "m1"],
+		);
+
+		expect(session.snapshot().retainedMessages).toEqual([{ messageId: "m2", text: "Response 2" }]);
+		let output = "";
+		expect(await session.submitFeedback(async (batch) => { output = formatLiveFeedbackBatch(batch); })).toBe(true);
+		expect(output).toContain("[mockup] `/tmp/mockup.png`");
+		expect(output).toContain("Linked document: docs/design.md");
+		expect(output).toContain("[linked] `/tmp/linked.png`");
+		expect(output).toContain("Clarify this");
+	});
+
 	test("reconcile selects the newest message and unlocks round after waiting", async () => {
 		const session = sessionWith([
 			{ messageId: "m1", text: "First response" },
@@ -396,28 +528,35 @@ describe("LiveMessageReviewSession", () => {
 
 describe("Live Message Review Session snapshot", () => {
 	test("keeps stable assistant response identities and selects the newest response", () => {
-		const messages = [
+		const newestFirstMessages = [
 			{ messageId: "new", text: "Newest response" },
 			{ messageId: "old", text: "Older response" },
 		];
 
-		expect(createLiveMessageReviewSnapshot(messages)).toEqual({
-			messages,
+		expect(createLiveMessageReviewSnapshot(newestFirstMessages)).toEqual({
+			revision: 0,
+			messages: [...newestFirstMessages].reverse(),
+			retainedMessages: [],
 			selectedMessageId: "new",
 			unreadMessageIds: [],
 			draftsByMessageId: {},
+			codeDraftsByMessageId: {},
+			attachmentsByMessageId: {},
+			linkedDocDraftsByMessageId: {},
 			sentAnnotationsByMessageId: {},
+			sentCodeAnnotationsByMessageId: {},
+			sentMessageIds: [],
 			reviewRoundStatus: "open",
 			deliveryError: null,
 		});
 	});
 
-	test("caps the initial active-branch snapshot at 25 messages", () => {
+	test("caps the initial active-branch snapshot at the compact latest-four history", () => {
 		const messages = Array.from({ length: 30 }, (_, index) => ({
 			messageId: String(index),
 			text: `Response ${index}`,
 		}));
 
-		expect(createLiveMessageReviewSnapshot(messages).messages).toEqual(messages.slice(0, 25));
+		expect(createLiveMessageReviewSnapshot(messages).messages).toEqual(messages.slice(0, 4).reverse());
 	});
 });
