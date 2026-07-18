@@ -292,6 +292,9 @@ const App: React.FC = () => {
   const [showFeedbackPrompt, setShowFeedbackPrompt] = useState(false);
   const [showClaudeCodeWarning, setShowClaudeCodeWarning] = useState(false);
   const [showExitWarning, setShowExitWarning] = useState(false);
+  // Herdr pane termination is separate from the existing review-session exit
+  // flow: it must never submit or close this browser surface.
+  const [showLivePaneCloseConfirm, setShowLivePaneCloseConfirm] = useState(false);
   const [showSourceFileEditWarning, setShowSourceFileEditWarning] = useState(false);
   const [sourceFileEditWarningAction, setSourceFileEditWarningAction] = useState<SourceFileEditWarningAction>('send-feedback');
   const sourceFileEditWarningContinuationRef = useRef<(() => void | Promise<void>) | null>(null);
@@ -3171,24 +3174,27 @@ const App: React.FC = () => {
     }
   };
 
-  // Exit annotation session without sending feedback
-  const handleAnnotateExit = useCallback(async () => {
-    if (liveMessageReview && selectedLiveMessage?.paneId) {
-      setIsExiting(true);
-      try {
-        const response = await fetch(`/api/process-panels?paneId=${encodeURIComponent(selectedLiveMessage.paneId)}`, { method: 'DELETE' });
-        if (!response.ok) {
-          const body = await response.json().catch(() => ({})) as { error?: string };
-          throw new Error(body.error || 'Failed to close Pi panel');
-        }
-        setSubmitted('exited');
-        toast('Pi panel closed');
-      } catch (error) {
-        setIsExiting(false);
-        toast(error instanceof Error ? error.message : 'Failed to close Pi panel', { description: 'The panel is still running.' });
+  const closeSelectedLivePane = useCallback(async () => {
+    if (!selectedLiveMessage?.paneId) return;
+    setIsExiting(true);
+    try {
+      const response = await fetch(`/api/process-panels?paneId=${encodeURIComponent(selectedLiveMessage.paneId)}`, { method: 'DELETE' });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error || 'Failed to close Pi panel');
       }
-      return;
+      // Do not set `submitted`: this closes only the Herdr pane. The viewer
+      // remains open and receives the next live snapshot.
+      toast('Pi panel closed', { description: 'This viewer remains open.' });
+    } catch (error) {
+      toast(error instanceof Error ? error.message : 'Failed to close Pi panel', { description: 'The panel is still running.' });
+    } finally {
+      setIsExiting(false);
     }
+  }, [selectedLiveMessage?.paneId]);
+
+  // Existing non-Herdr exit behavior remains unchanged.
+  const handleAnnotateExit = useCallback(async () => {
     setIsExiting(true);
     try {
       const res = await fetch(withDraftGeneration('/api/exit'), { method: 'POST' });
@@ -3200,7 +3206,7 @@ const App: React.FC = () => {
     } catch {
       setIsExiting(false);
     }
-  }, [liveMessageReview, selectedLiveMessage?.paneId, withDraftGeneration]);
+  }, [withDraftGeneration]);
 
   const handleGoalSetupSubmit = useCallback(() => {
     goalSetupSurfaceRef.current?.submit();
@@ -4129,6 +4135,10 @@ const App: React.FC = () => {
   };
 
   const handleHeaderAnnotateExit = useCallback(() => {
+    if (liveMessageReview && selectedLiveMessage?.paneId) {
+      setShowLivePaneCloseConfirm(true);
+      return;
+    }
     const close = () => {
       if (hasFeedbackToSend) {
         setExitWarningAction('close');
@@ -4139,7 +4149,7 @@ const App: React.FC = () => {
     };
     if (maybeConfirmUnsavedSourceFileEdits('close', close)) return;
     close();
-  }, [hasFeedbackToSend, maybeConfirmUnsavedSourceFileEdits]);
+  }, [hasFeedbackToSend, liveMessageReview, maybeConfirmUnsavedSourceFileEdits, selectedLiveMessage?.paneId]);
 
   const handleHeaderFeedback = useCallback(() => {
     const sendFeedback = () => {
@@ -5133,6 +5143,21 @@ const App: React.FC = () => {
             </>
           }
           confirmText="Approve Anyway"
+          cancelText="Cancel"
+          variant="warning"
+          showCancel
+        />
+
+        <ConfirmDialog
+          isOpen={showLivePaneCloseConfirm}
+          onClose={() => setShowLivePaneCloseConfirm(false)}
+          onConfirm={() => {
+            setShowLivePaneCloseConfirm(false);
+            void closeSelectedLivePane();
+          }}
+          title="Close Pi Panel?"
+          message="This stops and closes the selected live Pi panel in Herdr. This browser viewer stays open."
+          confirmText="Close Panel"
           cancelText="Cancel"
           variant="warning"
           showCancel
