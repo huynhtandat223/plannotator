@@ -71,7 +71,13 @@ interface SidebarContainerProps {
   selectedMessageId?: string | null;
   onSelectMessage?: (messageId: string) => void;
   messageAnnotationCounts?: Map<string, number>;
-  messagesChronological?: boolean;
+  messagePickerLabels?: {
+    tab: string;
+    list: string;
+    empty: string;
+    mobileTitle: string;
+    mobileSubtitle: string;
+  };
 }
 
 export const SidebarContainer: React.FC<SidebarContainerProps> = ({
@@ -121,9 +127,17 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
   selectedMessageId,
   onSelectMessage,
   messageAnnotationCounts,
-  messagesChronological,
+  messagePickerLabels,
 }) => {
+  const pickerLabels = messagePickerLabels ?? {
+    tab: "Messages",
+    list: "Recent messages — newest first",
+    empty: "No recent assistant messages found.",
+    mobileTitle: "Messages",
+    mobileSubtitle: "Pick a recent assistant message",
+  };
   return (
+    <>
     <aside
       className="hidden lg:flex flex-col sticky top-12 h-[calc(100vh-3rem)] flex-shrink-0 bg-card border-r border-border"
       style={{ width }}
@@ -186,7 +200,7 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
             active={activeTab === "messages"}
             onClick={() => onTabChange("messages")}
             icon={<MessagesIcon className="w-3 h-3" />}
-            label="Messages"
+            label={pickerLabels.tab}
             badge={messageAnnotationCounts !== undefined && messageAnnotationCounts.size > 0}
           />
         )}
@@ -298,11 +312,60 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
             selectedMessageId={selectedMessageId ?? null}
             onSelect={onSelectMessage}
             annotationCounts={messageAnnotationCounts}
-            chronological={messagesChronological}
+            listLabel={pickerLabels.list}
+            emptyLabel={pickerLabels.empty}
           />
         )}
       </OverlayScrollArea>
     </aside>
+
+    {/* The desktop sidebar is intentionally hidden below lg. The Viewer message
+        picker still opens the Messages tab on a touch device, so render that
+        same existing MessagesBrowser in a compact modal rather than making
+        multi-message sessions impossible to navigate on mobile. */}
+    {activeTab === "messages" && showMessagesTab && messages && onSelectMessage && (
+      <div
+        className="fixed inset-0 z-[70] flex items-end bg-black/50 p-3 lg:hidden"
+        role="presentation"
+        onClick={onClose}
+      >
+        <section
+          className="max-h-[min(72dvh,36rem)] w-full overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+          role="dialog"
+          aria-modal="true"
+          aria-label={pickerLabels.mobileTitle}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="flex items-center justify-between border-b border-border/50 px-4 py-3">
+            <div>
+              <h2 className="text-sm font-semibold">{pickerLabels.mobileTitle}</h2>
+              <p className="text-xs text-muted-foreground">{pickerLabels.mobileSubtitle}</p>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+            >
+              Done
+            </button>
+          </div>
+          <OverlayScrollArea className="max-h-[calc(min(72dvh,36rem)-4.75rem)]">
+            <MessagesBrowser
+              messages={messages}
+              selectedMessageId={selectedMessageId ?? null}
+              onSelect={(messageId) => {
+                onSelectMessage(messageId);
+                onClose();
+              }}
+              annotationCounts={messageAnnotationCounts}
+              listLabel={pickerLabels.list}
+              emptyLabel={pickerLabels.empty}
+            />
+          </OverlayScrollArea>
+        </section>
+      </div>
+    )}
+    </>
   );
 };
 

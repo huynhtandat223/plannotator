@@ -25,6 +25,7 @@
   "files": [
     "index.ts",
     "assistant-message.ts",
+    "herdr-registration.ts",
     "browser.ts",
     "server.ts",
     "session.ts",

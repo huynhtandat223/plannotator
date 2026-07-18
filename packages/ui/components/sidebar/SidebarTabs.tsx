@@ -17,6 +17,7 @@ interface SidebarTabsProps {
   showVersionsTab?: boolean;
   showFilesTab?: boolean;
   showMessagesTab?: boolean;
+  messagesTabTitle?: string;
   showAgentTerminalTab?: boolean;
   isAgentTerminalOpen?: boolean;
   isAgentTerminalRunning?: boolean;
@@ -33,6 +34,7 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({
   showVersionsTab,
   showFilesTab,
   showMessagesTab,
+  messagesTabTitle = "Pick a different message",
   showAgentTerminalTab,
   isAgentTerminalOpen,
   isAgentTerminalRunning,
@@ -116,7 +118,7 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({
         <button
           onClick={() => onToggleTab("messages")}
           className="sidebar-tab-flag group relative flex items-center justify-center w-7 h-9 rounded-r-md border border-l-0 border-border/50 bg-card/80 backdrop-blur-sm text-muted-foreground hover:text-foreground hover:bg-card transition-colors"
-          title="Pick a different message"
+          title={messagesTabTitle}
         >
           <MessagesIcon />
           {hasMessageAnnotations && (

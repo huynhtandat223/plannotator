@@ -38,6 +38,7 @@ interface AppHeaderProps {
   hasAnyAnnotations: boolean;
   annotationCount: number;
   linkedDocIsActive: boolean;
+  readOnly?: boolean;
   callbackShareUrlReady: boolean;
   canShareCurrentSession: boolean;
   agentName: string;
@@ -114,6 +115,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   hasAnyAnnotations,
   annotationCount,
   linkedDocIsActive,
+  readOnly = false,
   callbackShareUrlReady,
   canShareCurrentSession,
   agentName,
@@ -237,7 +239,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
           </>
         )}
 
-        {isApiMode && (!linkedDocIsActive || annotateMode) && !archiveMode && !goalSetupMode && (
+        {isApiMode && !readOnly && (!linkedDocIsActive || annotateMode) && !archiveMode && !goalSetupMode && (
           <>
             {annotateMode ? (
               <>
@@ -299,7 +301,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
         )}
 
         {/* Annotations panel toggle */}
-        {!goalSetupMode && (
+        {!goalSetupMode && !readOnly && (
           <button
             onClick={onAnnotationPanelToggle}
             className={`relative p-1.5 rounded-md text-xs font-medium transition-all ${

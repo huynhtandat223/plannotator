@@ -22,6 +22,7 @@
     "dev:portal": "bun run --cwd apps/portal dev",
     "dev:marketing": "bun run --cwd apps/marketing dev",
     "dev:review": "bun run --cwd apps/review dev",
+    "dev:herdr": "bun apps/herdr-process-service/server.ts",
     "build:hook": "bun run --cwd apps/hook build",
     "build:ex-pi": "bun run --cwd apps/ex-pi-extension build:package",
     "build:portal": "bun run --cwd apps/portal build",

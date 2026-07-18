@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import exPlannotator, { EX_PLANNOTATOR_COMMAND } from "./index";
+import { getRecentAssistantMessages } from "./assistant-message";
 import type { LiveMessageReviewServer } from "./server";
 
 function fakePi() {
@@ -82,6 +83,37 @@ describe("Ex-Plannotator package surface", () => {
 
 		// Verify delivery callback was wired
 		expect(pi.sentUserMessages).toEqual([]);
+	});
+
+	test("automatically publishes the latest assistant response for its Herdr pane", async () => {
+		const reports: Array<Array<{ messageId: string; text: string }>> = [];
+		let releases = 0;
+		const pi = fakePi();
+		exPlannotator(pi.api as never, {
+			startBrowser: async () => { throw new Error("not used"); },
+			reportHerdr: async (ctx) => {
+				reports.push(getRecentAssistantMessages(ctx as never, 1));
+			},
+			releaseHerdr: async () => { releases += 1; },
+		});
+		const branch: Array<Record<string, unknown>> = [
+			{ id: "first", type: "message", message: { role: "assistant", content: [{ type: "text", text: "First" }] } },
+		];
+		const context = {
+			sessionManager: { getBranch: () => branch, getSessionId: () => "session-a" },
+			ui: { notify() {} },
+		};
+
+		await pi.handlers.get("session_start")!({} as never, context as never);
+		expect(reports.at(-1)).toEqual([{ messageId: "first", text: "First" }]);
+
+		branch.push({ id: "latest", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Latest" }] } });
+		pi.handlers.get("message_end")!({ message: { role: "assistant", content: [] } } as never, context as never);
+		await waitForDeferredReconciliation();
+		expect(reports.at(-1)).toEqual([{ messageId: "latest", text: "Latest" }]);
+
+		await pi.handlers.get("session_shutdown")!({} as never, context as never);
+		expect(releases).toBe(1);
 	});
 
 	test("reconciles only finalized assistant events against stable active-branch identities", async () => {
