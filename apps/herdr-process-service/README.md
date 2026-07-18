@@ -28,6 +28,10 @@ The extension reports the latest **five** structured assistant responses per pan
 
 Feedback is delivered through a narrow bridge: loopback and Tailscale browsers may queue a batch for one live `{ paneId, sessionId }`, then only the matching local Pi extension claims it through a loopback-only endpoint and reuses Ex-Plannotator's existing `formatLiveFeedbackBatch` + `pi.sendUserMessage(..., { deliverAs: "followUp" })` delivery. A changed or closed session invalidates queued feedback. The queue uses at-most-once claim semantics to avoid duplicate prompts after crashes.
 
+## Create a Pi panel
+
+The browser's **New panel** action creates one background Pi agent in a new tab of an existing, live Herdr workspace. Choose a live workspace, select a live panel's working directory or enter another existing absolute directory, give the panel a name, and start with `pi` or another command plus arguments. The action never changes the current Herdr focus or splits an existing pane. Process creation is limited to loopback browsers, or browsers holding the configured write-token cookie; Tailscale-only viewer access is not sufficient.
+
 ## Folder View and Git Changes
 
 The existing Ex-Plannotator **Files** sidebar is enabled for the selected live Pi pane. `GET /api/reference/files` exposes a point-in-time folder tree plus Git status only for an exact `cwd` that a fresh `herdr api snapshot` currently reports for a Pi pane. The tree reuses Ex-Plannotator's normal exclusions and Git decorations (`A`, `D`, `R`, `U`, conflicts, and line totals); changed files of every extension are included so their Git status remains visible. On mobile, the same FileBrowser opens in a full-height sheet. It does not accept arbitrary host directories, persist workspace data, or watch the filesystem.

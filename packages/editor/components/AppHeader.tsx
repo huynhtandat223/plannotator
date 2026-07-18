@@ -9,6 +9,7 @@ import { PlanHeaderMenu } from '@plannotator/ui/components/PlanHeaderMenu';
 import type { CallbackConfig } from '@plannotator/ui/utils/callback';
 import type { UIPreferences } from '@plannotator/ui/utils/uiPreferences';
 import { SparklesIcon } from '@plannotator/ui/components/SparklesIcon';
+import { HerdrProcessPanelLauncher } from './HerdrProcessPanelLauncher';
 
 interface AppHeaderProps {
   /** HTML annotate surface: show a Hide/Show annotation-tools toggle in the header,
@@ -46,6 +47,8 @@ interface AppHeaderProps {
   showAnnotationsWarning: boolean;
   /** Live Herdr workspace navigation, rendered as compact pinned mobile controls. */
   showLiveMessagePicker?: boolean;
+  showLiveProcessPanel?: boolean;
+  onLiveProcessPanelCreated?: (panel: { paneId: string; panelName: string }) => void;
   showLiveFolder?: boolean;
   showLiveChanges?: boolean;
   onOpenLiveMessages?: () => void;
@@ -142,6 +145,8 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   availableAgents,
   showAnnotationsWarning,
   showLiveMessagePicker,
+  showLiveProcessPanel,
+  onLiveProcessPanelCreated,
   showLiveFolder,
   showLiveChanges,
   onOpenLiveMessages,
@@ -217,6 +222,12 @@ export const AppHeader = React.memo<AppHeaderProps>(({
             {showLiveChanges && <HeaderIconButton onClick={onOpenLiveChanges} title="Git Changes">
               <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </HeaderIconButton>}
+          </div>
+        )}
+
+        {showLiveProcessPanel && onLiveProcessPanelCreated && (
+          <div className="mr-1">
+            <HerdrProcessPanelLauncher onCreated={onLiveProcessPanelCreated} />
           </div>
         )}
 

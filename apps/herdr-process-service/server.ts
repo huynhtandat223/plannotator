@@ -7,7 +7,7 @@ import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { readFileSync } from "node:fs";
-import { readFile, readdir, realpath } from "node:fs/promises";
+import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 
@@ -51,6 +51,8 @@ type HerdrReviewSnapshot = {
 
 export type HerdrPanel = {
   id: string;
+  workspaceId?: string;
+  tabId?: string;
   workspace: string;
   tab: string;
   panel: string;
@@ -107,6 +109,7 @@ type HerdrAgent = {
   cwd?: unknown;
   foreground_cwd?: unknown;
   focused?: unknown;
+  name?: unknown;
   pane_id?: unknown;
   tab_id?: unknown;
   workspace_id?: unknown;
@@ -164,9 +167,11 @@ export function panelsFromSnapshot(snapshot: HerdrSnapshot): HerdrPanel[] {
     const tabId = text(agent.tab_id);
     return [{
       id: paneId,
+      workspaceId: workspaceId ?? "",
+      tabId: tabId ?? "",
       workspace: workspaceId ? workspaceLabels.get(workspaceId) ?? workspaceId : basename(cwd),
       tab: tabId ? tabLabels.get(tabId) ?? tabId : "",
-      panel: `Pane ${paneId.split(":").at(-1) ?? paneId}`,
+      panel: text(agent.name) ?? `Pane ${paneId.split(":").at(-1) ?? paneId}`,
       cwd,
       status: status(agent.agent_status),
       focused: agent.focused === true,
@@ -421,6 +426,14 @@ function canWriteFeedback(request: IncomingMessage): boolean {
     || (browserWriteToken !== null && requestCookie(request, "plannotator_herdr_write") === browserWriteToken);
 }
 
+// Starting a host process is intentionally stricter than submitting review
+// feedback: private-network viewers may review, but only a local browser or a
+// browser explicitly granted the write token may launch a new agent.
+function canCreateProcessPanel(request: IncomingMessage): boolean {
+  return isLoopback(request)
+    || (browserWriteToken !== null && requestCookie(request, "plannotator_herdr_write") === browserWriteToken);
+}
+
 async function savePanelSession(request: IncomingMessage, response: ServerResponse): Promise<void> {
   if (!isLoopback(request)) {
     writeJson(response, 403, { error: "Pi session enrichment is loopback-only" });
@@ -543,6 +556,90 @@ export function reviewSnapshotFromPanels(
     reviewRoundStatus: "open",
     deliveryError: null,
   };
+}
+
+export function commandArgv(command: string): string[] | null {
+  const argv: string[] = [];
+  let token = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  for (const character of command.trim()) {
+    if (escaped) {
+      token += character;
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (quote) {
+      if (character === quote) quote = null;
+      else token += character;
+    } else if (character === "'" || character === '"') {
+      quote = character;
+    } else if (/\s/.test(character)) {
+      if (token) {
+        argv.push(token);
+        token = "";
+      }
+    } else {
+      token += character;
+    }
+  }
+  if (quote || escaped || token === "" && argv.length === 0) return null;
+  if (token) argv.push(token);
+  return argv.length > 0 ? argv : null;
+}
+
+type HerdrCliResponse = { result?: { tab?: { tab_id?: unknown }; agent?: { pane_id?: unknown } } };
+
+export async function createProcessPanel(
+  body: Record<string, unknown> | null,
+  panels: HerdrPanel[],
+): Promise<{ paneId: string; panelName: string } | null> {
+  const workspaceId = text(body?.workspaceId);
+  const cwd = text(body?.cwd);
+  const panelName = text(body?.panelName);
+  const command = text(body?.command);
+  if (!workspaceId || !cwd || !panelName || panelName.length > 80 || !command || !isAbsolute(cwd)) return null;
+  if (!panels.some((panel) => panel.workspaceId === workspaceId)) return null;
+  const argv = commandArgv(command);
+  if (!argv) return null;
+  let directory: Awaited<ReturnType<typeof stat>>;
+  try {
+    directory = await stat(cwd);
+  } catch {
+    return null;
+  }
+  if (!directory.isDirectory()) return null;
+
+  // A dedicated background tab preserves every existing pane and its focus.
+  // Herdr uses the tab's initial pane for agent.start, so this produces one
+  // named Pi panel rather than changing an existing layout.
+  const tabResult = await execFileAsync("herdr", ["tab", "create", "--workspace", workspaceId, "--cwd", cwd, "--label", panelName, "--no-focus"], { timeout: 10_000 });
+  const tabId = text((JSON.parse(tabResult.stdout) as HerdrCliResponse).result?.tab?.tab_id);
+  if (!tabId) throw new Error("Herdr did not return the new tab");
+  try {
+    const agentResult = await execFileAsync("herdr", ["agent", "start", panelName, "--workspace", workspaceId, "--tab", tabId, "--cwd", cwd, "--no-focus", "--", ...argv], { timeout: 10_000 });
+    const paneId = text((JSON.parse(agentResult.stdout) as HerdrCliResponse).result?.agent?.pane_id);
+    if (!paneId) throw new Error("Herdr did not return the new Pi pane");
+    return { paneId, panelName };
+  } catch (error) {
+    // Avoid leaving an empty tab behind if the process command cannot start.
+    await execFileAsync("herdr", ["tab", "close", tabId]).catch(() => {});
+    throw error;
+  }
+}
+
+async function queueProcessPanel(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (!canCreateProcessPanel(request)) {
+    writeJson(response, 403, { error: "Creating a Pi panel requires a loopback browser or PLANNOTATOR_HERDR_WRITE_TOKEN." });
+    return;
+  }
+  const panels = await discoverPanels();
+  const panel = await createProcessPanel(await requestJson(request), panels);
+  if (!panel) {
+    writeJson(response, 400, { error: "A live workspace, existing absolute working directory, panel name, and valid command are required" });
+    return;
+  }
+  writeJson(response, 201, panel);
 }
 
 async function reviewSnapshot(): Promise<{ panels: HerdrPanel[]; snapshot: HerdrReviewSnapshot }> {
@@ -955,6 +1052,10 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
   }
   if (request.method === "POST" && url.pathname === "/api/instruction") {
     void queueInstruction(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/process-panels") {
+    void queueProcessPanel(request, response).catch((error: unknown) => writeJson(response, 503, { error: error instanceof Error ? error.message : "Could not create Pi panel" }));
     return;
   }
   if (request.method === "POST" && url.pathname === "/api/feedback") {

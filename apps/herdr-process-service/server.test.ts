@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  commandArgv,
   feedbackBatch,
   instructionDelivery,
   panelsFromSnapshot,
@@ -38,6 +39,19 @@ describe("feedbackBatch", () => {
         })],
       }),
     });
+  });
+});
+
+describe("commandArgv", () => {
+  test("parses executable arguments without shell evaluation", () => {
+    expect(commandArgv('pi --model "claude sonnet"')).toEqual(["pi", "--model", "claude sonnet"]);
+    expect(commandArgv("pi 'two words'")).toEqual(["pi", "two words"]);
+  });
+
+  test("rejects empty and incomplete commands", () => {
+    expect(commandArgv("   ")).toBeNull();
+    expect(commandArgv("pi \\")).toBeNull();
+    expect(commandArgv("pi 'unterminated")).toBeNull();
   });
 });
 
@@ -87,6 +101,8 @@ describe("panelsFromSnapshot", () => {
       ],
     })).toEqual([{
       id: "workspace-1:p9",
+      workspaceId: "workspace-1",
+      tabId: "tab-1",
       workspace: "pi-harness",
       tab: "plannotator",
       panel: "Pane p9",
@@ -101,6 +117,8 @@ describe("panelsFromSnapshot", () => {
       agents: [{ agent: "pi", agent_status: "idle", cwd: "/work/repo", pane_id: "w:p1" }],
     })).toEqual([{
       id: "w:p1",
+      workspaceId: "",
+      tabId: "",
       workspace: "repo",
       tab: "",
       panel: "Pane p1",

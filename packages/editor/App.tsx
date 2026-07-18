@@ -4273,6 +4273,8 @@ const App: React.FC = () => {
           availableAgents={availableAgents}
           showAnnotationsWarning={hasFeedbackToSend}
           showLiveMessagePicker={liveMessageReview && recentMessages.length > 1}
+          showLiveProcessPanel={liveMessageReview}
+          onLiveProcessPanelCreated={({ panelName }) => toast('Pi panel created', { description: `${panelName} is ready in Herdr.` })}
           showLiveFolder={liveMessageReview && !!projectRoot && !archive.archiveMode}
           showLiveChanges={liveMessageReview && !!projectRoot && !archive.archiveMode}
           onOpenLiveMessages={() => openSidebarTab('messages')}
