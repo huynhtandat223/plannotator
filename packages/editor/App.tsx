@@ -1062,6 +1062,16 @@ const App: React.FC = () => {
     return paneId ? recentMessages.filter((message) => message.paneId === paneId) : recentMessages;
   }, [liveWorkspaceMode, recentMessages, selectedMessageId]);
 
+  // A waiting document represents a real live Pi pane but has no assistant
+  // response to annotate. Its global comment is instead a new user message.
+  const selectedLiveMessage = React.useMemo(
+    () => recentMessages.find((message) => message.messageId === selectedMessageId) ?? null,
+    [recentMessages, selectedMessageId],
+  );
+  const sendsGlobalCommentAsUserMessage = liveMessageReview &&
+    Boolean(selectedLiveMessage?.paneId) &&
+    !selectedLiveMessage?.assistantMessageId;
+
   const selectedLiveMessageAnnotationCount = React.useMemo(() => {
     if (!selectedMessageId) return 0;
     const current = buildCurrentMessageState();
@@ -3037,6 +3047,30 @@ const App: React.FC = () => {
     }
     setIsSubmitting(true);
     try {
+      if (sendsGlobalCommentAsUserMessage) {
+        const content = allAnnotations
+          .filter((annotation) => annotation.type === AnnotationType.GLOBAL_COMMENT)
+          .map((annotation) => annotation.text?.trim())
+          .filter((text): text is string => Boolean(text))
+          .join("\n\n");
+        if (!content || !selectedLiveMessage?.paneId) {
+          throw new Error('Add a global message before sending it to Pi.');
+        }
+        const response = await fetch('/api/instruction', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paneId: selectedLiveMessage.paneId, text: content }),
+        });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({})) as { error?: string };
+          throw new Error(body.error || 'Failed to send message to Pi');
+        }
+        setFollowNextPaneResponse({ paneId: selectedLiveMessage.paneId, latestMessageId: selectedLiveMessage.messageId });
+        dismissDraft();
+        toast('Message sent to Pi', { description: 'Waiting for its response.' });
+        setIsSubmitting(false);
+        return;
+      }
       snapshotActiveEditableDocument();
       const checkedSavedFileChanges = await validateSavedFileChangesBeforeSubmit();
       if (checkedSavedFileChanges === null) {

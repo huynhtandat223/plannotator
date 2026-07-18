@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { currentHerdrRegistration, pollHerdrFeedback, releaseHerdrSession, reportHerdrSession } from "./herdr-registration";
+import { currentHerdrRegistration, pollHerdrFeedback, pollHerdrInstruction, releaseHerdrSession, reportHerdrSession } from "./herdr-registration";
 
 function context() {
 	return {
@@ -103,6 +103,21 @@ describe("Herdr session enrichment", () => {
 		expect(delivered[0]).toContain("Feedback Batch: `batch-1`");
 		expect(delivered[0]).toContain("Improve it");
 		expect(delivered[0]).toContain("Use a safer boundary.");
+	});
+
+	test("delivers a claimed browser instruction as an unformatted Pi user message", async () => {
+		const delivered: string[] = [];
+		await pollHerdrInstruction(
+			context() as never,
+			(content) => delivered.push(content),
+			async () => new Response(JSON.stringify({
+				deliveryId: "instruction-1",
+				content: "Start by checking the logs.",
+			}), { status: 200 }),
+			{ HERDR_ENV: "1", HERDR_PANE_ID: "w:p1" },
+		);
+
+		expect(delivered).toEqual(["Start by checking the logs."]);
 	});
 
 	test("releases only the registration belonging to the shutting-down Pi session", async () => {

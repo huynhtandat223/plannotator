@@ -22,6 +22,7 @@ export type HerdrSessionRegistration = {
 };
 
 type HerdrFeedbackDelivery = { deliveryId: string; batch: LiveFeedbackBatch };
+type HerdrInstructionDelivery = { deliveryId: string; content: string };
 type SendPiUserMessage = (content: string, options: { deliverAs: "followUp" }) => void;
 
 export function currentHerdrRegistration(
@@ -83,6 +84,30 @@ export async function pollHerdrFeedback(
 	} catch {
 		// Feedback remains queued until a later poll when this optional host is
 		// temporarily unavailable. Pi remains usable independently of it.
+	}
+}
+
+export async function pollHerdrInstruction(
+	ctx: Pick<ExtensionContext, "sessionManager">,
+	sendUserMessage: SendPiUserMessage,
+	fetcher: typeof fetch = fetch,
+	env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+	const registration = currentHerdrRegistration(ctx, env);
+	if (!registration) return;
+	try {
+		const claim = await fetcher(`${loopbackServiceUrl(env)}/api/panel-instruction/claim`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ paneId: registration.paneId, sessionId: registration.sessionId }),
+			signal: AbortSignal.timeout(1_000),
+		});
+		if (claim.status === 204 || !claim.ok) return;
+		const delivery = await claim.json() as Partial<HerdrInstructionDelivery>;
+		if (!delivery.deliveryId || !delivery.content?.trim()) return;
+		sendUserMessage(delivery.content, { deliverAs: "followUp" });
+	} catch {
+		// User messages remain queued until the optional local viewer is reachable.
 	}
 }
 

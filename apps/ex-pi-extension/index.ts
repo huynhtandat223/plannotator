@@ -6,7 +6,7 @@ import {
 import { startLiveMessageReviewBrowser } from "./browser.js";
 import { formatLiveFeedbackBatch } from "./session.js";
 import type { LiveMessageReviewServer } from "./server.js";
-import { pollHerdrFeedback, releaseHerdrSession, reportHerdrSession } from "./herdr-registration.js";
+import { pollHerdrFeedback, pollHerdrInstruction, releaseHerdrSession, reportHerdrSession } from "./herdr-registration.js";
 
 export const EX_PLANNOTATOR_COMMAND = "ex-plannotator-last";
 
@@ -18,6 +18,7 @@ type ExPlannotatorDependencies = {
 	reportHerdr: (ctx: ExtensionContext) => Promise<void>;
 	releaseHerdr: (ctx: ExtensionContext) => Promise<void>;
 	pollHerdrFeedback: (ctx: ExtensionContext, sendUserMessage: (content: string, options: { deliverAs: "followUp" }) => void) => Promise<void>;
+	pollHerdrInstruction: (ctx: ExtensionContext, sendUserMessage: (content: string, options: { deliverAs: "followUp" }) => void) => Promise<void>;
 };
 
 function errorMessage(error: unknown): string {
@@ -33,6 +34,7 @@ export default function exPlannotator(
 		reportHerdr: reportHerdrSession,
 		releaseHerdr: releaseHerdrSession,
 		pollHerdrFeedback,
+		pollHerdrInstruction,
 		...overrides,
 	};
 	let activeServer: LiveMessageReviewServer | null = null;
@@ -51,6 +53,7 @@ export default function exPlannotator(
 		stopHerdrFeedbackPoll();
 		const poll = () => {
 			void dependencies.reportHerdr(ctx);
+			void dependencies.pollHerdrInstruction(ctx, pi.sendUserMessage.bind(pi));
 			void dependencies.pollHerdrFeedback(ctx, pi.sendUserMessage.bind(pi));
 		};
 		poll();

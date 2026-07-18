@@ -81,8 +81,14 @@ type PendingFeedbackDelivery = {
   paneId: string;
   sessionId: string;
   batch: LiveFeedbackBatch;
-
 };
+type PendingInstructionDelivery = {
+  deliveryId: string;
+  paneId: string;
+  sessionId: string;
+  content: string;
+};
+
 
 // Structured Pi data is optional enrichment only. Herdr remains authoritative
 // for whether the pane is live; this map is process-local and is pruned on each
@@ -91,6 +97,9 @@ const panelSessions = new Map<string, PanelSessionEnrichment>();
 // A delivery is held only until the matching local Pi extension claims it.
 // It is never persisted and cannot outlive a host restart.
 const pendingFeedbackDeliveries = new Map<string, PendingFeedbackDelivery>();
+// Browser-originated user instructions are held only until the matching local
+// Pi extension claims them. They are not annotation feedback and never persist.
+const pendingInstructionDeliveries = new Map<string, PendingInstructionDelivery>();
 
 type HerdrAgent = {
   agent?: unknown;
@@ -298,20 +307,60 @@ async function queueFeedback(request: IncomingMessage, response: ServerResponse)
   writeJson(response, 202, { ok: true, deliveryId: delivery.deliveryId });
 }
 
+export function instructionDelivery(
+  body: Record<string, unknown> | null,
+  messages: HerdrReviewSnapshot["messages"],
+): { paneId: string; content: string } | null {
+  const paneId = text(body?.paneId);
+  const content = text(body?.text);
+  if (!paneId || !content || !messages.some((message) => message.paneId === paneId)) return null;
+  return { paneId, content };
+}
+
+async function queueInstruction(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (!canWriteFeedback(request)) {
+    writeJson(response, 403, { error: "Sending a message requires a loopback browser or PLANNOTATOR_HERDR_WRITE_TOKEN." });
+    return;
+  }
+  const { snapshot } = await reviewSnapshot();
+  const prepared = instructionDelivery(await requestJson(request), snapshot.messages);
+  if (!prepared) {
+    writeJson(response, 400, { error: "A message and one live Pi pane are required" });
+    return;
+  }
+  const registration = panelSessions.get(prepared.paneId);
+  if (!registration) {
+    writeJson(response, 409, { error: "The selected Pi pane has not published a live session" });
+    return;
+  }
+  const delivery: PendingInstructionDelivery = {
+    deliveryId: randomUUID(),
+    paneId: prepared.paneId,
+    sessionId: registration.sessionId,
+    content: prepared.content,
+  };
+  pendingInstructionDeliveries.set(delivery.deliveryId, delivery);
+  writeJson(response, 202, { ok: true, deliveryId: delivery.deliveryId });
+}
+
+function claimingRegistration(body: Record<string, unknown> | null): { paneId: string; sessionId: string } | null {
+  const paneId = text(body?.paneId);
+  const sessionId = text(body?.sessionId);
+  return paneId && sessionId && panelSessions.get(paneId)?.sessionId === sessionId ? { paneId, sessionId } : null;
+}
+
 async function claimFeedback(request: IncomingMessage, response: ServerResponse): Promise<void> {
   if (!isLoopback(request)) {
     writeJson(response, 403, { error: "Pi feedback delivery is loopback-only" });
     return;
   }
-  const body = await requestJson(request);
-  const paneId = text(body?.paneId);
-  const sessionId = text(body?.sessionId);
-  if (!paneId || !sessionId || panelSessions.get(paneId)?.sessionId !== sessionId) {
+  const registration = claimingRegistration(await requestJson(request));
+  if (!registration) {
     writeJson(response, 409, { error: "The Pi session registration is no longer current" });
     return;
   }
   const delivery = [...pendingFeedbackDeliveries.values()].find((candidate) =>
-    candidate.paneId === paneId && candidate.sessionId === sessionId,
+    candidate.paneId === registration.paneId && candidate.sessionId === registration.sessionId,
   );
   if (!delivery) {
     response.writeHead(204, { "cache-control": "no-store" });
@@ -319,11 +368,31 @@ async function claimFeedback(request: IncomingMessage, response: ServerResponse)
     return;
   }
   // Claim is intentionally destructive. Pi's sendUserMessage is not an
-  // idempotent transaction, so acknowledging later could inject the same
-  // feedback twice after a restart between send and ACK. At-most-once delivery
-  // is safer than a duplicate prompt; the browser has already received 202.
+  // idempotent transaction, so at-most-once delivery is safer than duplicates.
   pendingFeedbackDeliveries.delete(delivery.deliveryId);
   writeJson(response, 200, { deliveryId: delivery.deliveryId, batch: delivery.batch });
+}
+
+async function claimInstruction(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (!isLoopback(request)) {
+    writeJson(response, 403, { error: "Pi message delivery is loopback-only" });
+    return;
+  }
+  const registration = claimingRegistration(await requestJson(request));
+  if (!registration) {
+    writeJson(response, 409, { error: "The Pi session registration is no longer current" });
+    return;
+  }
+  const delivery = [...pendingInstructionDeliveries.values()].find((candidate) =>
+    candidate.paneId === registration.paneId && candidate.sessionId === registration.sessionId,
+  );
+  if (!delivery) {
+    response.writeHead(204, { "cache-control": "no-store" });
+    response.end();
+    return;
+  }
+  pendingInstructionDeliveries.delete(delivery.deliveryId);
+  writeJson(response, 200, { deliveryId: delivery.deliveryId, content: delivery.content });
 }
 
 function isLoopback(request: IncomingMessage): boolean {
@@ -396,6 +465,9 @@ export function releasePanelSession(
   enrichments.delete(paneId);
   for (const [deliveryId, delivery] of pendingFeedbackDeliveries) {
     if (delivery.paneId === paneId && delivery.sessionId === sessionId) pendingFeedbackDeliveries.delete(deliveryId);
+  }
+  for (const [deliveryId, delivery] of pendingInstructionDeliveries) {
+    if (delivery.paneId === paneId && delivery.sessionId === sessionId) pendingInstructionDeliveries.delete(deliveryId);
   }
   return true;
 }
@@ -482,6 +554,11 @@ async function reviewSnapshot(): Promise<{ panels: HerdrPanel[]; snapshot: Herdr
   for (const [deliveryId, delivery] of pendingFeedbackDeliveries) {
     if (!livePaneIds.has(delivery.paneId) || panelSessions.get(delivery.paneId)?.sessionId !== delivery.sessionId) {
       pendingFeedbackDeliveries.delete(deliveryId);
+    }
+  }
+  for (const [deliveryId, delivery] of pendingInstructionDeliveries) {
+    if (!livePaneIds.has(delivery.paneId) || panelSessions.get(delivery.paneId)?.sessionId !== delivery.sessionId) {
+      pendingInstructionDeliveries.delete(deliveryId);
     }
   }
   return { panels, snapshot: reviewSnapshotFromPanels(panels, null, panelSessions) }; 
@@ -870,6 +947,14 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
   }
   if (request.method === "POST" && url.pathname === "/api/panel-feedback/claim") {
     void claimFeedback(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/panel-instruction/claim") {
+    void claimInstruction(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/instruction") {
+    void queueInstruction(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
     return;
   }
   if (request.method === "POST" && url.pathname === "/api/feedback") {

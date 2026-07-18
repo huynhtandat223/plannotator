@@ -16,6 +16,8 @@ export interface PickerMessage {
   label?: string;
   /** Optional host-provided secondary detail for a picker row. */
   description?: string;
+  /** Pi assistant message identity; absent for a live pane awaiting its first response. */
+  assistantMessageId?: string;
   /** Optional host grouping identity, distinct from assistant messageId. */
   paneId?: string;
   /** Optional host-provided Pi session identity for pane-scoped live drafts. */

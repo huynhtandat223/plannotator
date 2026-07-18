@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   feedbackBatch,
+  instructionDelivery,
   panelsFromSnapshot,
   releasePanelSession,
   reviewSnapshotFromPanels,
@@ -37,6 +38,28 @@ describe("feedbackBatch", () => {
         })],
       }),
     });
+  });
+});
+
+describe("instructionDelivery", () => {
+  test("accepts a text instruction for a live pane before it has an assistant response", () => {
+    expect(instructionDelivery({ paneId: "w:p1", text: "Please start by checking the logs." }, [{
+      messageId: "w:p1:waiting",
+      paneId: "w:p1",
+      piSessionId: "session-1",
+      text: "Waiting for the Pi session to publish its latest assistant response.",
+      label: "Waiting for a response",
+      description: "No structured assistant response published yet",
+      paneLabel: "one",
+      paneDescription: "Pane p1",
+      agentStatus: "idle" as const,
+      cwd: "/one",
+    }])).toEqual({ paneId: "w:p1", content: "Please start by checking the logs." });
+  });
+
+  test("rejects instructions without live pane text", () => {
+    expect(instructionDelivery({ paneId: "w:p1", text: "   " }, [])).toBeNull();
+    expect(instructionDelivery({ paneId: "closed:p1", text: "Hello" }, [])).toBeNull();
   });
 });
 
