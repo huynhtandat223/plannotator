@@ -49,7 +49,10 @@ export default function exPlannotator(
 
 	function startHerdrFeedbackPoll(ctx: ExtensionContext): void {
 		stopHerdrFeedbackPoll();
-		const poll = () => void dependencies.pollHerdrFeedback(ctx, pi.sendUserMessage.bind(pi));
+		const poll = () => {
+			void dependencies.reportHerdr(ctx);
+			void dependencies.pollHerdrFeedback(ctx, pi.sendUserMessage.bind(pi));
+		};
 		poll();
 		herdrFeedbackPoll = setInterval(poll, 750);
 	}

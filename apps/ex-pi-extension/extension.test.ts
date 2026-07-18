@@ -106,6 +106,9 @@ describe("Ex-Plannotator package surface", () => {
 
 		await pi.handlers.get("session_start")!({} as never, context as never);
 		expect(reports.at(-1)).toEqual([{ messageId: "first", text: "First" }]);
+		const reportsAfterSessionStart = reports.length;
+		await new Promise((resolve) => setTimeout(resolve, 800));
+		expect(reports.length).toBeGreaterThan(reportsAfterSessionStart);
 
 		branch.push({ id: "latest", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Latest" }] } });
 		pi.handlers.get("message_end")!({ message: { role: "assistant", content: [] } } as never, context as never);
