@@ -16,6 +16,14 @@ export interface PickerMessage {
   label?: string;
   /** Optional host-provided secondary detail for a picker row. */
   description?: string;
+  /** Optional host grouping identity, distinct from assistant messageId. */
+  paneId?: string;
+  /** Optional host-provided pane heading for grouped message pickers. */
+  paneLabel?: string;
+  /** Optional host-provided pane detail for grouped message pickers. */
+  paneDescription?: string;
+  /** Optional host-provided authoritative live agent state. */
+  agentStatus?: 'working' | 'idle' | 'blocked' | 'unknown';
 }
 
 interface MessagesBrowserProps {
@@ -65,52 +73,74 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
     );
   }
 
+  const paneGroups = messages.reduce<Array<{ paneId: string; label?: string; description?: string; messages: PickerMessage[] }>>(
+    (groups, message) => {
+      const paneId = message.paneId ?? message.messageId;
+      const group = groups.find((candidate) => candidate.paneId === paneId);
+      if (group) group.messages.push(message);
+      else groups.push({ paneId, label: message.paneLabel, description: message.paneDescription, messages: [message] });
+      return groups;
+    },
+    [],
+  );
+  const groupedByPane = messages.some((message) => message.paneId !== undefined);
+
   return (
     <div className="p-2">
       <div className="px-2 pt-1 pb-2 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
         {listLabel}
       </div>
-      <div className="space-y-0.5">
-        {messages.map((msg, idx) => {
-          const isSelected = msg.messageId === selectedMessageId;
-          const isDefault = idx === 0;
-          const ts = formatTimestamp(msg.timestamp);
-          const annotationCount = annotationCounts?.get(msg.messageId) ?? 0;
-          return (
-            <button
-              key={msg.messageId}
-              onClick={() => onSelect(msg.messageId)}
-              className={`w-full text-left px-2 py-1.5 rounded text-xs transition-colors flex items-start gap-2 ${
-                isSelected
-                  ? "bg-primary/10 text-primary border border-primary/30"
-                  : "text-foreground hover:bg-muted/50 border border-transparent"
-              }`}
-            >
-              <span className="font-mono text-[10px] text-muted-foreground pt-0.5 w-8 shrink-0 text-right">
-                #{idx + 1}
-                {isDefault ? " ★" : ""}
-              </span>
-              <span className="flex-1 min-w-0">
-                <span className="line-clamp-2 leading-snug">
-                  {msg.label ?? previewText(msg.text)}
-                </span>
-                {(msg.description || ts) && (
-                  <span className="block text-[10px] text-muted-foreground mt-0.5 line-clamp-2">
-                    {[msg.description, ts].filter(Boolean).join(' · ')}
-                  </span>
-                )}
-              </span>
-              {annotationCount > 0 && (
-                <span
-                  className="shrink-0 min-w-5 h-5 px-1 rounded-full bg-primary/10 text-primary border border-primary/30 text-[10px] font-semibold inline-flex items-center justify-center"
-                  title={`${annotationCount} annotation${annotationCount === 1 ? "" : "s"}`}
+      <div className="space-y-2">
+        {paneGroups.map((group) => (
+          <section key={group.paneId} className="space-y-0.5">
+            {groupedByPane && (
+              <div className="px-2 pt-1 text-[10px] font-medium text-muted-foreground">
+                <div>{group.label}</div>
+                {group.description && <div className="font-normal text-[9px] opacity-80">{group.description}</div>}
+              </div>
+            )}
+            {group.messages.map((msg, idx) => {
+              const isSelected = msg.messageId === selectedMessageId;
+              const isDefault = idx === 0;
+              const ts = formatTimestamp(msg.timestamp);
+              const annotationCount = annotationCounts?.get(msg.messageId) ?? 0;
+              return (
+                <button
+                  key={msg.messageId}
+                  onClick={() => onSelect(msg.messageId)}
+                  className={`w-full text-left px-2 py-1.5 rounded text-xs transition-colors flex items-start gap-2 ${
+                    isSelected
+                      ? "bg-primary/10 text-primary border border-primary/30"
+                      : "text-foreground hover:bg-muted/50 border border-transparent"
+                  }`}
                 >
-                  {annotationCount}
-                </span>
-              )}
-            </button>
-          );
-        })}
+                  <span className="font-mono text-[10px] text-muted-foreground pt-0.5 w-8 shrink-0 text-right">
+                    #{idx + 1}
+                    {isDefault ? " ★" : ""}
+                  </span>
+                  <span className="flex-1 min-w-0">
+                    <span className="line-clamp-2 leading-snug">
+                      {msg.label ?? previewText(msg.text)}
+                    </span>
+                    {(msg.description || ts) && (
+                      <span className="block text-[10px] text-muted-foreground mt-0.5 line-clamp-2">
+                        {[msg.description, ts].filter(Boolean).join(' · ')}
+                      </span>
+                    )}
+                  </span>
+                  {annotationCount > 0 && (
+                    <span
+                      className="shrink-0 min-w-5 h-5 px-1 rounded-full bg-primary/10 text-primary border border-primary/30 text-[10px] font-semibold inline-flex items-center justify-center"
+                      title={`${annotationCount} annotation${annotationCount === 1 ? "" : "s"}`}
+                    >
+                      {annotationCount}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </section>
+        ))}
       </div>
     </div>
   );

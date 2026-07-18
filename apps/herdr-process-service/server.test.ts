@@ -54,14 +54,17 @@ describe("panelsFromSnapshot", () => {
     }]);
   });
 
-  test("renders each pane's latest structured Pi response, matching ex-plannotator-last", () => {
+  test("renders each pane's structured response history newest-first while retaining pane and Pi message identities", () => {
     const panels: HerdrPanel[] = [
       { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
       { id: "w:p2", workspace: "two", tab: "", panel: "Pane p2", cwd: "/two", status: "idle", focused: false },
     ];
     const enrichments = new Map<string, PanelSessionEnrichment>([
-      ["w:p1", { paneId: "w:p1", sessionId: "session-1", messages: [{ messageId: "pi-message-1", text: "First live response", timestamp: "2026-07-18T00:00:00.000Z" }] }],
-      ["w:p2", { paneId: "w:p2", sessionId: "session-2", messages: [{ messageId: "pi-message-2", text: "Second live response" }] }],
+      ["w:p1", { paneId: "w:p1", sessionId: "session-1", messages: [
+        { messageId: "pi-message-1", text: "Newest response", timestamp: "2026-07-18T00:00:00.000Z" },
+        { messageId: "pi-message-0", text: "Older response" },
+      ] }],
+      ["w:p2", { paneId: "w:p2", sessionId: "session-2", messages: [{ messageId: "pi-message-2", text: "Second pane response" }] }],
     ]);
 
     const snapshot = reviewSnapshotFromPanels(panels, "w:p2", enrichments);
@@ -69,18 +72,43 @@ describe("panelsFromSnapshot", () => {
     expect(snapshot.messages).toEqual([
       expect.objectContaining({
         messageId: "w:p1:pi-message-1",
-        text: "First live response",
+        paneId: "w:p1",
+        assistantMessageId: "pi-message-1",
+        text: "Newest response",
         timestamp: "2026-07-18T00:00:00.000Z",
-        label: "one",
-        description: "Pane p1 · working",
+        label: "Response 1 · latest",
+        paneLabel: "one",
+      }),
+      expect.objectContaining({
+        messageId: "w:p1:pi-message-0",
+        paneId: "w:p1",
+        assistantMessageId: "pi-message-0",
+        text: "Older response",
+        label: "Response 2",
+        paneLabel: "one",
       }),
       expect.objectContaining({
         messageId: "w:p2:pi-message-2",
-        text: "Second live response",
-        label: "two",
-        description: "Pane p2 · idle",
+        paneId: "w:p2",
+        assistantMessageId: "pi-message-2",
+        text: "Second pane response",
+        paneLabel: "two",
       }),
     ]);
+  });
+
+  test("selects the newest response in the focused pane by default", () => {
+    const panels: HerdrPanel[] = [
+      { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
+    ];
+    const enrichments = new Map<string, PanelSessionEnrichment>([
+      ["w:p1", { paneId: "w:p1", sessionId: "session", messages: [
+        { messageId: "newest", text: "Newest" },
+        { messageId: "older", text: "Older" },
+      ] }],
+    ]);
+
+    expect(reviewSnapshotFromPanels(panels, null, enrichments).selectedMessageId).toBe("w:p1:newest");
   });
 
   test("shows a truthful waiting document until the Pi extension enriches a live pane", () => {

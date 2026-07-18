@@ -7,17 +7,34 @@ import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename, join } from "node:path";
 import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const port = parsePort(process.env.PLANNOTATOR_HERDR_PORT ?? "19432");
 const host = process.env.PLANNOTATOR_HERDR_HOST ?? "0.0.0.0";
+// LAN viewers may read the shared workspace, but feedback changes a live Pi
+// conversation. A token is therefore required for non-loopback writes.
+const browserWriteToken = process.env.PLANNOTATOR_HERDR_WRITE_TOKEN?.trim() || null;
+export const HERDR_LIVE_MESSAGE_LIMIT = 5;
 // The packaged Ex-Plannotator editor owns every visual decision, including its
 // responsive/mobile behavior. This service supplies data only.
 const editorHtml = readFileSync(join(import.meta.dir, "..", "ex-pi-extension", "ex-plannotator.html"), "utf8");
 
 type HerdrReviewSnapshot = {
-  messages: Array<{ messageId: string; text: string; timestamp?: string; label: string; description: string }>;
+  messages: Array<{
+    messageId: string;
+    paneId: string;
+    assistantMessageId?: string;
+    text: string;
+    timestamp?: string;
+    label: string;
+    description: string;
+    paneLabel: string;
+    paneDescription: string;
+    /** Herdr's authoritative live state for the pane containing this response. */
+    agentStatus: HerdrPanel["status"];
+  }>;
   selectedMessageId: string | null;
   unreadMessageIds: string[];
   draftsByMessageId: Record<string, unknown[]>;
@@ -42,10 +59,26 @@ export type PanelSessionEnrichment = {
   messages: Array<{ messageId: string; text: string; timestamp?: string }>;
 };
 
+type LiveDraftAnnotation = { id: string; [key: string]: unknown };
+type LiveFeedbackBatch = {
+  batchId: string;
+  messages: Array<{ messageId: string; messageText: string; annotations: LiveDraftAnnotation[] }>;
+};
+type PendingFeedbackDelivery = {
+  deliveryId: string;
+  paneId: string;
+  sessionId: string;
+  batch: LiveFeedbackBatch;
+
+};
+
 // Structured Pi data is optional enrichment only. Herdr remains authoritative
 // for whether the pane is live; this map is process-local and is pruned on each
 // discovery reconciliation.
 const panelSessions = new Map<string, PanelSessionEnrichment>();
+// A delivery is held only until the matching local Pi extension claims it.
+// It is never persisted and cannot outlive a host restart.
+const pendingFeedbackDeliveries = new Map<string, PendingFeedbackDelivery>();
 
 type HerdrAgent = {
   agent?: unknown;
@@ -142,10 +175,6 @@ function documentId(panelId: string, messageId: string): string {
   return `${panelId}:${messageId}`;
 }
 
-function paneIdFromDocumentId(value: string): string {
-  const marker = value.lastIndexOf(":");
-  return marker > 0 ? value.slice(0, marker) : value;
-}
 
 function overviewDocument(panels: HerdrPanel[]): string {
   if (panels.length === 0) return "# Herdr workspaces\n\nNo live Pi panels found.";
@@ -184,28 +213,115 @@ async function requestJson(request: IncomingMessage): Promise<Record<string, unk
   }
 }
 
-async function saveSelection(request: IncomingMessage, response: ServerResponse): Promise<void> {
-  const body = await requestJson(request);
-  const messageId = text(body?.messageId);
-  if (!messageId) {
-    writeJson(response, 400, { error: "messageId is required" });
-    return;
-  }
+function annotationMessageId(annotation: unknown): string | null {
+  if (!annotation || typeof annotation !== "object") return null;
+  const value = (annotation as { messageId?: unknown }).messageId;
+  return typeof value === "string" ? value : null;
+}
 
-  const paneId = paneIdFromDocumentId(messageId);
-  const panels = await discoverPanels();
-  if (!panels.some((panel) => panel.id === paneId)) {
-    writeJson(response, 404, { error: "The selected Pi panel is no longer live" });
+function feedbackBatch(
+  body: Record<string, unknown> | null,
+  messages: HerdrReviewSnapshot["messages"],
+): { paneId: string; batch: LiveFeedbackBatch } | null {
+  if (!body || !Array.isArray(body.annotations)) return null;
+  const selectedMessageId = text(body.selectedMessageId);
+  const sourceMessages = new Map(messages.map((message) => [message.messageId, message]));
+  const grouped = new Map<string, LiveDraftAnnotation[]>();
+  for (const annotation of body.annotations) {
+    if (!annotation || typeof annotation !== "object" || typeof (annotation as { id?: unknown }).id !== "string") return null;
+    const messageId = annotationMessageId(annotation) ?? selectedMessageId;
+    const source = messageId ? sourceMessages.get(messageId) : null;
+    if (!source || !source.assistantMessageId) return null;
+    const annotations = grouped.get(messageId) ?? [];
+    annotations.push(annotation as LiveDraftAnnotation);
+    grouped.set(messageId, annotations);
+  }
+  if (grouped.size === 0) return null;
+  const entries = [...grouped].map(([messageId, annotations]) => {
+    const source = sourceMessages.get(messageId)!;
+    return {
+      paneId: source.paneId,
+      message: {
+        messageId: source.assistantMessageId!,
+        messageText: source.text,
+        annotations: structuredClone(annotations),
+      },
+    };
+  });
+  const paneId = entries[0].paneId;
+  if (entries.some((entry) => entry.paneId !== paneId)) return null;
+  return {
+    paneId,
+    batch: { batchId: randomUUID(), messages: entries.map((entry) => entry.message) },
+  };
+}
+
+async function queueFeedback(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (!canWriteFeedback(request)) {
+    writeJson(response, 403, { error: "Feedback delivery requires a loopback browser or PLANNOTATOR_HERDR_WRITE_TOKEN." });
     return;
   }
-  selectedPanelId = paneId;
-  const snapshot = reviewSnapshotFromPanels(panels, selectedPanelId, panelSessions);
-  writeJson(response, 200, { ok: true, selectedMessageId: snapshot.selectedMessageId });
+  const { snapshot } = await reviewSnapshot();
+  const prepared = feedbackBatch(await requestJson(request), snapshot.messages);
+  if (!prepared) {
+    writeJson(response, 400, { error: "Feedback must annotate one or more structured responses from one live Pi pane" });
+    return;
+  }
+  const registration = panelSessions.get(prepared.paneId);
+  if (!registration) {
+    writeJson(response, 409, { error: "The selected Pi pane has not published a live session" });
+    return;
+  }
+  const delivery: PendingFeedbackDelivery = {
+    deliveryId: randomUUID(),
+    paneId: prepared.paneId,
+    sessionId: registration.sessionId,
+    batch: prepared.batch,
+  };
+  pendingFeedbackDeliveries.set(delivery.deliveryId, delivery);
+  writeJson(response, 202, { ok: true, deliveryId: delivery.deliveryId });
+}
+
+async function claimFeedback(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (!isLoopback(request)) {
+    writeJson(response, 403, { error: "Pi feedback delivery is loopback-only" });
+    return;
+  }
+  const body = await requestJson(request);
+  const paneId = text(body?.paneId);
+  const sessionId = text(body?.sessionId);
+  if (!paneId || !sessionId || panelSessions.get(paneId)?.sessionId !== sessionId) {
+    writeJson(response, 409, { error: "The Pi session registration is no longer current" });
+    return;
+  }
+  const delivery = [...pendingFeedbackDeliveries.values()].find((candidate) =>
+    candidate.paneId === paneId && candidate.sessionId === sessionId,
+  );
+  if (!delivery) {
+    response.writeHead(204, { "cache-control": "no-store" });
+    response.end();
+    return;
+  }
+  // Claim is intentionally destructive. Pi's sendUserMessage is not an
+  // idempotent transaction, so acknowledging later could inject the same
+  // feedback twice after a restart between send and ACK. At-most-once delivery
+  // is safer than a duplicate prompt; the browser has already received 202.
+  pendingFeedbackDeliveries.delete(delivery.deliveryId);
+  writeJson(response, 200, { deliveryId: delivery.deliveryId, batch: delivery.batch });
 }
 
 function isLoopback(request: IncomingMessage): boolean {
   const address = request.socket.remoteAddress;
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+function requestCookie(request: IncomingMessage, name: string): string | null {
+  const entry = request.headers.cookie?.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`));
+  return entry ? decodeURIComponent(entry.slice(name.length + 1)) : null;
+}
+
+function canWriteFeedback(request: IncomingMessage): boolean {
+  return isLoopback(request) || (browserWriteToken !== null && requestCookie(request, "plannotator_herdr_write") === browserWriteToken);
 }
 
 async function savePanelSession(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -217,8 +333,8 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
   const paneId = text(body?.paneId);
   const sessionId = text(body?.sessionId);
   const messages = Array.isArray(body?.messages) ? body.messages : null;
-  if (!paneId || !sessionId || !messages || messages.length > 1) {
-    writeJson(response, 400, { error: "paneId, sessionId, and at most one message are required" });
+  if (!paneId || !sessionId || !messages || messages.length > HERDR_LIVE_MESSAGE_LIMIT) {
+    writeJson(response, 400, { error: `paneId, sessionId, and at most ${HERDR_LIVE_MESSAGE_LIMIT} messages are required` });
     return;
   }
   const normalizedMessages = messages.flatMap((value) => {
@@ -229,8 +345,8 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
     const timestamp = text(message.timestamp) ?? undefined;
     return messageId && messageText ? [{ messageId, text: messageText, ...(timestamp ? { timestamp } : {}) }] : [];
   });
-  if (normalizedMessages.length !== messages.length) {
-    writeJson(response, 400, { error: "Invalid structured assistant message" });
+  if (normalizedMessages.length !== messages.length || new Set(normalizedMessages.map((message) => message.messageId)).size !== normalizedMessages.length) {
+    writeJson(response, 400, { error: "Invalid structured assistant messages" });
     return;
   }
 
@@ -250,6 +366,9 @@ export function releasePanelSession(
 ): boolean {
   if (enrichments.get(paneId)?.sessionId !== sessionId) return false;
   enrichments.delete(paneId);
+  for (const [deliveryId, delivery] of pendingFeedbackDeliveries) {
+    if (delivery.paneId === paneId && delivery.sessionId === sessionId) pendingFeedbackDeliveries.delete(deliveryId);
+  }
   return true;
 }
 
@@ -268,11 +387,6 @@ function deletePanelSession(request: IncomingMessage, response: ServerResponse, 
   writeJson(response, 200, { ok: true });
 }
 
-// Selection is intentionally process-local: it survives a browser refresh but
-// is discarded when the service stops. Herdr remains the source of truth for
-// which panels are live; an absent panel can never be restored from this state.
-let selectedPanelId: string | null = null;
-
 export function reviewSnapshotFromPanels(
   panels: HerdrPanel[],
   preferredPanelId: string | null = null,
@@ -282,18 +396,39 @@ export function reviewSnapshotFromPanels(
     ?? panels.find((panel) => panel.focused)
     ?? panels[0]
     ?? null;
-  const messages = panels.map((panel) => {
-    const latest = enrichments.get(panel.id)?.messages[0];
-    return {
-      messageId: documentId(panel.id, latest?.messageId ?? "waiting"),
-      text: latest?.text ?? waitingDocument(panel),
-      ...(latest?.timestamp ? { timestamp: latest.timestamp } : {}),
-      label: panel.workspace,
-      description: [panel.tab, panel.panel, panel.status].filter(Boolean).join(" · "),
-    };
+  const messages = panels.flatMap((panel) => {
+    const paneLabel = panel.workspace;
+    const paneDescription = [panel.tab, panel.panel, panel.status].filter(Boolean).join(" · ");
+    const responses = enrichments.get(panel.id)?.messages ?? [];
+    if (responses.length === 0) {
+      return [{
+        messageId: documentId(panel.id, "waiting"),
+        paneId: panel.id,
+        text: waitingDocument(panel),
+        label: "Waiting for a response",
+        description: "No structured assistant response published yet",
+        paneLabel,
+        paneDescription,
+        agentStatus: panel.status,
+      }];
+    }
+    return responses.map((response, index) => ({
+      // `messageId` is a UI-only opaque key. `paneId` and
+      // `assistantMessageId` retain the two real identities separately.
+      messageId: documentId(panel.id, response.messageId),
+      paneId: panel.id,
+      assistantMessageId: response.messageId,
+      text: response.text,
+      ...(response.timestamp ? { timestamp: response.timestamp } : {}),
+      label: `Response ${index + 1}${index === 0 ? " · latest" : ""}`,
+      description: "Structured Pi assistant response",
+      paneLabel,
+      paneDescription,
+      agentStatus: panel.status,
+    }));
   });
   const selectedMessage = selected
-    ? messages.find((message) => paneIdFromDocumentId(message.messageId) === selected.id) ?? null
+    ? messages.find((message) => message.paneId === selected.id) ?? null
     : null;
   return {
     messages,
@@ -312,15 +447,17 @@ async function reviewSnapshot(): Promise<{ panels: HerdrPanel[]; snapshot: Herdr
   for (const paneId of panelSessions.keys()) {
     if (!livePaneIds.has(paneId)) panelSessions.delete(paneId);
   }
-  const snapshot = reviewSnapshotFromPanels(panels, selectedPanelId, panelSessions);
-  // Forget a no-longer-live selection rather than accumulating stale pane ids.
-  selectedPanelId = snapshot.selectedMessageId ? paneIdFromDocumentId(snapshot.selectedMessageId) : null;
-  return { panels, snapshot };
+  for (const [deliveryId, delivery] of pendingFeedbackDeliveries) {
+    if (!livePaneIds.has(delivery.paneId) || panelSessions.get(delivery.paneId)?.sessionId !== delivery.sessionId) {
+      pendingFeedbackDeliveries.delete(deliveryId);
+    }
+  }
+  return { panels, snapshot: reviewSnapshotFromPanels(panels, null, panelSessions) }; 
 }
 
 async function servePlan(response: ServerResponse): Promise<void> {
   const { panels, snapshot } = await reviewSnapshot();
-  const selected = panels.find((panel) => panel.id === selectedPanelId) ?? panels.find((panel) => panel.focused) ?? panels[0] ?? null;
+  const selected = panels.find((panel) => panel.focused) ?? panels[0] ?? null;
   writeJson(response, 200, {
     // The existing Ex-Plannotator rich editor receives the live state through
     // its documented live-review seam. On phones its built-in picker opens the
@@ -342,14 +479,31 @@ async function servePlan(response: ServerResponse): Promise<void> {
     // them in place. Reloading on every changed message identity creates an
     // initial EventSource race and is unnecessary here.
     liveMessageReviewReloadOnSelection: false,
-    // There is no safe feedback-delivery experiment yet, so the browser must
-    // not offer editable annotations or a Send action that cannot succeed.
-    liveMessageReviewReadOnly: true,
+    // Feedback is queued only for the current pane/session and claimed by the
+    // matching loopback Pi extension before it calls pi.sendUserMessage.
+    liveMessageReviewReadOnly: false,
   });
 }
 
 function serveEmptyExternalAnnotations(response: ServerResponse): void {
   writeJson(response, 200, { annotations: [], version: 0 });
+}
+
+async function serveUnavailableDocExists(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  // The shared renderer probes source-file links as it renders Markdown. This
+  // Herdr host deliberately has no filesystem authority, so report each probe
+  // unavailable rather than returning a noisy 404 or inspecting host paths.
+  const body = await requestJson(request);
+  const paths = Array.isArray(body?.paths) && body.paths.every((path) => typeof path === "string")
+    ? body.paths as string[]
+    : null;
+  if (!paths || paths.length > 500) {
+    writeJson(response, 400, { error: "Expected { paths: string[] } with at most 500 paths" });
+    return;
+  }
+  writeJson(response, 200, {
+    results: Object.fromEntries(paths.map((path) => [path, { status: "unavailable" }])),
+  });
 }
 
 function serveExternalAnnotationsStream(request: IncomingMessage, response: ServerResponse): void {
@@ -393,6 +547,10 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
     serveExternalAnnotationsStream(request, response);
     return;
   }
+  if (request.method === "POST" && url.pathname === "/api/doc/exists") {
+    void serveUnavailableDocExists(request, response);
+    return;
+  }
   if (request.method === "GET" && url.pathname === "/api/panels") {
     void discoverPanels().then((panels) => writeJson(response, 200, panels)).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
     return;
@@ -418,16 +576,26 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
     return;
   }
   if (request.method === "GET" && url.pathname === "/") {
-    response.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+    const suppliedToken = text(url.searchParams.get("token"));
+    const tokenAccepted = browserWriteToken !== null && suppliedToken === browserWriteToken;
+    response.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      ...(tokenAccepted ? { "set-cookie": `plannotator_herdr_write=${encodeURIComponent(browserWriteToken!)}; Path=/; HttpOnly; SameSite=Strict` } : {}),
+    });
     response.end(editorHtml);
-    return;
-  }
-  if (request.method === "PUT" && url.pathname === "/api/session/selection") {
-    void saveSelection(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
     return;
   }
   if (request.method === "PUT" && url.pathname === "/api/panel-session") {
     void savePanelSession(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/panel-feedback/claim") {
+    void claimFeedback(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/feedback") {
+    void queueFeedback(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
     return;
   }
   if (request.method === "DELETE" && url.pathname === "/api/panel-session") {
@@ -448,7 +616,7 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
     serveEmptyExternalAnnotations(response);
     return;
   }
-  if (request.method === "POST" && (url.pathname === "/api/feedback" || url.pathname === "/api/approve" || url.pathname.startsWith("/api/session/"))) {
+  if (request.method === "POST" && (url.pathname === "/api/approve" || url.pathname.startsWith("/api/session/"))) {
     writeJson(response, 501, { error: "Submit feedback from Ex-Plannotator in the selected Pi panel." });
     return;
   }

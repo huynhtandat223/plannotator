@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { currentHerdrRegistration, releaseHerdrSession, reportHerdrSession } from "./herdr-registration";
+import { currentHerdrRegistration, pollHerdrFeedback, releaseHerdrSession, reportHerdrSession } from "./herdr-registration";
 
 function context() {
 	return {
@@ -22,8 +22,29 @@ describe("Herdr session enrichment", () => {
 		})).toEqual({
 			paneId: "w:p1",
 			sessionId: "session-1",
-			messages: [{ messageId: "latest", text: "Latest response" }],
+			messages: [
+				{ messageId: "latest", text: "Latest response" },
+				{ messageId: "older", text: "Older response" },
+			],
 		});
+	});
+
+	test("retains only the newest five structured assistant responses", () => {
+		const branch = Array.from({ length: 7 }, (_, index) => ({
+			id: `message-${index + 1}`,
+			type: "message",
+			message: { role: "assistant", content: [{ type: "text", text: `Response ${index + 1}` }] },
+		}));
+		const registration = currentHerdrRegistration({
+			sessionManager: {
+				getSessionId: () => "session-1",
+				getBranch: () => branch,
+			},
+		} as never, { HERDR_ENV: "1", HERDR_PANE_ID: "w:p1" });
+
+		expect(registration?.messages.map((message) => message.messageId)).toEqual([
+			"message-7", "message-6", "message-5", "message-4", "message-3",
+		]);
 	});
 
 	test("does nothing outside a Herdr pane", () => {
@@ -46,8 +67,40 @@ describe("Herdr session enrichment", () => {
 		expect(JSON.parse(String(calls[0].init?.body))).toMatchObject({
 			paneId: "w:p1",
 			sessionId: "session-1",
-			messages: [{ messageId: "latest", text: "Latest response" }],
+			messages: [
+				{ messageId: "latest", text: "Latest response" },
+				{ messageId: "older", text: "Older response" },
+			],
 		});
+	});
+
+	test("delivers a claimed host feedback batch through the existing Pi feedback formatter", async () => {
+		const calls: Array<{ url: string; init?: RequestInit }> = [];
+		const delivered: string[] = [];
+		await pollHerdrFeedback(
+			context() as never,
+			(content) => delivered.push(content),
+			async (input, init) => {
+				calls.push({ url: String(input), init });
+				return new Response(JSON.stringify({
+					deliveryId: "delivery-1",
+					batch: {
+						batchId: "batch-1",
+						messages: [{
+							messageId: "latest",
+							messageText: "Latest response",
+							annotations: [{ id: "annotation-1", type: "COMMENT", originalText: "Latest", text: "Improve it" }],
+						}],
+					},
+				}), { status: 200 });
+			},
+			{ HERDR_ENV: "1", HERDR_PANE_ID: "w:p1" },
+		);
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0].url).toBe("http://127.0.0.1:19432/api/panel-feedback/claim");
+		expect(delivered[0]).toContain("Feedback Batch: `batch-1`");
+		expect(delivered[0]).toContain("Improve it");
 	});
 
 	test("releases only the registration belonging to the shutting-down Pi session", async () => {

@@ -1,7 +1,10 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getActiveBranchAssistantMessages } from "./assistant-message.js";
+import { formatLiveFeedbackBatch, type LiveFeedbackBatch } from "./session.js";
 
 const DEFAULT_HERDR_SERVICE_URL = "http://127.0.0.1:19432";
+/** Number of finalized structured assistant responses retained per live pane. */
+export const HERDR_LIVE_MESSAGE_LIMIT = 5;
 
 function loopbackServiceUrl(env: NodeJS.ProcessEnv): string {
 	const value = env.EX_PLANNOTATOR_HERDR_SERVICE_URL?.trim() || DEFAULT_HERDR_SERVICE_URL;
@@ -18,6 +21,9 @@ export type HerdrSessionRegistration = {
 	messages: ReturnType<typeof getActiveBranchAssistantMessages>;
 };
 
+type HerdrFeedbackDelivery = { deliveryId: string; batch: LiveFeedbackBatch };
+type SendPiUserMessage = (content: string, options: { deliverAs: "followUp" }) => void;
+
 export function currentHerdrRegistration(
 	ctx: Pick<ExtensionContext, "sessionManager">,
 	env: NodeJS.ProcessEnv = process.env,
@@ -27,9 +33,9 @@ export function currentHerdrRegistration(
 	return {
 		paneId,
 		sessionId: ctx.sessionManager.getSessionId(),
-		// Phase one intentionally mirrors /ex-plannotator-last exactly. The host
-		// can grow an N-message view later without changing pane discovery.
-		messages: getActiveBranchAssistantMessages(ctx as ExtensionContext).slice(0, 1),
+		// Newest first, matching /ex-plannotator-last for the first entry while
+		// retaining a small structured history for the live workspace viewer.
+		messages: getActiveBranchAssistantMessages(ctx as ExtensionContext).slice(0, HERDR_LIVE_MESSAGE_LIMIT),
 	};
 }
 
@@ -50,6 +56,33 @@ export async function reportHerdrSession(
 	} catch {
 		// The native viewer is optional. Pi sessions remain fully usable when it
 		// is not running; the next lifecycle event will retry registration.
+	}
+}
+
+export async function pollHerdrFeedback(
+	ctx: Pick<ExtensionContext, "sessionManager">,
+	sendUserMessage: SendPiUserMessage,
+	fetcher: typeof fetch = fetch,
+	env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+	const registration = currentHerdrRegistration(ctx, env);
+	if (!registration) return;
+	try {
+		const claim = await fetcher(`${loopbackServiceUrl(env)}/api/panel-feedback/claim`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ paneId: registration.paneId, sessionId: registration.sessionId }),
+			signal: AbortSignal.timeout(1_000),
+		});
+		if (claim.status === 204 || !claim.ok) return;
+		const delivery = await claim.json() as Partial<HerdrFeedbackDelivery>;
+		if (!delivery.deliveryId || !delivery.batch || !Array.isArray(delivery.batch.messages)) return;
+		// Pi is the final authority for delivery: this closure belongs to the
+		// current pane/session, not to the LAN-facing host.
+		sendUserMessage(formatLiveFeedbackBatch(delivery.batch), { deliverAs: "followUp" });
+	} catch {
+		// Feedback remains queued until a later poll when this optional host is
+		// temporarily unavailable. Pi remains usable independently of it.
 	}
 }
 

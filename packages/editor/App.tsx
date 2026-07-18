@@ -387,6 +387,13 @@ const App: React.FC = () => {
   const [planReviewSourcesOpen, setPlanReviewSourcesOpen] = useState(false);
   const [liveReviewRoundStatus, setLiveReviewRoundStatus] = useState<LiveReviewRoundStatus>('open');
   const [liveReviewDeliveryError, setLiveReviewDeliveryError] = useState<string | null>(null);
+  // Sending feedback opts this browser into following the *next* response for
+  // that pane. It never locks the editor and does not disturb an intentionally
+  // selected historical response during ordinary live updates.
+  const [followNextPaneResponse, setFollowNextPaneResponse] = useState<{
+    paneId: string;
+    latestMessageId: string;
+  } | null>(null);
   const [isLiveReviewActionPending, setIsLiveReviewActionPending] = useState(false);
   const planReviewSelectedIsHistorical = (() => {
     if (!planReview?.snapshot.selected) return false;
@@ -1048,6 +1055,12 @@ const App: React.FC = () => {
     });
   }, [annotateSource, recentMessages, getMessageStatesWithCurrent]);
 
+  const selectedLivePaneMessages = React.useMemo(() => {
+    if (!liveWorkspaceMode) return recentMessages;
+    const paneId = recentMessages.find((message) => message.messageId === selectedMessageId)?.paneId;
+    return paneId ? recentMessages.filter((message) => message.paneId === paneId) : recentMessages;
+  }, [liveWorkspaceMode, recentMessages, selectedMessageId]);
+
   const activeMessageAnnotationCounts = React.useMemo(() => {
     const counts = new Map(cachedMessageAnnotationCounts);
     const current = buildCurrentMessageState();
@@ -1085,35 +1098,45 @@ const App: React.FC = () => {
     linkedDocHook.restoreSession(targetState.linkedDocSession);
     setCodeAnnotations([...targetState.codeAnnotations]);
     setSelectedCodeAnnotationId(targetState.selectedCodeAnnotationId);
-    // Ex-Plannotator owns selection in its live snapshot. Keep the normal
-    // annotate-last picker local unless that explicit capability is present.
-    if (liveMessageReview) {
-      void fetch('/api/session/selection', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messageId }),
-      });
-    }
   }, [
     recentMessages,
     selectedMessageId,
     saveCurrentMessageState,
     linkedDocHook.restoreSession,
-    liveMessageReview,
   ]);
 
   // Applies the Ex-only server snapshot without changing the normal
   // annotate-last state flow. Existing message states stay keyed by messageId,
   // so newly-arrived messages never discard drafts for older messages.
   const applyLiveReviewSnapshot = React.useCallback((snapshot: LiveMessageReviewSnapshot) => {
-    const hasSelectedMessage = snapshot.selectedMessageId !== null && snapshot.messages.some(
-      (message) => message.messageId === snapshot.selectedMessageId,
-    );
-    const nextSelectedMessageId = hasSelectedMessage ? snapshot.selectedMessageId : null;
+    // Live-workspace selection is local to this browser. Keep the response the
+    // reader chose while it remains in the pane's last-N window. If it rolls
+    // out, stay in that pane and show its newest response; only a closed pane
+    // falls back to the host's focused-pane newest response.
+    const selectedPaneId = recentMessages.find((message) => message.messageId === selectedMessageId)?.paneId;
+    const followedPaneLatest = followNextPaneResponse
+      ? snapshot.messages.find((message) => message.paneId === followNextPaneResponse.paneId)
+      : null;
+    const receivedFollowedResponse = followedPaneLatest !== null &&
+      followedPaneLatest.messageId !== followNextPaneResponse?.latestMessageId;
+    const nextSelectedMessageId = receivedFollowedResponse
+      ? followedPaneLatest.messageId
+      : snapshot.messages.some((message) => message.messageId === selectedMessageId)
+      ? selectedMessageId
+      : snapshot.messages.find((message) => message.paneId === selectedPaneId)?.messageId
+        ?? (snapshot.selectedMessageId !== null && snapshot.messages.some(
+          (message) => message.messageId === snapshot.selectedMessageId,
+        )
+          ? snapshot.selectedMessageId
+          : null);
 
     setLiveReviewRoundStatus(snapshot.reviewRoundStatus);
     setLiveReviewDeliveryError(snapshot.deliveryError);
     setRecentMessages(snapshot.messages);
+    if (receivedFollowedResponse) {
+      setFollowNextPaneResponse(null);
+      toast('Agent response received', { description: 'Showing the latest response.' });
+    }
 
     if (!nextSelectedMessageId || nextSelectedMessageId === selectedMessageId) return;
     const targetMessage = snapshot.messages.find((message) => message.messageId === nextSelectedMessageId);
@@ -1133,7 +1156,7 @@ const App: React.FC = () => {
       toast('Agent response received', { description: 'Reloading the latest review state.' });
       window.location.reload();
     }
-  }, [selectedMessageId, saveCurrentMessageState, linkedDocHook.restoreSession, liveMessageReviewReloadOnSelection]);
+  }, [selectedMessageId, recentMessages, followNextPaneResponse, saveCurrentMessageState, linkedDocHook.restoreSession, liveMessageReviewReloadOnSelection]);
 
   const handleLiveReviewAction = React.useCallback(async (
     path: '/api/session/feedback/retry' | '/api/session/resume' | '/api/session/cancel-waiting',
@@ -2489,13 +2512,18 @@ const App: React.FC = () => {
   // Ex-Plannotator's server emits complete snapshots on this stream, including
   // immediately after connection. This is intentionally capability-gated so
   // official hosts neither request the route nor change their submit flow.
+  const applyLiveReviewSnapshotRef = useRef(applyLiveReviewSnapshot);
+  useEffect(() => {
+    applyLiveReviewSnapshotRef.current = applyLiveReviewSnapshot;
+  }, [applyLiveReviewSnapshot]);
+
   useEffect(() => {
     if (!liveMessageReview || planReview || !isApiMode || annotateSource !== 'message') return;
 
     const source = new EventSource('/api/session/events');
     source.onmessage = (event) => {
       try {
-        applyLiveReviewSnapshot(JSON.parse(event.data) as LiveMessageReviewSnapshot);
+        applyLiveReviewSnapshotRef.current(JSON.parse(event.data) as LiveMessageReviewSnapshot);
       } catch {
         // A reconnect will receive a full snapshot; keep the current review UI
         // usable if an intermediary produced malformed event data.
@@ -2506,7 +2534,7 @@ const App: React.FC = () => {
       // an error state because delivery failures belong to the server snapshot.
     };
     return () => source.close();
-  }, [annotateSource, applyLiveReviewSnapshot, isApiMode, liveMessageReview, planReview]);
+  }, [annotateSource, isApiMode, liveMessageReview, planReview]);
 
   // The mixed Plan session is authoritative: its source snapshots, draft/sent
   // split and history are never reconstructed from disk by the rich editor.
@@ -3027,9 +3055,13 @@ const App: React.FC = () => {
         throw new Error(body.error || 'Failed to send feedback');
       }
       if (liveMessageReview) {
-        // Ex-Plannotator moves into its retryable waiting state after delivery.
-        // Keep local message state intact: an SSE snapshot will select a fresh
-        // response when it arrives without dropping drafts for older messages.
+        const selectedPaneId = recentMessages.find((message) => message.messageId === scopedSelectedMessageId)?.paneId;
+        const latestPaneMessage = selectedPaneId
+          ? recentMessages.find((message) => message.paneId === selectedPaneId)
+          : null;
+        if (selectedPaneId && latestPaneMessage) {
+          setFollowNextPaneResponse({ paneId: selectedPaneId, latestMessageId: latestPaneMessage.messageId });
+        }
         dismissDraft();
         setIsSubmitting(false);
         return;
@@ -4261,6 +4293,9 @@ const App: React.FC = () => {
         {(liveMessageReview || planReview) && (() => {
           const status = planReview?.snapshot.reviewRoundStatus ?? liveReviewRoundStatus;
           const error = planReview?.snapshot.deliveryError ?? liveReviewDeliveryError;
+          const selectedMessage = recentMessages.find((message) => message.messageId === selectedMessageId);
+          const agentStatus = selectedMessage?.agentStatus;
+          const agentStatusLabel = agentStatus ? agentStatus[0].toUpperCase() + agentStatus.slice(1) : null;
           return <div className={`border-b px-4 py-2 text-xs flex items-center gap-3 flex-shrink-0 ${
             status === 'delivery_failed'
               ? 'border-destructive/25 bg-destructive/10 text-destructive'
@@ -4277,6 +4312,7 @@ const App: React.FC = () => {
             ) : status === 'delivery_failed' ? (
               <><span className="font-medium">Feedback delivery failed.</span><span>{error || 'The agent did not receive the feedback.'}</span></>
             ) : <span className="font-medium text-foreground">{liveWorkspaceMode ? 'Live Pi responses are read-only.' : `Ready to review ${planReview ? 'responses and Plan Files.' : 'live agent responses.'}`}</span>}
+            {agentStatusLabel && <span className={`ml-auto inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${agentStatus === 'working' ? 'border-primary/30 bg-primary/10 text-foreground' : agentStatus === 'blocked' ? 'border-warning/30 bg-warning/10 text-warning-foreground' : 'border-border bg-muted/40 text-muted-foreground'}`}><span aria-hidden="true">●</span>{agentStatusLabel}</span>}
             {(status === 'waiting' || status === 'agent_stopped' || status === 'delivery_failed') && (
               <div className="ml-auto flex items-center gap-2 shrink-0">
                 {status === 'delivery_failed' && <button type="button" onClick={() => { if (planReview) void handlePlanReviewAction('/api/session/feedback/retry'); else void handleLiveReviewAction('/api/session/feedback/retry'); }} disabled={isLiveReviewActionPending} className="rounded border border-current/30 px-2 py-1 font-medium hover:bg-background/40 disabled:cursor-not-allowed disabled:opacity-50">Retry</button>}
@@ -4337,7 +4373,7 @@ const App: React.FC = () => {
               showVersionsTab={!isHtmlSurface && versionInfo !== null && versionInfo.totalVersions > 1}
               showFilesTab={showFilesTab && !archive.archiveMode}
               showMessagesTab={annotateSource === 'message' && recentMessages.length > 1}
-              messagesTabTitle={liveWorkspaceMode ? 'Pick a live Pi panel' : undefined}
+              messagesTabTitle={liveWorkspaceMode ? 'Pick a live Pi response' : undefined}
               showAgentTerminalTab={showAgentTerminalControls}
               isAgentTerminalOpen={isAgentTerminalOpen}
               isAgentTerminalRunning={isAgentTerminalRunning}
@@ -4423,10 +4459,10 @@ const App: React.FC = () => {
                 messageAnnotationCounts={activeMessageAnnotationCounts}
                 messagePickerLabels={liveWorkspaceMode ? {
                   tab: 'Workspaces',
-                  list: 'Live Pi panels',
-                  empty: 'No live Pi panels found.',
+                  list: 'Live Pi responses · newest first',
+                  empty: 'No live Pi responses found.',
                   mobileTitle: 'Workspaces',
-                  mobileSubtitle: 'Pick a live Pi panel',
+                  mobileSubtitle: 'Pick a response from a live Pi panel',
                 } : undefined}
               />
               {sidebar.isOpen && <ResizeHandle {...tocResize.handleProps} className="hidden lg:block z-[55]" side="left" hideHoverTrack tooltip={RESIZE_HANDLE_TOOLTIP} onCollapse={sidebar.close} />}
@@ -4770,10 +4806,12 @@ const App: React.FC = () => {
                           ? {
                               // selectedMessageId is always one of recentMessages (set on init,
                               // only changed via handleSelectMessage), so findIndex is >= 0.
-                              current: recentMessages.findIndex((m) => m.messageId === selectedMessageId) + 1,
-                              total: recentMessages.length,
-                              label: liveWorkspaceMode ? 'Workspace' : undefined,
-                              title: liveWorkspaceMode ? 'Pick a live Pi panel' : undefined,
+                              current: liveWorkspaceMode
+                                ? Math.max(1, selectedLivePaneMessages.findIndex((message) => message.messageId === selectedMessageId) + 1)
+                                : recentMessages.findIndex((message) => message.messageId === selectedMessageId) + 1,
+                              total: liveWorkspaceMode ? selectedLivePaneMessages.length : recentMessages.length,
+                              label: liveWorkspaceMode ? 'Response' : undefined,
+                              title: liveWorkspaceMode ? 'Pick a response from a live Pi panel' : undefined,
                               onOpen: () => sidebar.open('messages'),
                             }
                           : undefined

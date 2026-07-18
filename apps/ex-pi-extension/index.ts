@@ -6,7 +6,7 @@ import {
 import { startLiveMessageReviewBrowser } from "./browser.js";
 import { formatLiveFeedbackBatch } from "./session.js";
 import type { LiveMessageReviewServer } from "./server.js";
-import { releaseHerdrSession, reportHerdrSession } from "./herdr-registration.js";
+import { pollHerdrFeedback, releaseHerdrSession, reportHerdrSession } from "./herdr-registration.js";
 
 export const EX_PLANNOTATOR_COMMAND = "ex-plannotator-last";
 
@@ -17,6 +17,7 @@ type ExPlannotatorDependencies = {
 	) => Promise<LiveMessageReviewServer>;
 	reportHerdr: (ctx: ExtensionContext) => Promise<void>;
 	releaseHerdr: (ctx: ExtensionContext) => Promise<void>;
+	pollHerdrFeedback: (ctx: ExtensionContext, sendUserMessage: (content: string, options: { deliverAs: "followUp" }) => void) => Promise<void>;
 };
 
 function errorMessage(error: unknown): string {
@@ -31,12 +32,27 @@ export default function exPlannotator(
 		startBrowser: startLiveMessageReviewBrowser,
 		reportHerdr: reportHerdrSession,
 		releaseHerdr: releaseHerdrSession,
+		pollHerdrFeedback,
 		...overrides,
 	};
 	let activeServer: LiveMessageReviewServer | null = null;
 	let pendingReconciliation: ReturnType<typeof setTimeout> | null = null;
 	let piSessionIdAtOpen: string | null = null;
 	let currentPiSessionId: string | null = null;
+	let herdrFeedbackPoll: ReturnType<typeof setInterval> | null = null;
+
+	function stopHerdrFeedbackPoll(): void {
+		if (!herdrFeedbackPoll) return;
+		clearInterval(herdrFeedbackPoll);
+		herdrFeedbackPoll = null;
+	}
+
+	function startHerdrFeedbackPoll(ctx: ExtensionContext): void {
+		stopHerdrFeedbackPoll();
+		const poll = () => void dependencies.pollHerdrFeedback(ctx, pi.sendUserMessage.bind(pi));
+		poll();
+		herdrFeedbackPoll = setInterval(poll, 750);
+	}
 
 	function cancelPendingReconciliation(): void {
 		if (!pendingReconciliation) return;
@@ -99,6 +115,7 @@ export default function exPlannotator(
 	pi.on("session_start", async (_event, ctx) => {
 		currentPiSessionId = ctx.sessionManager.getSessionId();
 		await dependencies.reportHerdr(ctx);
+		startHerdrFeedbackPoll(ctx);
 	});
 
 	pi.on("message_end", (event, ctx) => {
@@ -131,6 +148,7 @@ export default function exPlannotator(
 
 	pi.on("session_shutdown", async (_event, ctx) => {
 		closeActiveServer();
+		stopHerdrFeedbackPoll();
 		await dependencies.releaseHerdr(ctx);
 	});
 }
