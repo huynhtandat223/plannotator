@@ -18,6 +18,8 @@ export interface PickerMessage {
   description?: string;
   /** Optional host grouping identity, distinct from assistant messageId. */
   paneId?: string;
+  /** Optional host-provided Pi session identity for pane-scoped live drafts. */
+  piSessionId?: string;
   /** Optional host-provided pane heading for grouped message pickers. */
   paneLabel?: string;
   /** Optional host-provided pane detail for grouped message pickers. */

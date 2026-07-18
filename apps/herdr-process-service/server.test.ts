@@ -106,6 +106,7 @@ describe("panelsFromSnapshot", () => {
       expect.objectContaining({
         messageId: "w:p1:pi-message-1",
         paneId: "w:p1",
+        piSessionId: "session-1",
         assistantMessageId: "pi-message-1",
         text: "Newest response",
         timestamp: "2026-07-18T00:00:00.000Z",
@@ -123,6 +124,7 @@ describe("panelsFromSnapshot", () => {
       expect.objectContaining({
         messageId: "w:p2:pi-message-2",
         paneId: "w:p2",
+        piSessionId: "session-2",
         assistantMessageId: "pi-message-2",
         text: "Second pane response",
         paneLabel: "two",

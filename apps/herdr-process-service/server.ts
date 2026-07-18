@@ -27,6 +27,8 @@ type HerdrReviewSnapshot = {
   messages: Array<{
     messageId: string;
     paneId: string;
+    /** Current Pi session identity for the pane; scopes browser-only drafts. */
+    piSessionId?: string;
     assistantMessageId?: string;
     text: string;
     timestamp?: string;
@@ -430,6 +432,7 @@ export function reviewSnapshotFromPanels(
       return [{
         messageId: documentId(panel.id, "waiting"),
         paneId: panel.id,
+        ...(enrichments.get(panel.id)?.sessionId ? { piSessionId: enrichments.get(panel.id)!.sessionId } : {}),
         text: waitingDocument(panel),
         label: "Waiting for a response",
         description: "No structured assistant response published yet",
@@ -444,6 +447,7 @@ export function reviewSnapshotFromPanels(
       // `assistantMessageId` retain the two real identities separately.
       messageId: documentId(panel.id, response.messageId),
       paneId: panel.id,
+      piSessionId: enrichments.get(panel.id)!.sessionId,
       assistantMessageId: response.messageId,
       text: response.text,
       ...(response.timestamp ? { timestamp: response.timestamp } : {}),

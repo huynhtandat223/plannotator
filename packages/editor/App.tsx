@@ -150,6 +150,7 @@ import { fetchSourceDocumentSnapshot, probeSourceSave } from './sourceDocumentCl
 import { reconcileSourceDocuments, type SourceDocumentReconcileEvent } from './sourceDocumentReconciliation';
 import { dirnameBrowserPath, normalizeBrowserPath, pathIsInsideDir } from './sourceDocumentPaths';
 import { pickRestoredSingleFileDraftToDisplay } from './draftRestoreSelection';
+import { changedLivePaneSessionIds, discardMessageStatesForChangedPanes } from './liveMessageScope';
 
 type NoteAutoSaveResults = {
   obsidian?: boolean;
@@ -1123,6 +1124,8 @@ const App: React.FC = () => {
     // out, stay in that pane and show its newest response; only a closed pane
     // falls back to the host's focused-pane newest response.
     const selectedPaneId = recentMessages.find((message) => message.messageId === selectedMessageId)?.paneId;
+    const changedPaneIds = changedLivePaneSessionIds(recentMessages, snapshot.messages);
+    const selectedPaneSessionChanged = changedPaneIds.has(selectedPaneId ?? '');
     const followedPaneLatest = followNextPaneResponse
       ? snapshot.messages.find((message) => message.paneId === followNextPaneResponse.paneId)
       : null;
@@ -1130,14 +1133,27 @@ const App: React.FC = () => {
       followedPaneLatest.messageId !== followNextPaneResponse?.latestMessageId;
     const nextSelectedMessageId = receivedFollowedResponse
       ? followedPaneLatest.messageId
-      : snapshot.messages.some((message) => message.messageId === selectedMessageId)
-      ? selectedMessageId
-      : snapshot.messages.find((message) => message.paneId === selectedPaneId)?.messageId
-        ?? (snapshot.selectedMessageId !== null && snapshot.messages.some(
-          (message) => message.messageId === snapshot.selectedMessageId,
-        )
-          ? snapshot.selectedMessageId
-          : null);
+      : selectedPaneSessionChanged
+        ? snapshot.messages.find((message) => message.paneId === selectedPaneId)?.messageId ?? null
+        : snapshot.messages.some((message) => message.messageId === selectedMessageId)
+          ? selectedMessageId
+          : snapshot.messages.find((message) => message.paneId === selectedPaneId)?.messageId
+            ?? (snapshot.selectedMessageId !== null && snapshot.messages.some(
+              (message) => message.messageId === snapshot.selectedMessageId,
+            )
+              ? snapshot.selectedMessageId
+              : null);
+    if (changedPaneIds.size > 0) {
+      messageStateCacheRef.current = discardMessageStatesForChangedPanes(
+        messageStateCacheRef.current,
+        recentMessages,
+        changedPaneIds,
+      );
+      setCachedMessageAnnotationCounts(buildMessageAnnotationCounts(messageStateCacheRef.current));
+      toast('Draft annotations discarded', {
+        description: 'The Pi session changed in this pane, so its prior review drafts cannot be sent to the new session.',
+      });
+    }
 
     setLiveReviewRoundStatus(snapshot.reviewRoundStatus);
     setLiveReviewDeliveryError(snapshot.deliveryError);
@@ -1149,11 +1165,13 @@ const App: React.FC = () => {
       toast('Agent response received', { description: 'Showing the latest response.' });
     }
 
-    if (!nextSelectedMessageId || nextSelectedMessageId === selectedMessageId) return;
+    if (!nextSelectedMessageId || (nextSelectedMessageId === selectedMessageId && !selectedPaneSessionChanged)) return;
     const targetMessage = snapshot.messages.find((message) => message.messageId === nextSelectedMessageId);
     if (!targetMessage) return;
 
-    const states = saveCurrentMessageState();
+    const states = selectedPaneSessionChanged
+      ? messageStateCacheRef.current
+      : saveCurrentMessageState();
     const targetState = normalizeMessageState(
       states.get(nextSelectedMessageId) ?? createEmptyMessageState(targetMessage),
       targetMessage,
