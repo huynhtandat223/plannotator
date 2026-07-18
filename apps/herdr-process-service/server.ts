@@ -426,12 +426,11 @@ function canWriteFeedback(request: IncomingMessage): boolean {
     || (browserWriteToken !== null && requestCookie(request, "plannotator_herdr_write") === browserWriteToken);
 }
 
-// Starting a host process is intentionally stricter than submitting review
-// feedback: private-network viewers may review, but only a local browser or a
-// browser explicitly granted the write token may launch a new agent.
+// Herdr is commonly viewed from a private Tailnet. Process-panel actions use
+// the same browser authorization as feedback; Pi registration and claim routes
+// remain loopback-only because they carry the local Pi session identity.
 function canCreateProcessPanel(request: IncomingMessage): boolean {
-  return isLoopback(request)
-    || (browserWriteToken !== null && requestCookie(request, "plannotator_herdr_write") === browserWriteToken);
+  return canWriteFeedback(request);
 }
 
 async function savePanelSession(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -630,7 +629,7 @@ export async function createProcessPanel(
 
 async function queueProcessPanel(request: IncomingMessage, response: ServerResponse): Promise<void> {
   if (!canCreateProcessPanel(request)) {
-    writeJson(response, 403, { error: "Creating a Pi panel requires a loopback browser or PLANNOTATOR_HERDR_WRITE_TOKEN." });
+    writeJson(response, 403, { error: "Creating a Pi panel requires a loopback, Tailscale, or write-token browser." });
     return;
   }
   const panels = await discoverPanels();
@@ -640,6 +639,21 @@ async function queueProcessPanel(request: IncomingMessage, response: ServerRespo
     return;
   }
   writeJson(response, 201, panel);
+}
+
+async function closeProcessPanel(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+  if (!canCreateProcessPanel(request)) {
+    writeJson(response, 403, { error: "Closing a Pi panel requires a loopback, Tailscale, or write-token browser." });
+    return;
+  }
+  const paneId = text(url.searchParams.get("paneId"));
+  const panels = await discoverPanels();
+  if (!paneId || !panels.some((panel) => panel.id === paneId)) {
+    writeJson(response, 404, { error: "The selected Pi panel is no longer live" });
+    return;
+  }
+  await execFileAsync("herdr", ["pane", "close", paneId], { timeout: 10_000 });
+  writeJson(response, 200, { ok: true });
 }
 
 async function reviewSnapshot(): Promise<{ panels: HerdrPanel[]; snapshot: HerdrReviewSnapshot }> {
@@ -1056,6 +1070,10 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
   }
   if (request.method === "POST" && url.pathname === "/api/process-panels") {
     void queueProcessPanel(request, response).catch((error: unknown) => writeJson(response, 503, { error: error instanceof Error ? error.message : "Could not create Pi panel" }));
+    return;
+  }
+  if (request.method === "DELETE" && url.pathname === "/api/process-panels") {
+    void closeProcessPanel(request, response, url).catch((error: unknown) => writeJson(response, 503, { error: error instanceof Error ? error.message : "Could not close Pi panel" }));
     return;
   }
   if (request.method === "POST" && url.pathname === "/api/feedback") {

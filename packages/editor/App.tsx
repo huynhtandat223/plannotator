@@ -3173,6 +3173,22 @@ const App: React.FC = () => {
 
   // Exit annotation session without sending feedback
   const handleAnnotateExit = useCallback(async () => {
+    if (liveMessageReview && selectedLiveMessage?.paneId) {
+      setIsExiting(true);
+      try {
+        const response = await fetch(`/api/process-panels?paneId=${encodeURIComponent(selectedLiveMessage.paneId)}`, { method: 'DELETE' });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({})) as { error?: string };
+          throw new Error(body.error || 'Failed to close Pi panel');
+        }
+        setSubmitted('exited');
+        toast('Pi panel closed');
+      } catch (error) {
+        setIsExiting(false);
+        toast(error instanceof Error ? error.message : 'Failed to close Pi panel', { description: 'The panel is still running.' });
+      }
+      return;
+    }
     setIsExiting(true);
     try {
       const res = await fetch(withDraftGeneration('/api/exit'), { method: 'POST' });
@@ -3184,7 +3200,7 @@ const App: React.FC = () => {
     } catch {
       setIsExiting(false);
     }
-  }, [withDraftGeneration]);
+  }, [liveMessageReview, selectedLiveMessage?.paneId, withDraftGeneration]);
 
   const handleGoalSetupSubmit = useCallback(() => {
     goalSetupSurfaceRef.current?.submit();
@@ -4288,6 +4304,7 @@ const App: React.FC = () => {
           onCallbackFeedback={handleCallbackFeedback}
           onCallbackApprove={handleCallbackApprove}
           onAnnotateExit={handleHeaderAnnotateExit}
+          liveCloseCurrentPane={liveMessageReview && Boolean(selectedLiveMessage?.paneId)}
           onGoalSetupExit={handleGoalSetupExit}
           onGoalSetupSubmit={handleGoalSetupSubmit}
           onAnnotateFeedback={handleHeaderAnnotateFeedback}

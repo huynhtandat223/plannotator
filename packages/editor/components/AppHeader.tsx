@@ -55,6 +55,7 @@ interface AppHeaderProps {
   onOpenLiveFolder?: () => void;
   onOpenLiveChanges?: () => void;
   liveFeedbackCount?: number;
+  liveCloseCurrentPane?: boolean;
 
   // Callback config (null when no bot callback)
   callbackConfig: CallbackConfig | null;
@@ -153,6 +154,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   onOpenLiveFolder,
   onOpenLiveChanges,
   liveFeedbackCount = 0,
+  liveCloseCurrentPane,
   callbackConfig,
   taterMode,
   mobileSettingsOpen,
@@ -301,6 +303,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
                   onClick={onAnnotateExit}
                   disabled={isSubmitting || isExiting}
                   isLoading={isExiting}
+                  title={liveCloseCurrentPane ? 'Close the selected live Pi panel' : undefined}
                 />
                 {(hasAnyAnnotations || liveFeedbackCount > 0) && (
                   <FeedbackButton

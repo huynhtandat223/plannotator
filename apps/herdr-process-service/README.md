@@ -30,7 +30,7 @@ Feedback is delivered through a narrow bridge: loopback and Tailscale browsers m
 
 ## Create a Pi panel
 
-The browser's **New panel** action creates one background Pi agent in a new tab of an existing, live Herdr workspace. Choose a live workspace, select a live panel's working directory or enter another existing absolute directory, give the panel a name, and start with `pi` or another command plus arguments. The action never changes the current Herdr focus or splits an existing pane. Process creation is limited to loopback browsers, or browsers holding the configured write-token cookie; Tailscale-only viewer access is not sufficient.
+The browser's **New panel** action creates one background Pi agent in a new tab of an existing, live Herdr workspace. Choose a live workspace, select a live panel's working directory or enter another existing absolute directory, give the panel a name, and start with `pi` or another command plus arguments. The action never changes the current Herdr focus or splits an existing pane. The header **Close** action closes the currently selected live Pi pane. Both actions use the same loopback/Tailscale/write-token browser authorization as feedback; Pi session registration and message claiming remain loopback-only.
 
 ## Folder View and Git Changes
 
