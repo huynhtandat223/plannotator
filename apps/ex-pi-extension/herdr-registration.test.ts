@@ -90,6 +90,7 @@ describe("Herdr session enrichment", () => {
 							messageId: "latest",
 							messageText: "Latest response",
 							annotations: [{ id: "annotation-1", type: "COMMENT", originalText: "Latest", text: "Improve it" }],
+							codeAnnotations: [{ id: "code-1", filePath: "src/app.ts", lineStart: 12, text: "Use a safer boundary." }],
 						}],
 					},
 				}), { status: 200 });
@@ -101,6 +102,7 @@ describe("Herdr session enrichment", () => {
 		expect(calls[0].url).toBe("http://127.0.0.1:19432/api/panel-feedback/claim");
 		expect(delivered[0]).toContain("Feedback Batch: `batch-1`");
 		expect(delivered[0]).toContain("Improve it");
+		expect(delivered[0]).toContain("Use a safer boundary.");
 	});
 
 	test("releases only the registration belonging to the shutting-down Pi session", async () => {
