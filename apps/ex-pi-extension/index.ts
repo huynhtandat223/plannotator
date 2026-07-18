@@ -134,16 +134,21 @@ export default function exPlannotator(
 		}, 0);
 	});
 
-	pi.on("session_tree", (_event, ctx) => {
+	// Herdr may start after Pi has already emitted session_start. Republish on
+	// each lifecycle event so its in-memory enrichment returns without requiring
+	// the user to restart the active Pi pane.
+	pi.on("agent_start", (_event, ctx) => {
 		void dependencies.reportHerdr(ctx);
-	});
-
-	pi.on("agent_start", () => {
 		activeServer?.markAgentStarted?.();
 	});
 
-	pi.on("agent_end", () => {
+	pi.on("agent_end", (_event, ctx) => {
+		void dependencies.reportHerdr(ctx);
 		activeServer?.markAgentStopped?.();
+	});
+
+	pi.on("session_tree", (_event, ctx) => {
+		void dependencies.reportHerdr(ctx);
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {

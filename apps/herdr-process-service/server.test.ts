@@ -1,11 +1,44 @@
 import { describe, expect, test } from "bun:test";
 import {
+  feedbackBatch,
   panelsFromSnapshot,
   releasePanelSession,
   reviewSnapshotFromPanels,
   type HerdrPanel,
   type PanelSessionEnrichment,
 } from "./server";
+
+describe("feedbackBatch", () => {
+  test("attributes code-only feedback to the selected structured live response", () => {
+    const messages = [{
+      messageId: "w:p1:pi-message-1",
+      paneId: "w:p1",
+      assistantMessageId: "pi-message-1",
+      text: "Structured response",
+      label: "Response 1 · latest",
+      description: "Structured Pi assistant response",
+      paneLabel: "one",
+      paneDescription: "Pane p1",
+      agentStatus: "working" as const,
+      cwd: "/one",
+    }];
+
+    expect(feedbackBatch({
+      annotations: [],
+      codeAnnotations: [{ id: "code-1", filePath: "src/app.ts", lineStart: 12, text: "Use a safer boundary." }],
+      selectedMessageId: "w:p1:pi-message-1",
+    }, messages)).toEqual({
+      paneId: "w:p1",
+      batch: expect.objectContaining({
+        messages: [expect.objectContaining({
+          messageId: "pi-message-1",
+          annotations: [],
+          codeAnnotations: [{ id: "code-1", filePath: "src/app.ts", lineStart: 12, text: "Use a safer boundary." }],
+        })],
+      }),
+    });
+  });
+});
 
 describe("panelsFromSnapshot", () => {
   test("lists only live Pi agents with Herdr workspace and tab labels", () => {

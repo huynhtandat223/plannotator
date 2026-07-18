@@ -64,9 +64,15 @@ export type PanelSessionEnrichment = {
 };
 
 type LiveDraftAnnotation = { id: string; [key: string]: unknown };
+type LiveCodeDraftAnnotation = LiveDraftAnnotation;
 type LiveFeedbackBatch = {
   batchId: string;
-  messages: Array<{ messageId: string; messageText: string; annotations: LiveDraftAnnotation[] }>;
+  messages: Array<{
+    messageId: string;
+    messageText: string;
+    annotations: LiveDraftAnnotation[];
+    codeAnnotations?: LiveCodeDraftAnnotation[];
+  }>;
 };
 type PendingFeedbackDelivery = {
   deliveryId: string;
@@ -223,32 +229,36 @@ function annotationMessageId(annotation: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
 
-function feedbackBatch(
+export function feedbackBatch(
   body: Record<string, unknown> | null,
   messages: HerdrReviewSnapshot["messages"],
 ): { paneId: string; batch: LiveFeedbackBatch } | null {
-  if (!body || !Array.isArray(body.annotations)) return null;
+  if (!body || !Array.isArray(body.annotations) || !Array.isArray(body.codeAnnotations)) return null;
   const selectedMessageId = text(body.selectedMessageId);
   const sourceMessages = new Map(messages.map((message) => [message.messageId, message]));
-  const grouped = new Map<string, LiveDraftAnnotation[]>();
-  for (const annotation of body.annotations) {
-    if (!annotation || typeof annotation !== "object" || typeof (annotation as { id?: unknown }).id !== "string") return null;
-    const messageId = annotationMessageId(annotation) ?? selectedMessageId;
+  const grouped = new Map<string, { annotations: LiveDraftAnnotation[]; codeAnnotations: LiveCodeDraftAnnotation[] }>();
+  const add = (value: unknown, kind: "annotations" | "codeAnnotations"): boolean => {
+    if (!value || typeof value !== "object" || typeof (value as { id?: unknown }).id !== "string") return false;
+    const messageId = annotationMessageId(value) ?? selectedMessageId;
     const source = messageId ? sourceMessages.get(messageId) : null;
-    if (!source || !source.assistantMessageId) return null;
-    const annotations = grouped.get(messageId) ?? [];
-    annotations.push(annotation as LiveDraftAnnotation);
-    grouped.set(messageId, annotations);
-  }
+    if (!source || !source.assistantMessageId) return false;
+    const entry = grouped.get(messageId) ?? { annotations: [], codeAnnotations: [] };
+    entry[kind].push(value as LiveDraftAnnotation);
+    grouped.set(messageId, entry);
+    return true;
+  };
+  for (const annotation of body.annotations) if (!add(annotation, "annotations")) return null;
+  for (const annotation of body.codeAnnotations) if (!add(annotation, "codeAnnotations")) return null;
   if (grouped.size === 0) return null;
-  const entries = [...grouped].map(([messageId, annotations]) => {
+  const entries = [...grouped].map(([messageId, drafts]) => {
     const source = sourceMessages.get(messageId)!;
     return {
       paneId: source.paneId,
       message: {
         messageId: source.assistantMessageId!,
         messageText: source.text,
-        annotations: structuredClone(annotations),
+        annotations: structuredClone(drafts.annotations),
+        ...(drafts.codeAnnotations.length ? { codeAnnotations: structuredClone(drafts.codeAnnotations) } : {}),
       },
     };
   });

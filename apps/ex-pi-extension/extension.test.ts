@@ -112,6 +112,12 @@ describe("Ex-Plannotator package surface", () => {
 		await waitForDeferredReconciliation();
 		expect(reports.at(-1)).toEqual([{ messageId: "latest", text: "Latest" }]);
 
+		const reportCountBeforeAgentLifecycle = reports.length;
+		pi.handlers.get("agent_start")!({} as never, context as never);
+		pi.handlers.get("agent_end")!({} as never, context as never);
+		await Promise.resolve();
+		expect(reports).toHaveLength(reportCountBeforeAgentLifecycle + 2);
+
 		await pi.handlers.get("session_shutdown")!({} as never, context as never);
 		expect(releases).toBe(1);
 	});
