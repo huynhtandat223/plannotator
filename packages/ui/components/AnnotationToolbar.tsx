@@ -98,9 +98,17 @@ export const AnnotationToolbar: React.FC<AnnotationToolbarProps> = ({
       }
 
       if (positionMode === 'center-above') {
+        const toolbarWidth = toolbarRef.current?.offsetWidth ?? 280;
+        // Keep the mobile selection toolbar inside the visual viewport. The
+        // old unconstrained center point pushed it offscreen and made the
+        // compact icon strip look broken while scrolling.
+        const left = Math.min(
+          Math.max(rect.left + rect.width / 2, toolbarWidth / 2 + 8),
+          window.innerWidth - toolbarWidth / 2 - 8,
+        );
         setPosition({
-          top: rect.top - 48,
-          left: rect.left + rect.width / 2,
+          top: Math.max(8, rect.top - 48),
+          left,
         });
       } else {
         setPosition({
@@ -189,7 +197,7 @@ export const AnnotationToolbar: React.FC<AnnotationToolbarProps> = ({
   return createPortal(
     <div
       ref={toolbarRef}
-      className="annotation-toolbar fixed z-[100] bg-popover border border-border rounded-lg shadow-2xl"
+      className="annotation-toolbar fixed z-[100] max-w-[calc(100vw-1rem)] bg-popover border border-border rounded-lg shadow-2xl"
       style={style}
       onMouseDown={(e) => e.stopPropagation()}
       onMouseEnter={onMouseEnter}

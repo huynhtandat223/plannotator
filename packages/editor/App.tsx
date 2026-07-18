@@ -971,7 +971,7 @@ const App: React.FC = () => {
   }, [vaultPath]);
 
   useEffect(() => {
-    if (sidebar.activeTab === 'files' && showFilesTab) {
+    if ((sidebar.activeTab === 'files' || sidebar.activeTab === 'changes') && showFilesTab) {
       // Load regular dirs
       if (fileBrowserDirs.length > 0) {
         const regularLoaded = fileBrowser.dirs.filter(d => !d.isVault).map(d => d.path);
@@ -1061,6 +1061,13 @@ const App: React.FC = () => {
     return paneId ? recentMessages.filter((message) => message.paneId === paneId) : recentMessages;
   }, [liveWorkspaceMode, recentMessages, selectedMessageId]);
 
+  const selectedLiveMessageAnnotationCount = React.useMemo(() => {
+    if (!selectedMessageId) return 0;
+    const current = buildCurrentMessageState();
+    if (current?.messageId === selectedMessageId) return countMessageAnnotations(current);
+    return cachedMessageAnnotationCounts.get(selectedMessageId) ?? 0;
+  }, [selectedMessageId, buildCurrentMessageState, cachedMessageAnnotationCounts]);
+
   const activeMessageAnnotationCounts = React.useMemo(() => {
     const counts = new Map(cachedMessageAnnotationCounts);
     const current = buildCurrentMessageState();
@@ -1088,6 +1095,7 @@ const App: React.FC = () => {
     const msg = recentMessages.find((m) => m.messageId === messageId);
     if (!msg || messageId === selectedMessageId) return;
 
+    if (liveMessageReview && msg.cwd) setProjectRoot(msg.cwd);
     const states = saveCurrentMessageState();
     const targetState = normalizeMessageState(
       states.get(messageId) ?? createEmptyMessageState(msg),
@@ -1101,6 +1109,7 @@ const App: React.FC = () => {
   }, [
     recentMessages,
     selectedMessageId,
+    liveMessageReview,
     saveCurrentMessageState,
     linkedDocHook.restoreSession,
   ]);
@@ -1133,6 +1142,8 @@ const App: React.FC = () => {
     setLiveReviewRoundStatus(snapshot.reviewRoundStatus);
     setLiveReviewDeliveryError(snapshot.deliveryError);
     setRecentMessages(snapshot.messages);
+    const selectedWorkspaceMessage = snapshot.messages.find((message) => message.messageId === nextSelectedMessageId);
+    if (selectedWorkspaceMessage?.cwd) setProjectRoot(selectedWorkspaceMessage.cwd);
     if (receivedFollowedResponse) {
       setFollowNextPaneResponse(null);
       toast('Agent response received', { description: 'Showing the latest response.' });
@@ -2448,6 +2459,8 @@ const App: React.FC = () => {
             ? data.selectedMessageId
             : data.recentMessages[0].messageId;
           setSelectedMessageId(initialSelectedMessageId);
+          const initialMessage = data.recentMessages.find((message) => message.messageId === initialSelectedMessageId);
+          if (data.liveMessageReview === true && initialMessage?.cwd) setProjectRoot(initialMessage.cwd);
         } else {
           messageStateCacheRef.current = new Map();
           setCachedMessageAnnotationCounts(new Map());
@@ -2476,6 +2489,8 @@ const App: React.FC = () => {
         }
         if (data.projectRoot) {
           setProjectRoot(data.projectRoot);
+        } else {
+          setProjectRoot(null);
         }
         setAgentTerminalCapability(data.agentTerminal ?? null);
         // Capture plan version history data
@@ -3035,16 +3050,30 @@ const App: React.FC = () => {
         toast.error('Agent terminal is not ready. Sending through the original session.');
       }
 
-      const scopedSelectedMessageId = messageMultiSelectMode
-        ? annotatedMessageIds.length === 1 ? annotatedMessageIds[0] : undefined
-        : selectedMessageId ?? undefined;
+      // A live Herdr response has a composite UI key (`paneId:piMessageId`),
+      // so every annotation must carry that key. The host validates it against
+      // the current snapshot before converting to the stable Pi message ID.
+      // Live feedback always targets the response currently open in the
+      // viewer. Drafts attached to another pane/message stay local until that
+      // response is selected and sent; a browser cannot mix pane deliveries.
+      const scopedSelectedMessageId = liveMessageReview
+        ? selectedMessageId ?? undefined
+        : messageMultiSelectMode
+          ? annotatedMessageIds.length === 1 ? annotatedMessageIds[0] : undefined
+          : selectedMessageId ?? undefined;
+      const liveAnnotations = liveMessageReview && scopedSelectedMessageId
+        ? [
+            ...allAnnotations,
+            ...Array.from(linkedDocHook.getDocAnnotations().values()).flatMap((document) => document.annotations),
+          ].map((annotation) => ({ ...annotation, messageId: scopedSelectedMessageId }))
+        : allAnnotations;
       const res = await fetch('/api/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           draftGeneration: getDraftGeneration(),
           feedback,
-          annotations: allAnnotations,
+          annotations: liveAnnotations,
           codeAnnotations,
           ...(scopedSelectedMessageId ? { selectedMessageId: scopedSelectedMessageId } : {}),
           ...(messageMultiSelectMode && annotatedMessageIds.length > 1 ? { feedbackScope: 'messages' } : {}),
@@ -4191,6 +4220,13 @@ const App: React.FC = () => {
           agentName={agentName}
           availableAgents={availableAgents}
           showAnnotationsWarning={hasFeedbackToSend}
+          showLiveMessagePicker={liveMessageReview && recentMessages.length > 1}
+          showLiveFolder={liveMessageReview && !!projectRoot && !archive.archiveMode}
+          showLiveChanges={liveMessageReview && !!projectRoot && !archive.archiveMode}
+          onOpenLiveMessages={() => openSidebarTab('messages')}
+          onOpenLiveFolder={() => openSidebarTab('files')}
+          onOpenLiveChanges={() => openSidebarTab('changes')}
+          liveFeedbackCount={liveMessageReview ? selectedLiveMessageAnnotationCount : 0}
           callbackConfig={callbackConfig}
           taterMode={taterMode}
           mobileSettingsOpen={mobileSettingsOpen}
@@ -4372,6 +4408,7 @@ const App: React.FC = () => {
               hasDiff={planDiff.hasPreviousVersion}
               showVersionsTab={!isHtmlSurface && versionInfo !== null && versionInfo.totalVersions > 1}
               showFilesTab={showFilesTab && !archive.archiveMode}
+              showChangesTab={liveMessageReview && !!projectRoot && !archive.archiveMode}
               showMessagesTab={annotateSource === 'message' && recentMessages.length > 1}
               messagesTabTitle={liveWorkspaceMode ? 'Pick a live Pi response' : undefined}
               showAgentTerminalTab={showAgentTerminalControls}
@@ -4407,6 +4444,7 @@ const App: React.FC = () => {
                 onLinkedDocBack={linkedDocHook.isActive ? handleLinkedDocBack : undefined}
                 backLabel={backLabel}
                 showFilesTab={showFilesTab && !archive.archiveMode}
+                showChangesTab={liveMessageReview && !!projectRoot && !archive.archiveMode}
                 fileAnnotationCounts={fileAnnotationCounts}
                 highlightedFiles={highlightedFiles}
                 fileEditStatuses={editableDocuments.fileEditStatuses}
@@ -4426,6 +4464,7 @@ const App: React.FC = () => {
                 }}
                 onFilesFetchAll={() => fileBrowser.fetchAll(fileBrowserDirs)}
                 onFilesRetryVaultDir={(vaultPath) => fileBrowser.addVaultDir(vaultPath)}
+                onChangesRefresh={() => fileBrowser.fetchAll(projectRoot ? [projectRoot] : [])}
                 hasFileAnnotations={hasFileAnnotations}
                 showVersionsTab={!isHtmlSurface && versionInfo !== null && versionInfo.totalVersions > 1}
                 versionInfo={versionInfo}
@@ -4470,15 +4509,7 @@ const App: React.FC = () => {
           )}
 
           {/* Document Area */}
-          {!planReview && !goalSetupMode && annotateSource === 'message' && recentMessages.length > 1 && !sidebar.isOpen && (
-            <button
-              type="button"
-              onClick={() => openSidebarTab('messages')}
-              className="fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 z-[65] -translate-x-1/2 rounded-full border border-border bg-card px-4 py-3 text-sm font-medium text-foreground shadow-lg lg:hidden"
-            >
-              {liveWorkspaceMode ? 'Choose workspace' : 'Messages'} · {recentMessages.length}
-            </button>
-          )}
+
 
           <OverlayScrollArea
             element="main"
@@ -4504,7 +4535,7 @@ const App: React.FC = () => {
                   sticky actions are disabled. remountToken re-anchors the
                   ResizeObserver when Viewer swaps content (linked docs or
                   message switches). */}
-              {!goalSetupMode && !isPlanDiffActive && !isHtmlSurface && !archive.archiveMode && !isEditingMarkdown && uiPrefs.stickyActionsEnabled && (
+              {!goalSetupMode && !liveMessageReview && !isPlanDiffActive && !isHtmlSurface && !archive.archiveMode && !isEditingMarkdown && uiPrefs.stickyActionsEnabled && (
                 <StickyHeaderLane
                   inputMethod={inputMethod}
                   onInputMethodChange={handleInputMethodChange}
@@ -4753,7 +4784,7 @@ const App: React.FC = () => {
                     onAddGlobalAttachment={handleAddGlobalAttachment}
                     onRemoveGlobalAttachment={handleRemoveGlobalAttachment}
                     repoInfo={repoInfo}
-                    stickyActions={uiPrefs.stickyActionsEnabled}
+                    stickyActions={uiPrefs.stickyActionsEnabled && !liveMessageReview}
                     planDiffStats={linkedDocHook.isActive ? null : planDiff.diffStats}
                     isPlanDiffActive={isPlanDiffActive}
                     onPlanDiffToggle={() => setIsPlanDiffActive(!isPlanDiffActive)}

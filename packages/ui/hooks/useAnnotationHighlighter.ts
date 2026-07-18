@@ -956,26 +956,56 @@ export function useAnnotationHighlighter({
     containerRef.current.addEventListener('mousedown', handleMathMouseDown, true);
     containerRef.current.addEventListener('mouseup', handleMathMouseUp, true);
 
-    // Mobile bridge
+    // Mobile bridge. Android first creates a one-character selection for a
+    // long-press, then lets the user drag native handles. Never wrap that
+    // provisional range: wait for the selection to remain unchanged after the
+    // handles settle, and reject a single-character provisional selection.
     const isTouchPrimary = window.matchMedia('(pointer: coarse)').matches;
     let selectionTimer: ReturnType<typeof setTimeout>;
-    const handleSelectionChange = isTouchPrimary
-      ? () => {
-          clearTimeout(selectionTimer);
-          selectionTimer = setTimeout(() => {
-            const sel = window.getSelection();
-            if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
-            if (!containerRef.current?.contains(sel.anchorNode)) return;
-            highlighter.fromRange(sel.getRangeAt(0));
-          }, 400);
-        }
-      : null;
+    let touchSelecting = false;
+    const commitTouchSelection = () => {
+      clearTimeout(selectionTimer);
+      selectionTimer = setTimeout(() => {
+        if (touchSelecting) return;
+        const sel = window.getSelection();
+        const selectedText = sel?.toString().trim() ?? '';
+        if (!sel || sel.isCollapsed || sel.rangeCount === 0 || selectedText.length < 2) return;
+        if (!containerRef.current?.contains(sel.anchorNode)) return;
+        highlighter.fromRange(sel.getRangeAt(0));
+      }, 750);
+    };
+    const handleTouchStart = () => {
+      touchSelecting = true;
+      clearTimeout(selectionTimer);
+    };
+    const handleTouchEnd = () => {
+      touchSelecting = false;
+      commitTouchSelection();
+    };
+    const handleTouchMove = () => {
+      clearTimeout(selectionTimer);
+    };
+    const handleTouchCancel = () => {
+      touchSelecting = false;
+      clearTimeout(selectionTimer);
+    };
+    const handleSelectionChange = isTouchPrimary ? commitTouchSelection : null;
 
-    if (handleSelectionChange) {
-      document.addEventListener('selectionchange', handleSelectionChange);
+    if (isTouchPrimary) {
+      containerRef.current.addEventListener('touchstart', handleTouchStart, true);
+      containerRef.current.addEventListener('touchend', handleTouchEnd, true);
+      containerRef.current.addEventListener('touchmove', handleTouchMove, true);
+      containerRef.current.addEventListener('touchcancel', handleTouchCancel, true);
     }
+    if (handleSelectionChange) document.addEventListener('selectionchange', handleSelectionChange);
 
     return () => {
+      if (isTouchPrimary) {
+        containerRef.current?.removeEventListener('touchstart', handleTouchStart, true);
+        containerRef.current?.removeEventListener('touchend', handleTouchEnd, true);
+        containerRef.current?.removeEventListener('touchmove', handleTouchMove, true);
+        containerRef.current?.removeEventListener('touchcancel', handleTouchCancel, true);
+      }
       if (handleSelectionChange) {
         clearTimeout(selectionTimer);
         document.removeEventListener('selectionchange', handleSelectionChange);

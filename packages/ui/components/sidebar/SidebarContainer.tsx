@@ -13,6 +13,7 @@ import type { UseFileBrowserReturn } from "../../hooks/useFileBrowser";
 import { TableOfContents } from "../TableOfContents";
 import { VersionBrowser } from "./VersionBrowser";
 import { FileBrowser, type FileEditStatus } from "./FileBrowser";
+import { GitChangesBrowser } from "./GitChangesBrowser";
 import { ArchiveBrowser, type ArchivedPlan } from "./ArchiveBrowser";
 import { MessagesBrowser, type PickerMessage } from "./MessagesBrowser";
 import { MessagesIcon } from "../icons/MessagesIcon";
@@ -45,6 +46,9 @@ interface SidebarContainerProps {
   onFilesSelectFile?: (absolutePath: string, dirPath: string) => void;
   onFilesFetchAll?: () => void;
   onFilesRetryVaultDir?: (vaultPath: string) => void;
+  // Git Changes props
+  showChangesTab?: boolean;
+  onChangesRefresh?: () => void;
   // Version Browser props
   showVersionsTab?: boolean;
   versionInfo: VersionInfo | null;
@@ -104,6 +108,8 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
   onFilesSelectFile,
   onFilesFetchAll,
   onFilesRetryVaultDir,
+  showChangesTab,
+  onChangesRefresh,
   showVersionsTab,
   versionInfo,
   versions,
@@ -227,6 +233,14 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
             badge={hasFileAnnotations}
           />
         )}
+        {showChangesTab && (
+          <TabButton
+            active={activeTab === "changes"}
+            onClick={() => onTabChange("changes")}
+            icon={<svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>}
+            label="Changes"
+          />
+        )}
         {showArchiveTab && (
           <TabButton
             active={activeTab === "archive"}
@@ -298,6 +312,13 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
             editStatuses={fileEditStatuses}
           />
         )}
+        {activeTab === "changes" && showChangesTab && fileBrowser && (
+          <GitChangesBrowser
+            dirs={fileBrowser.dirs}
+            onSelectFile={onFilesSelectFile}
+            onRefresh={onChangesRefresh ?? (() => {})}
+          />
+        )}
         {activeTab === "archive" && showArchiveTab && (
           <ArchiveBrowser
             plans={archivePlans}
@@ -319,27 +340,31 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
       </OverlayScrollArea>
     </aside>
 
-    {/* The desktop sidebar is intentionally hidden below lg. The Viewer message
-        picker still opens the Messages tab on a touch device, so render that
-        same existing MessagesBrowser in a compact modal rather than making
-        multi-message sessions impossible to navigate on mobile. */}
-    {activeTab === "messages" && showMessagesTab && messages && onSelectMessage && (
+    {/* The desktop sidebar is intentionally hidden below lg. Reuse its existing
+        message picker and FileBrowser in a compact mobile sheet. */}
+    {((activeTab === "messages" && showMessagesTab && messages && onSelectMessage) ||
+      (activeTab === "files" && showFilesTab && fileBrowser) ||
+      (activeTab === "changes" && showChangesTab && fileBrowser)) && (
       <div
         className="fixed inset-0 z-[70] flex items-end bg-black/50 p-3 lg:hidden"
         role="presentation"
         onClick={onClose}
       >
         <section
-          className="max-h-[min(72dvh,36rem)] w-full overflow-hidden rounded-lg border border-border bg-card shadow-2xl"
+          className={`w-full overflow-hidden rounded-lg border border-border bg-card shadow-2xl ${
+            activeTab === "files" || activeTab === "changes" ? "h-[calc(100dvh-1.5rem)]" : "max-h-[min(72dvh,36rem)]"
+          }`}
           role="dialog"
           aria-modal="true"
-          aria-label={pickerLabels.mobileTitle}
+          aria-label={activeTab === "files" ? "Folder" : activeTab === "changes" ? "Git Changes" : pickerLabels.mobileTitle}
           onClick={(event) => event.stopPropagation()}
         >
           <div className="flex items-center justify-between border-b border-border/50 px-4 py-3">
             <div>
-              <h2 className="text-sm font-semibold">{pickerLabels.mobileTitle}</h2>
-              <p className="text-xs text-muted-foreground">{pickerLabels.mobileSubtitle}</p>
+              <h2 className="text-sm font-semibold">{activeTab === "files" ? "Folder" : activeTab === "changes" ? "Git Changes" : pickerLabels.mobileTitle}</h2>
+              <p className="text-xs text-muted-foreground">
+                {activeTab === "files" ? "Browse the current pane folder" : activeTab === "changes" ? "Current Git repository" : pickerLabels.mobileSubtitle}
+              </p>
             </div>
             <button
               type="button"
@@ -349,18 +374,47 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
               Done
             </button>
           </div>
-          <OverlayScrollArea className="max-h-[calc(min(72dvh,36rem)-4.75rem)]">
-            <MessagesBrowser
-              messages={messages}
-              selectedMessageId={selectedMessageId ?? null}
-              onSelect={(messageId) => {
-                onSelectMessage(messageId);
-                onClose();
-              }}
-              annotationCounts={messageAnnotationCounts}
-              listLabel={pickerLabels.list}
-              emptyLabel={pickerLabels.empty}
-            />
+          <OverlayScrollArea className={activeTab === "files" || activeTab === "changes" ? "h-[calc(100%-4.75rem)]" : "max-h-[calc(min(72dvh,36rem)-4.75rem)]"}>
+            {activeTab === "files" && fileBrowser ? (
+              <FileBrowser
+                dirs={fileBrowser.dirs}
+                expandedFolders={fileBrowser.expandedFolders}
+                onToggleFolder={fileBrowser.toggleFolder}
+                collapsedDirs={fileBrowser.collapsedDirs}
+                onToggleCollapse={fileBrowser.toggleCollapse}
+                onSelectFile={(absolutePath, dirPath) => {
+                  onFilesSelectFile?.(absolutePath, dirPath);
+                  onClose();
+                }}
+                activeFile={fileBrowser.activeFile}
+                onFetchAll={onFilesFetchAll ?? (() => {})}
+                onRetryVaultDir={onFilesRetryVaultDir}
+                annotationCounts={fileAnnotationCounts}
+                highlightedFiles={highlightedFiles}
+                editStatuses={fileEditStatuses}
+              />
+            ) : activeTab === "changes" && fileBrowser ? (
+              <GitChangesBrowser
+                dirs={fileBrowser.dirs}
+                onSelectFile={(absolutePath, dirPath) => {
+                  onFilesSelectFile?.(absolutePath, dirPath);
+                  onClose();
+                }}
+                onRefresh={onChangesRefresh ?? (() => {})}
+              />
+            ) : (
+              <MessagesBrowser
+                messages={messages!}
+                selectedMessageId={selectedMessageId ?? null}
+                onSelect={(messageId) => {
+                  onSelectMessage!(messageId);
+                  onClose();
+                }}
+                annotationCounts={messageAnnotationCounts}
+                listLabel={pickerLabels.list}
+                emptyLabel={pickerLabels.empty}
+              />
+            )}
           </OverlayScrollArea>
         </section>
       </div>

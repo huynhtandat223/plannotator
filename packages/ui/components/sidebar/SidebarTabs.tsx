@@ -16,6 +16,7 @@ interface SidebarTabsProps {
   hasDiff: boolean;
   showVersionsTab?: boolean;
   showFilesTab?: boolean;
+  showChangesTab?: boolean;
   showMessagesTab?: boolean;
   messagesTabTitle?: string;
   showAgentTerminalTab?: boolean;
@@ -33,6 +34,7 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({
   hasDiff,
   showVersionsTab,
   showFilesTab,
+  showChangesTab,
   showMessagesTab,
   messagesTabTitle = "Pick a different message",
   showAgentTerminalTab,
@@ -132,7 +134,7 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({
         <button
           onClick={() => onToggleTab("files")}
           className="sidebar-tab-flag group relative flex items-center justify-center w-7 h-9 rounded-r-md border border-l-0 border-border/50 bg-card/80 backdrop-blur-sm text-muted-foreground hover:text-foreground hover:bg-card transition-colors"
-          title="File Browser"
+          title="Folder"
         >
           <svg
             className="w-3.5 h-3.5"
@@ -150,6 +152,18 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({
           {hasFileAnnotations && (
             <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-primary" />
           )}
+        </button>
+      )}
+
+      {showChangesTab && (
+        <button
+          onClick={() => onToggleTab("changes")}
+          className="sidebar-tab-flag group relative flex items-center justify-center w-7 h-9 rounded-r-md border border-l-0 border-border/50 bg-card/80 backdrop-blur-sm text-muted-foreground hover:text-foreground hover:bg-card transition-colors"
+          title="Git Changes"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
         </button>
       )}
     </div>

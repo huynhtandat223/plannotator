@@ -5,16 +5,18 @@
 
 import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { readFileSync } from "node:fs";
+import { readFile, readdir, realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const port = parsePort(process.env.PLANNOTATOR_HERDR_PORT ?? "19432");
 const host = process.env.PLANNOTATOR_HERDR_HOST ?? "0.0.0.0";
-// LAN viewers may read the shared workspace, but feedback changes a live Pi
-// conversation. A token is therefore required for non-loopback writes.
+// Herdr is used over a private Tailnet. Browser feedback is accepted from
+// loopback and Tailscale peers; Pi enrichment and feedback claiming remain
+// loopback-only because they carry the local Pi session identity.
 const browserWriteToken = process.env.PLANNOTATOR_HERDR_WRITE_TOKEN?.trim() || null;
 export const HERDR_LIVE_MESSAGE_LIMIT = 5;
 // The packaged Ex-Plannotator editor owns every visual decision, including its
@@ -34,6 +36,8 @@ type HerdrReviewSnapshot = {
     paneDescription: string;
     /** Herdr's authoritative live state for the pane containing this response. */
     agentStatus: HerdrPanel["status"];
+    /** Herdr's authoritative workspace root for the pane containing this response. */
+    cwd: string;
   }>;
   selectedMessageId: string | null;
   unreadMessageIds: string[];
@@ -315,13 +319,25 @@ function isLoopback(request: IncomingMessage): boolean {
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
 
+function isTailscalePeer(request: IncomingMessage): boolean {
+  const address = request.socket.remoteAddress ?? "";
+  const ipv4 = address.startsWith("::ffff:") ? address.slice(7) : address;
+  const parts = ipv4.split(".").map(Number);
+  // Tailscale IPv4 addresses are the CGNAT block 100.64.0.0/10. The IPv6
+  // range is fd7a:115c:a1e0::/48.
+  return parts.length === 4 && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)
+    ? parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127
+    : address.toLowerCase().startsWith("fd7a:115c:a1e0:");
+}
+
 function requestCookie(request: IncomingMessage, name: string): string | null {
   const entry = request.headers.cookie?.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`));
   return entry ? decodeURIComponent(entry.slice(name.length + 1)) : null;
 }
 
 function canWriteFeedback(request: IncomingMessage): boolean {
-  return isLoopback(request) || (browserWriteToken !== null && requestCookie(request, "plannotator_herdr_write") === browserWriteToken);
+  return isLoopback(request) || isTailscalePeer(request)
+    || (browserWriteToken !== null && requestCookie(request, "plannotator_herdr_write") === browserWriteToken);
 }
 
 async function savePanelSession(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -410,6 +426,7 @@ export function reviewSnapshotFromPanels(
         paneLabel,
         paneDescription,
         agentStatus: panel.status,
+        cwd: panel.cwd,
       }];
     }
     return responses.map((response, index) => ({
@@ -425,6 +442,7 @@ export function reviewSnapshotFromPanels(
       paneLabel,
       paneDescription,
       agentStatus: panel.status,
+      cwd: panel.cwd,
     }));
   });
   const selectedMessage = selected
@@ -453,6 +471,244 @@ async function reviewSnapshot(): Promise<{ panels: HerdrPanel[]; snapshot: Herdr
     }
   }
   return { panels, snapshot: reviewSnapshotFromPanels(panels, null, panelSessions) }; 
+}
+
+const FILE_BROWSER_EXTENSIONS = /\.(mdx?|txt|html?)$/i;
+const FILE_BROWSER_MAX_FILES = 5_000;
+const FILE_BROWSER_EXCLUDED_NAMES = new Set([
+  "node_modules", ".git", ".claude", ".agents", "dist", "build", ".next",
+  "__pycache__", ".obsidian", ".trash", ".venv", "vendor", "target", ".cache",
+  "coverage", ".turbo", ".svelte-kit", ".nuxt", ".output", ".parcel-cache",
+  ".webpack", ".expo", "_site", "public", ".jekyll-cache", "out", ".docusaurus", "storybook-static",
+]);
+
+type WorkspaceStatus = {
+  available: boolean;
+  rootPath: string;
+  repoRoot?: string;
+  files: Record<string, {
+    path: string;
+    repoRelativePath: string;
+    oldPath?: string;
+    status: "modified" | "added" | "deleted" | "renamed" | "copied" | "untracked" | "conflicted" | "typechange";
+    additions: number;
+    deletions: number;
+    staged: boolean;
+    unstaged: boolean;
+  }>;
+  totals: { files: number; additions: number; deletions: number };
+  error?: string;
+};
+type FileBrowserWalkState = { files: Set<string>; truncated: boolean };
+type VaultNode = { name: string; path: string; type: "file" | "folder"; children?: VaultNode[] };
+
+function isFileBrowserExcludedPath(relativePath: string): boolean {
+  return relativePath.replace(/\\/g, "/").split("/").some((part) => FILE_BROWSER_EXCLUDED_NAMES.has(part));
+}
+
+function includeWorkspaceFile(relativePath: string): boolean {
+  return FILE_BROWSER_EXTENSIONS.test(relativePath) && !isFileBrowserExcludedPath(relativePath);
+}
+
+function includeWorkspaceChange(relativePath: string): boolean {
+  return !isFileBrowserExcludedPath(relativePath);
+}
+
+function addWorkspaceFile(state: FileBrowserWalkState, relativePath: string): void {
+  if (state.files.has(relativePath)) return;
+  if (state.files.size >= FILE_BROWSER_MAX_FILES) {
+    state.truncated = true;
+    return;
+  }
+  state.files.add(relativePath);
+}
+
+function buildFileTree(paths: string[]): VaultNode[] {
+  const root: VaultNode[] = [];
+  for (const filePath of paths) {
+    let nodes = root;
+    let prefix = "";
+    for (const [index, name] of filePath.split("/").entries()) {
+      prefix = prefix ? `${prefix}/${name}` : name;
+      const type = index === filePath.split("/").length - 1 ? "file" : "folder";
+      let node = nodes.find((candidate) => candidate.name === name && candidate.type === type);
+      if (!node) {
+        node = { name, path: prefix, type, ...(type === "folder" ? { children: [] } : {}) };
+        nodes.push(node);
+      }
+      if (node.children) nodes = node.children;
+    }
+  }
+  const sort = (nodes: VaultNode[]) => {
+    nodes.sort((a, b) => a.type === b.type ? a.name.localeCompare(b.name) : a.type === "folder" ? -1 : 1);
+    nodes.forEach((node) => node.children && sort(node.children));
+  };
+  sort(root);
+  return root;
+}
+
+async function walkWorkspaceFiles(directory: string, root: string, state: FileBrowserWalkState): Promise<void> {
+  if (state.truncated) return;
+  let entries: Awaited<ReturnType<typeof readdir>>;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (state.truncated) return;
+    const fullPath = join(directory, entry.name);
+    const relativePath = relative(root, fullPath).replace(/\\/g, "/");
+    if (entry.isDirectory()) {
+      if (!isFileBrowserExcludedPath(relativePath)) await walkWorkspaceFiles(fullPath, root, state);
+    } else if (entry.isFile() && includeWorkspaceFile(relativePath)) {
+      addWorkspaceFile(state, relativePath);
+    }
+  }
+}
+
+function unavailableWorkspaceStatus(rootPath: string, error: string): WorkspaceStatus {
+  return { available: false, rootPath, files: {}, totals: { files: 0, additions: 0, deletions: 0 }, error };
+}
+
+function gitStatus(x: string, y: string): WorkspaceStatus["files"][string]["status"] {
+  if (x === "?" || y === "?") return "untracked";
+  if (x === "U" || y === "U" || (x === "A" && y === "A") || (x === "D" && y === "D")) return "conflicted";
+  if (x === "R" || y === "R") return "renamed";
+  if (x === "C" || y === "C") return "copied";
+  if (x === "A" || y === "A") return "added";
+  if (x === "D" || y === "D") return "deleted";
+  if (x === "T" || y === "T") return "typechange";
+  return "modified";
+}
+
+async function workspaceStatus(rootPath: string): Promise<WorkspaceStatus> {
+  try {
+    const { stdout: repoOutput } = await execFileAsync("git", ["--no-optional-locks", "-C", rootPath, "rev-parse", "--show-toplevel"], { timeout: 10_000 });
+    const repoRoot = await realpath(repoOutput.trim());
+    const rootPathspec = relative(repoRoot, rootPath).replace(/\\/g, "/") || ".";
+    const [statusResult, diffResult] = await Promise.all([
+      execFileAsync("git", ["--no-optional-locks", "-C", repoRoot, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", rootPathspec], { timeout: 10_000 }),
+      execFileAsync("git", ["--no-optional-locks", "-C", repoRoot, "diff", "--numstat", "-z", "HEAD", "--", rootPathspec], { timeout: 10_000 }),
+    ]);
+    const counts = new Map<string, { additions: number; deletions: number }>();
+    for (const record of diffResult.stdout.split("\0")) {
+      const [additionsRaw, deletionsRaw, repoRelativePath] = record.split("\t");
+      if (!repoRelativePath) continue;
+      counts.set(repoRelativePath, { additions: additionsRaw === "-" ? 0 : Number(additionsRaw) || 0, deletions: deletionsRaw === "-" ? 0 : Number(deletionsRaw) || 0 });
+    }
+    const files: WorkspaceStatus["files"] = {};
+    for (const record of statusResult.stdout.split("\0")) {
+      if (record.length < 4) continue;
+      const repoRelativePath = record.slice(3);
+      const path = resolve(repoRoot, repoRelativePath);
+      const relativePath = relative(rootPath, path).replace(/\\/g, "/");
+      if (!relativePath || relativePath.startsWith("../") || !includeWorkspaceChange(relativePath)) continue;
+      const countsForFile = counts.get(repoRelativePath) ?? { additions: 0, deletions: 0 };
+      files[path] = {
+        path,
+        repoRelativePath,
+        status: gitStatus(record[0] ?? " ", record[1] ?? " "),
+        additions: countsForFile.additions,
+        deletions: countsForFile.deletions,
+        staged: record[0] !== " " && record[0] !== "?",
+        unstaged: record[1] !== " " && record[1] !== "?",
+      };
+    }
+    const values = Object.values(files);
+    return { available: true, rootPath, repoRoot, files, totals: {
+      files: values.length,
+      additions: values.reduce((sum, file) => sum + file.additions, 0),
+      deletions: values.reduce((sum, file) => sum + file.deletions, 0),
+    } };
+  } catch {
+    return unavailableWorkspaceStatus(rootPath, "not-a-git-repo");
+  }
+}
+
+async function liveWorkspaceDirectory(
+  dirPath: string,
+  panels: HerdrPanel[],
+  options: { exactRoot: boolean },
+): Promise<{ root: string; directory: string } | null> {
+  let directory: string;
+  try {
+    directory = await realpath(resolve(dirPath));
+  } catch {
+    return null;
+  }
+  for (const panel of panels) {
+    try {
+      const root = await realpath(resolve(panel.cwd));
+      if (directory === root || (!options.exactRoot && directory.startsWith(`${root}/`))) {
+        return { root, directory };
+      }
+    } catch {
+      // A pane can close or its cwd can disappear between the Herdr snapshot and this request.
+    }
+  }
+  return null;
+}
+
+async function serveWorkspaceFiles(response: ServerResponse, url: URL): Promise<void> {
+  const dirPath = text(url.searchParams.get("dirPath"));
+  if (!dirPath) {
+    writeJson(response, 400, { error: "dirPath is required" });
+    return;
+  }
+  const workspace = await liveWorkspaceDirectory(dirPath, await discoverPanels(), { exactRoot: true });
+  if (!workspace) {
+    writeJson(response, 403, { error: "Directory is not a currently live Herdr Pi workspace" });
+    return;
+  }
+
+  const { root } = workspace;
+  const status = await workspaceStatus(root);
+  const state: FileBrowserWalkState = { files: new Set(), truncated: false };
+  // Git changes are seeded first so changed/deleted files remain visible when a
+  // large workspace reaches the tree cap.
+  for (const change of Object.values(status.files)) {
+    addWorkspaceFile(state, relative(root, change.path).replace(/\\/g, "/"));
+    if (state.truncated) break;
+  }
+  if (!state.truncated) await walkWorkspaceFiles(root, root, state);
+  writeJson(response, 200, {
+    tree: buildFileTree([...state.files].sort()),
+    workspaceStatus: status,
+    truncated: state.truncated,
+    fileLimit: FILE_BROWSER_MAX_FILES,
+  });
+}
+
+async function serveWorkspaceDocument(response: ServerResponse, url: URL): Promise<void> {
+  const requestedPath = text(url.searchParams.get("path"));
+  const base = text(url.searchParams.get("base"));
+  if (!requestedPath || !base) {
+    writeJson(response, 400, { error: "path and a live Herdr workspace base are required" });
+    return;
+  }
+  const workspace = await liveWorkspaceDirectory(base, await discoverPanels(), { exactRoot: false });
+  if (!workspace) {
+    writeJson(response, 403, { error: "Document base is not a currently live Herdr Pi workspace" });
+    return;
+  }
+  const candidate = isAbsolute(requestedPath) ? resolve(requestedPath) : resolve(workspace.directory, requestedPath);
+  const relativePath = relative(workspace.root, candidate);
+  if (relativePath.startsWith("..") || isAbsolute(relativePath)) {
+    writeJson(response, 403, { error: "Document is outside the live Herdr Pi workspace" });
+    return;
+  }
+  try {
+    const filepath = await realpath(candidate);
+    if (relative(workspace.root, filepath).startsWith("..")) {
+      writeJson(response, 403, { error: "Document is outside the live Herdr Pi workspace" });
+      return;
+    }
+    const content = await readFile(filepath, "utf8");
+    writeJson(response, 200, { markdown: content, filepath, renderAs: "markdown" });
+  } catch {
+    writeJson(response, 404, { error: `File not found: ${requestedPath}` });
+  }
 }
 
 async function servePlan(response: ServerResponse): Promise<void> {
@@ -549,6 +805,14 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
   }
   if (request.method === "POST" && url.pathname === "/api/doc/exists") {
     void serveUnavailableDocExists(request, response);
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/api/reference/files") {
+    void serveWorkspaceFiles(response, url).catch(() => writeJson(response, 500, { error: "Failed to list live Herdr workspace files" }));
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/api/doc") {
+    void serveWorkspaceDocument(response, url).catch(() => writeJson(response, 500, { error: "Failed to read live Herdr workspace document" }));
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/panels") {

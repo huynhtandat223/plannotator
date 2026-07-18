@@ -24,6 +24,8 @@ export interface PickerMessage {
   paneDescription?: string;
   /** Optional host-provided authoritative live agent state. */
   agentStatus?: 'working' | 'idle' | 'blocked' | 'unknown';
+  /** Optional host-provided workspace root for the pane containing this response. */
+  cwd?: string;
 }
 
 interface MessagesBrowserProps {

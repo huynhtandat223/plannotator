@@ -44,6 +44,14 @@ interface AppHeaderProps {
   agentName: string;
   availableAgents: Agent[];
   showAnnotationsWarning: boolean;
+  /** Live Herdr workspace navigation, rendered as compact pinned mobile controls. */
+  showLiveMessagePicker?: boolean;
+  showLiveFolder?: boolean;
+  showLiveChanges?: boolean;
+  onOpenLiveMessages?: () => void;
+  onOpenLiveFolder?: () => void;
+  onOpenLiveChanges?: () => void;
+  liveFeedbackCount?: number;
 
   // Callback config (null when no bot callback)
   callbackConfig: CallbackConfig | null;
@@ -92,6 +100,18 @@ interface AppHeaderProps {
   octarineConfigured: boolean;
 }
 
+const HeaderIconButton: React.FC<{ onClick?: () => void; title: string; children: React.ReactNode }> = ({ onClick, title, children }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    aria-label={title}
+    title={title}
+    className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+  >
+    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>{children}</svg>
+  </button>
+);
+
 export const AppHeader = React.memo<AppHeaderProps>(({
   htmlSurface,
   htmlToolsHidden,
@@ -121,6 +141,13 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   agentName,
   availableAgents,
   showAnnotationsWarning,
+  showLiveMessagePicker,
+  showLiveFolder,
+  showLiveChanges,
+  onOpenLiveMessages,
+  onOpenLiveFolder,
+  onOpenLiveChanges,
+  liveFeedbackCount = 0,
   callbackConfig,
   taterMode,
   mobileSettingsOpen,
@@ -177,6 +204,22 @@ export const AppHeader = React.memo<AppHeaderProps>(({
       </div>
 
       <div className="flex items-center gap-1 md:gap-2">
+        {/* Live workspace navigation is pinned in the mobile header, not in
+            the document viewport, so it never overlaps selected text or Send. */}
+        {(showLiveMessagePicker || showLiveFolder || showLiveChanges) && (
+          <div className="flex items-center gap-0.5 md:hidden">
+            {showLiveMessagePicker && <HeaderIconButton onClick={onOpenLiveMessages} title="Messages">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
+            </HeaderIconButton>}
+            {showLiveFolder && <HeaderIconButton onClick={onOpenLiveFolder} title="Folder">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+            </HeaderIconButton>}
+            {showLiveChanges && <HeaderIconButton onClick={onOpenLiveChanges} title="Git Changes">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </HeaderIconButton>}
+          </div>
+        )}
+
         {/* Bot callback buttons — only shown when ?cb=&ct= params are present */}
         {callbackConfig && !isApiMode && isSharedSession && (
           <>
@@ -239,7 +282,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
           </>
         )}
 
-        {isApiMode && !readOnly && (!linkedDocIsActive || annotateMode) && !archiveMode && !goalSetupMode && (
+        {isApiMode && (!readOnly || liveFeedbackCount > 0) && (!linkedDocIsActive || annotateMode) && !archiveMode && !goalSetupMode && (
           <>
             {annotateMode ? (
               <>
@@ -248,13 +291,13 @@ export const AppHeader = React.memo<AppHeaderProps>(({
                   disabled={isSubmitting || isExiting}
                   isLoading={isExiting}
                 />
-                {hasAnyAnnotations && (
+                {(hasAnyAnnotations || liveFeedbackCount > 0) && (
                   <FeedbackButton
                     onClick={onAnnotateFeedback}
                     disabled={isSubmitting || isExiting}
                     isLoading={isSubmitting}
                     label="Send Feedback"
-                    title="Send Feedback"
+                    title={liveFeedbackCount > 0 ? "Send feedback for the selected response" : "Send Feedback"}
                   />
                 )}
               </>

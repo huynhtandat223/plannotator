@@ -41,7 +41,10 @@ export const FeedbackButton: React.FC<FeedbackButtonProps> = ({
         <span className="hidden lg:inline">{isLoading ? loadingLabel : label}</span>
       </>
     ) : (
-      <span className="hidden md:inline">{isLoading ? loadingLabel : label}</span>
+      <>
+        <span className="md:hidden">{isLoading ? '…' : 'Send'}</span>
+        <span className="hidden md:inline">{isLoading ? loadingLabel : label}</span>
+      </>
     )}
   </Button>
 );
