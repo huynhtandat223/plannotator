@@ -35,6 +35,8 @@ interface MessagesBrowserProps {
   annotationCounts?: Map<string, number>;
   listLabel?: string;
   emptyLabel?: string;
+  /** Ex-Plannotator's live compact history is chronological; normal hosts are newest-first. */
+  chronological?: boolean;
 }
 
 // Hard cap for browsers where line-clamp is unavailable, and to avoid huge sidebar text nodes.
@@ -66,6 +68,7 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   annotationCounts,
   listLabel = "Recent messages — newest first",
   emptyLabel = "No recent assistant messages found.",
+  chronological = false,
 }) => {
   if (messages.length === 0) {
     return (
@@ -90,7 +93,7 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   return (
     <div className="p-2">
       <div className="px-2 pt-1 pb-2 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-        {listLabel}
+        {chronological ? "Recent responses — oldest first" : listLabel}
       </div>
       <div className="space-y-2">
         {paneGroups.map((group) => (
