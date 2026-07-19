@@ -11,11 +11,13 @@ import {
   commandArgv,
   commandDelivery,
   feedbackBatch,
+  formatInstructionFileReferences,
   instructionDelivery,
   scoutDelivery,
   panelsFromSnapshot,
   releasePanelSession,
   reviewSnapshotFromPanels,
+  searchLiveWorkspaceFiles,
   readPanelSessionJson,
   serveWorkspaceFilesStream,
   managedScouts,
@@ -677,6 +679,49 @@ describe("scoutDelivery", () => {
   test("rejects waiting documents, foreign messages, and replaced source sessions", () => {
     expect(scoutDelivery({ sourcePaneId: "w:p1", sourceMessageId: "w:p1:waiting", question: "Inspect" }, snapshot, [panel], registrations)).toBeNull();
     expect(scoutDelivery({ sourcePaneId: "w:p1", sourceMessageId: source.messageId, question: "Inspect" }, snapshot, [panel], new Map([["w:p1", { ...registrations.get("w:p1")!, sessionId: "session-2" }]]))).toBeNull();
+  });
+});
+
+describe("live workspace file mention search", () => {
+  test("returns relative source paths from only the requested live pane workspace", async () => {
+    const repo = createTemporaryRepository();
+    mkdirSync(join(repo, "src"));
+    writeFileSync(join(repo, "src", "App.tsx"), "export const App = 1;\n");
+    writeFileSync(join(repo, "src", "App.test.tsx"), "export {};\n");
+    mkdirSync(join(repo, "node_modules", "hidden"), { recursive: true });
+    writeFileSync(join(repo, "node_modules", "hidden", "secret.ts"), "export {};\n");
+    const panels: HerdrPanel[] = [{ id: "w:p1", cwd: repo, status: "idle", name: "Pi" }];
+
+    expect(await searchLiveWorkspaceFiles("w:p1", "app.tsx", panels)).toEqual(["src/App.tsx"]);
+    expect(await searchLiveWorkspaceFiles("closed:p1", "app", panels)).toBeNull();
+  });
+});
+
+describe("instruction file references", () => {
+  test("adds canonical in-root file ranges before the literal user message", async () => {
+    const repo = createTemporaryRepository();
+    mkdirSync(join(repo, "src"));
+    writeFileSync(join(repo, "src", "App.tsx"), "export const App = 1;\n");
+
+    expect(await formatInstructionFileReferences("Please inspect @App.tsx:10-20", repo)).toEqual({
+      content: [
+        "Referenced workspace files (inspect these before answering):",
+        "- `src/App.tsx`, lines 10-20",
+        "",
+        "Please inspect @App.tsx:10-20",
+      ].join("\n"),
+    });
+  });
+
+  test("rejects an explicit file mention outside the pane root", async () => {
+    const repo = createTemporaryRepository();
+    const sibling = mkdtempSync(join(tmpdir(), "plannotator-herdr-sibling-"));
+    temporaryRepos.push(sibling);
+    writeFileSync(join(sibling, "secret.ts"), "export const secret = true;\n");
+
+    expect(await formatInstructionFileReferences(`Inspect @${join(sibling, "secret.ts")}`, repo)).toEqual({
+      error: `Could not resolve referenced file: ${join(sibling, "secret.ts")}`,
+    });
   });
 });
 

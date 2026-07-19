@@ -6,6 +6,7 @@ import { submitHint } from '../utils/platform';
 import { useDraggable } from '../hooks/useDraggable';
 import { SparklesIcon } from './SparklesIcon';
 import { hasUnsavedCommentContent } from '../utils/commentContent';
+import { findActiveFileMention, replaceActiveFileMention } from '@plannotator/core/file-mention';
 
 export interface CommentAskAIContext {
   kind: 'general' | 'selection';
@@ -60,6 +61,8 @@ interface CommentPopoverProps {
    */
   livePiCommands?: LivePiCommand[];
   onRunLivePiCommand?: (command: string, args: string) => Promise<void>;
+  /** Opt-in project file search for live-Pi Global Messages. */
+  onSearchFileMentions?: (query: string) => Promise<string[]>;
 }
 
 const MAX_POPOVER_WIDTH = 384;
@@ -112,6 +115,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   askAIDisabled = false,
   livePiCommands = [],
   onRunLivePiCommand,
+  onSearchFileMentions,
 }) => {
   const [mode, setMode] = useState<'popover' | 'dialog'>('popover');
   const initialDraft = draftKey ? draftStore.get(draftKey) : undefined;
@@ -120,6 +124,8 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   const [selectedLivePiCommand, setSelectedLivePiCommand] = useState<LivePiCommand | null>(null);
   const [isRunningLivePiCommand, setIsRunningLivePiCommand] = useState(false);
   const [livePiCommandError, setLivePiCommandError] = useState<string | null>(null);
+  const [fileSuggestions, setFileSuggestions] = useState<string[]>([]);
+  const [isSearchingFiles, setIsSearchingFiles] = useState(false);
   const [position, setPosition] = useState<{ top: number; left: number; flipAbove: boolean; width: number } | null>(null);
   // Direction of an open popover that has scrolled out of view, or null when on-screen.
   const [offscreen, setOffscreen] = useState<'above' | 'below' | null>(null);
@@ -134,6 +140,9 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
         command.description?.toLowerCase().includes(commandQuery),
       ).slice(0, 6)
     : [];
+  const activeFileMention = isGlobal && onSearchFileMentions
+    ? findActiveFileMention(text, textareaRef.current?.selectionStart ?? text.length)
+    : null;
   const selectedCommandPrefix = selectedLivePiCommand ? `/${selectedLivePiCommand.name}` : '';
   const selectedCommandIsCurrent = !!selectedLivePiCommand &&
     (text === selectedCommandPrefix || text.startsWith(`${selectedCommandPrefix} `));
@@ -149,7 +158,34 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     setImages(allowImages ? nextDraft?.images ?? [] : []);
     setSelectedLivePiCommand(null);
     setLivePiCommandError(null);
+    setFileSuggestions([]);
   }, [draftKey, initialText, allowImages]);
+
+  useEffect(() => {
+    if (!activeFileMention || !onSearchFileMentions) {
+      setFileSuggestions([]);
+      setIsSearchingFiles(false);
+      return;
+    }
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      setIsSearchingFiles(true);
+      void onSearchFileMentions(activeFileMention.query)
+        .then((paths) => {
+          if (!cancelled) setFileSuggestions(paths.slice(0, 8));
+        })
+        .catch(() => {
+          if (!cancelled) setFileSuggestions([]);
+        })
+        .finally(() => {
+          if (!cancelled) setIsSearchingFiles(false);
+        });
+    }, 100);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [activeFileMention?.query, onSearchFileMentions]);
 
   useCommentDraftSync(draftKey, text, allowImages ? images : []);
 
@@ -251,6 +287,20 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     }
   }, [selectedLivePiCommand]);
 
+  const handleSelectFileMention = useCallback((path: string) => {
+    const textarea = textareaRef.current;
+    const mention = findActiveFileMention(text, textarea?.selectionStart ?? text.length);
+    if (!mention) return;
+    const replacement = replaceActiveFileMention(text, mention, path);
+    setText(replacement.text);
+    setFileSuggestions([]);
+    requestAnimationFrame(() => {
+      if (!textarea) return;
+      textarea.focus();
+      textarea.selectionStart = textarea.selectionEnd = replacement.cursor;
+    });
+  }, [text]);
+
   const handleSelectLivePiCommand = useCallback((command: LivePiCommand) => {
     setText(`/${command.name} `);
     setSelectedLivePiCommand(command);
@@ -346,6 +396,25 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     </div>
   );
 
+  const fileAutocomplete = activeFileMention && (fileSuggestions.length > 0 || isSearchingFiles) && (
+    <div className="mt-2 overflow-hidden rounded-md border border-border bg-muted/30" role="listbox" aria-label="Project files">
+      {fileSuggestions.map((path) => (
+        <button
+          key={path}
+          type="button"
+          role="option"
+          onClick={() => handleSelectFileMention(path)}
+          className="flex w-full border-b border-border px-2.5 py-2 text-left font-mono text-xs text-foreground last:border-b-0 hover:bg-muted"
+        >
+          @{path}{activeFileMention.lineSuffix}
+        </button>
+      ))}
+      {isSearchingFiles && fileSuggestions.length === 0 && (
+        <div className="px-2.5 py-2 text-xs text-muted-foreground">Searching files…</div>
+      )}
+    </div>
+  );
+
   const livePiCommandAction = selectedLivePiCommand && (
     <>
       <button
@@ -418,6 +487,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
               style={{ fieldSizing: 'content' } as React.CSSProperties}
             />
             {commandAutocomplete}
+            {fileAutocomplete}
           </div>
 
           {/* Footer */}
@@ -542,6 +612,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
           style={{ fieldSizing: 'content' } as React.CSSProperties}
         />
         {commandAutocomplete}
+        {fileAutocomplete}
       </div>
 
       {/* Footer */}

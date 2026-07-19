@@ -219,6 +219,28 @@ describe('CommentPopover allowImages', () => {
     expect(submitted).toEqual([]);
   });
 
+  test.skipIf(!hasDom)('canonicalizes a picked @file while preserving a typed line range', async () => {
+    await mount(
+      <CommentPopover
+        {...popoverProps}
+        anchorEl={makeAnchor()}
+        onSearchFileMentions={async () => ['packages/editor/App.tsx']}
+      />,
+    );
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      const proto = Object.getPrototypeOf(textarea);
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      setter?.call(textarea, 'Inspect @App.tsx:100-140');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    });
+    const suggestion = Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.includes('@packages/editor/App.tsx:100-140'));
+    expect(suggestion).toBeDefined();
+    await act(async () => { suggestion?.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(textarea.value).toBe('Inspect @packages/editor/App.tsx:100-140');
+  });
+
   test.skipIf(!hasDom)('keeps typed slash text as a normal comment until a command is selected', async () => {
     const submitted: Array<unknown> = [];
     await mount(

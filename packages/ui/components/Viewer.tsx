@@ -123,6 +123,8 @@ interface ViewerProps {
   /** Optional live Pi commands shown as explicit autocomplete in global comments. */
   livePiCommands?: Array<{ name: string; description?: string; source: 'extension' | 'prompt' | 'skill' }>;
   onRunLivePiCommand?: (command: string, args: string) => Promise<void>;
+  /** Optional project-file lookup for Global Message @mentions. */
+  onSearchFileMentions?: (query: string) => Promise<string[]>;
 }
 
 export interface ViewerHandle {
@@ -207,6 +209,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   isWaiting = false,
   livePiCommands = [],
   onRunLivePiCommand,
+  onSearchFileMentions,
 }, ref) => {
   const [copied, setCopied] = useState(false);
   const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
@@ -924,6 +927,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             allowImages={allowImages}
             livePiCommands={viewerCommentPopover.isGlobal ? livePiCommands : []}
             onRunLivePiCommand={viewerCommentPopover.isGlobal ? onRunLivePiCommand : undefined}
+            onSearchFileMentions={viewerCommentPopover.isGlobal ? onSearchFileMentions : undefined}
             onAskAI={onAskAI}
             askAIContext={{
               kind: viewerCommentPopover.isGlobal ? 'general' : 'selection',

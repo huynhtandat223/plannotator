@@ -29,6 +29,8 @@ import { startFileBrowserWatchStream } from "./file-browser-watch";
 import { startReviewServer, type ReviewServerResult } from "../../packages/server/review";
 import { prepareLocalReviewDiff } from "../../packages/server/vcs";
 import { loadConfig } from "../../packages/shared/config";
+import { extractFileMentionReferences } from "../../packages/core/file-mention";
+import { isWithinProjectRoot, resolveCodeFile } from "../../packages/shared/resolve-file";
 const execFileAsync = promisify(execFile);
 const port = parsePort(process.env.PLANNOTATOR_HERDR_PORT ?? "19432");
 const host = process.env.PLANNOTATOR_HERDR_HOST ?? "0.0.0.0";
@@ -907,6 +909,40 @@ export function commandDelivery(
   return { paneId, command, args };
 }
 
+export async function formatInstructionFileReferences(content: string, root: string): Promise<{ content: string } | { error: string }> {
+  const references = extractFileMentionReferences(content);
+  if (references.length === 0) return { content };
+
+  const resolved = await Promise.all(references.map(async (reference) => ({
+    reference,
+    result: await resolveCodeFile(reference.filePath, root),
+  })));
+  const invalid = resolved.find(({ result }) =>
+    result.kind !== "found" || !isWithinProjectRoot(result.path, root),
+  );
+  if (invalid) {
+    return { error: `Could not resolve referenced file: ${invalid.reference.filePath}` };
+  }
+  const lines = resolved.map(({ reference, result }) => {
+    if (result.kind !== "found") throw new Error("Resolved file reference unexpectedly missing");
+    const relativePath = relative(root, result.path).replace(/\\/g, "/");
+    const location = reference.line === undefined
+      ? ""
+      : reference.lineEnd === undefined || reference.lineEnd === reference.line
+        ? `, line ${reference.line}`
+        : `, lines ${reference.line}-${reference.lineEnd}`;
+    return `- \`${relativePath}\`${location}`;
+  });
+  return {
+    content: [
+      "Referenced workspace files (inspect these before answering):",
+      ...lines,
+      "",
+      content,
+    ].join("\n"),
+  };
+}
+
 async function queueInstruction(request: IncomingMessage, response: ServerResponse): Promise<void> {
   if (!canWriteFeedback(request)) {
     writeJson(response, 403, { error: "Sending a message requires a loopback browser or PLANNOTATOR_HERDR_WRITE_TOKEN." });
@@ -925,11 +961,28 @@ async function queueInstruction(request: IncomingMessage, response: ServerRespon
     writeJson(response, 409, { error: "The selected Pi pane session is no longer current" });
     return;
   }
+  const pane = (await discoverPanels()).find((candidate) => candidate.id === prepared.paneId);
+  if (!pane) {
+    writeJson(response, 409, { error: "The selected Pi pane is no longer live" });
+    return;
+  }
+  let workspaceRoot: string;
+  try {
+    workspaceRoot = await realpath(resolve(pane.cwd));
+  } catch {
+    writeJson(response, 409, { error: "The selected Pi pane workspace is no longer available" });
+    return;
+  }
+  const references = await formatInstructionFileReferences(prepared.content, workspaceRoot);
+  if ("error" in references) {
+    writeJson(response, 400, { error: references.error });
+    return;
+  }
   const delivery: PendingInstructionDelivery = {
     deliveryId: randomUUID(),
     paneId: prepared.paneId,
     sessionId: registration.sessionId,
-    content: prepared.content,
+    content: references.content,
   };
   pendingInstructionDeliveries.set(delivery.deliveryId, delivery);
   writeJson(response, 202, { ok: true, deliveryId: delivery.deliveryId });
@@ -1711,7 +1764,11 @@ async function currentLiveState(): Promise<PublishedLiveSnapshot<HerdrLiveState>
 }
 
 const FILE_BROWSER_EXTENSIONS = /\.(mdx?|txt|html?)$/i;
+const FILE_MENTION_EXTENSIONS = /(?:\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|c|cpp|h|hpp|cs|swift|kt|scala|sh|bash|zsh|sql|graphql|json|ya?ml|toml|ini|css|scss|less|xml|tf|lua|r|dart|ex|exs|vue|svelte|astro|zig|proto)|(?:^|\/)(?:Dockerfile|Makefile|Rakefile|Gemfile|Procfile|Vagrantfile|Brewfile|Justfile))$/i;
 const FILE_BROWSER_MAX_FILES = 5_000;
+const FILE_MENTION_MAX_FILES = 10_000;
+const FILE_MENTION_CACHE_TTL_MS = 30_000;
+const FILE_MENTION_MAX_RESULTS = 8;
 const FILE_BROWSER_EXCLUDED_NAMES = new Set([
   "node_modules", ".git", ".claude", ".agents", "dist", "build", ".next",
   "__pycache__", ".obsidian", ".trash", ".venv", "vendor", "target", ".cache",
@@ -1722,7 +1779,9 @@ const FILE_BROWSER_EXCLUDED_NAMES = new Set([
 type WorkspaceFileStatus = WorkspaceStatusPayload["files"][string]["status"];
 type WorkspaceStatus = WorkspaceStatusPayload;
 type FileBrowserWalkState = { files: Set<string>; truncated: boolean };
+type FileMentionCacheEntry = { startedAt: number; promise: Promise<string[]> };
 type VaultNode = { name: string; path: string; type: "file" | "folder"; children?: VaultNode[] };
+const fileMentionCache = new Map<string, FileMentionCacheEntry>();
 
 function isFileBrowserExcludedPath(relativePath: string): boolean {
   return relativePath.replace(/\\/g, "/").split("/").some((part) => FILE_BROWSER_EXCLUDED_NAMES.has(part));
@@ -1730,6 +1789,10 @@ function isFileBrowserExcludedPath(relativePath: string): boolean {
 
 function includeWorkspaceFile(relativePath: string): boolean {
   return FILE_BROWSER_EXTENSIONS.test(relativePath) && !isFileBrowserExcludedPath(relativePath);
+}
+
+function includeFileMention(relativePath: string): boolean {
+  return FILE_MENTION_EXTENSIONS.test(relativePath) && !isFileBrowserExcludedPath(relativePath);
 }
 
 function includeWorkspaceChange(relativePath: string): boolean {
@@ -1787,6 +1850,66 @@ async function walkWorkspaceFiles(directory: string, root: string, state: FileBr
       addWorkspaceFile(state, relativePath);
     }
   }
+}
+
+async function walkFileMentions(directory: string, root: string, files: string[]): Promise<void> {
+  if (files.length >= FILE_MENTION_MAX_FILES) return;
+  let entries: Awaited<ReturnType<typeof readdir>>;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (files.length >= FILE_MENTION_MAX_FILES) return;
+    const fullPath = join(directory, entry.name);
+    const relativePath = relative(root, fullPath).replace(/\\/g, "/");
+    if (entry.isDirectory()) {
+      if (!isFileBrowserExcludedPath(relativePath)) await walkFileMentions(fullPath, root, files);
+    } else if (entry.isFile() && includeFileMention(relativePath)) {
+      files.push(relativePath);
+    }
+  }
+}
+
+function cachedFileMentions(root: string): Promise<string[]> {
+  const entry = fileMentionCache.get(root);
+  if (entry && Date.now() - entry.startedAt < FILE_MENTION_CACHE_TTL_MS) return entry.promise;
+  const promise = (async () => {
+    const files: string[] = [];
+    await walkFileMentions(root, root, files);
+    return files.sort((a, b) => a.localeCompare(b));
+  })();
+  fileMentionCache.set(root, { startedAt: Date.now(), promise });
+  return promise;
+}
+
+function scoreFileMention(path: string, query: string): number {
+  const normalizedQuery = query.replace(/^\.?\//, "").toLowerCase();
+  if (!normalizedQuery) return 0;
+  const normalizedPath = path.toLowerCase();
+  const filename = basename(normalizedPath);
+  if (normalizedPath === normalizedQuery) return 0;
+  if (filename === normalizedQuery) return 1;
+  if (normalizedPath.startsWith(normalizedQuery)) return 2;
+  if (filename.startsWith(normalizedQuery)) return 3;
+  if (normalizedPath.includes(normalizedQuery)) return 4;
+  return Number.POSITIVE_INFINITY;
+}
+
+/** Search only the workspace belonging to a current live pane; never expose arbitrary host paths. */
+export async function searchLiveWorkspaceFiles(paneId: string, query: string, panels: HerdrPanel[]): Promise<string[] | null> {
+  const pane = panels.find((candidate) => candidate.id === paneId);
+  if (!pane) return null;
+  const workspace = await liveWorkspaceDirectory(pane.cwd, panels, { exactRoot: true });
+  if (!workspace) return null;
+  const files = await cachedFileMentions(workspace.root);
+  return files
+    .map((path) => ({ path, score: scoreFileMention(path, query) }))
+    .filter((candidate) => Number.isFinite(candidate.score))
+    .sort((a, b) => a.score - b.score || a.path.localeCompare(b.path))
+    .slice(0, FILE_MENTION_MAX_RESULTS)
+    .map((candidate) => candidate.path);
 }
 
 function unavailableWorkspaceStatus(rootPath: string, error: string): WorkspaceStatus {
@@ -2220,6 +2343,25 @@ async function openGitChangesReview(request: IncomingMessage, response: ServerRe
   }
 }
 
+async function serveFileMentionSearch(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
+  if (!canWriteFeedback(request)) {
+    writeJson(response, 403, { error: "Searching workspace files requires a loopback browser or PLANNOTATOR_HERDR_WRITE_TOKEN." });
+    return;
+  }
+  const paneId = text(url.searchParams.get("paneId"));
+  const query = (url.searchParams.get("q") ?? "").trim();
+  if (!paneId) {
+    writeJson(response, 400, { error: "paneId is required" });
+    return;
+  }
+  const paths = await searchLiveWorkspaceFiles(paneId, query, await discoverPanels());
+  if (!paths) {
+    writeJson(response, 403, { error: "Pane is not a currently live Herdr Pi workspace" });
+    return;
+  }
+  writeJson(response, 200, { paths });
+}
+
 async function serveWorkspaceFiles(response: ServerResponse, url: URL): Promise<void> {
   const dirPath = text(url.searchParams.get("dirPath"));
   const requestedCompareMode = url.searchParams.get("compare");
@@ -2400,6 +2542,10 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
   }
   if (request.method === "GET" && url.pathname === "/api/reference/files") {
     void serveWorkspaceFiles(response, url).catch(() => writeJson(response, 500, { error: "Failed to list live Herdr workspace files" }));
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/api/file-search") {
+    void serveFileMentionSearch(request, response, url).catch(() => writeJson(response, 500, { error: "Failed to search live Herdr workspace files" }));
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/doc") {

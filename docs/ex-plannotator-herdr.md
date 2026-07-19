@@ -83,11 +83,13 @@ These user actions have distinct transports. Do not merge them or infer one from
 | Raw message while a pane is waiting | `POST /api/instruction` | Matching Pi extension claims it and calls `pi.sendUserMessage` | No, text only |
 | Explicit supported slash command | `POST /api/command` | `herdr pane run <paneId> /<command> [args]` | Not applicable |
 
-### Global Comment command autocomplete
+### Global Comment autocomplete
 
 For a live pane, typing `/` in Global Comment filters only commands published by the currently selected pane. Choosing a command makes the **Run `/command`** action explicit; the text after the command is passed as its arguments.
 
 A raw slash-prefixed comment remains a comment unless the reviewer selects an advertised command and chooses Run. This distinction matters because Pi's public `sendUserMessage` route does not dispatch slash commands or expand prompts/skills. The service validates the command against the current pane registration before using Herdr's interactive `pane run` path, where Pi performs its normal command dispatch.
+
+Typing `@` in a waiting pane's **Message Pi** composer searches source files only in that pane's live workspace. Choose a path, then type an optional line suffix directly: `@src/App.tsx:42` or `@src/App.tsx:42-60`. On submit, the host re-resolves every explicit mention inside the pane root and prefixes the delivered text with the canonical path and range. This is a file-reference aid, not a file-content attachment; Pi reads the file itself. The path index is in-memory, capped, and cached for 30 seconds — IndexedDB is not used.
 
 ### Image attachments
 

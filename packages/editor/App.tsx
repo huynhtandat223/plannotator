@@ -5033,6 +5033,16 @@ const App: React.FC = () => {
                     selectedAnnotationId={selectedAnnotationId}
                     isWaiting={sendsGlobalCommentAsUserMessage}
                     livePiCommands={liveMessageReview ? selectedLiveMessage?.commands ?? [] : []}
+                    onSearchFileMentions={liveMessageReview ? async (query) => {
+                      if (!selectedLiveMessage?.paneId) return [];
+                      const params = new URLSearchParams({ paneId: selectedLiveMessage.paneId, q: query });
+                      const response = await fetch(`/api/file-search?${params.toString()}`);
+                      if (!response.ok) return [];
+                      const body = await response.json().catch(() => ({})) as { paths?: unknown };
+                      return Array.isArray(body.paths)
+                        ? body.paths.filter((path): path is string => typeof path === 'string')
+                        : [];
+                    } : undefined}
                     onRunLivePiCommand={async (command, args) => {
                       if (!selectedLiveMessage?.paneId) throw new Error('Select a live Pi pane first.');
                       const response = await fetch('/api/command', {
