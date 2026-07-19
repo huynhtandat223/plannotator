@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { Readable } from "node:stream";
 import {
+  LiveSnapshotPublisher,
   commandArgv,
   commandDelivery,
   feedbackBatch,
@@ -8,11 +10,50 @@ import {
   panelsFromSnapshot,
   releasePanelSession,
   reviewSnapshotFromPanels,
+  readPanelSessionJson,
   managedScouts,
   panelSessions,
   type HerdrPanel,
   type PanelSessionEnrichment,
 } from "./server";
+
+describe("panel-session transport", () => {
+  test("accepts a structured assistant response beyond the generic 16 KiB action-body limit", async () => {
+    const body = JSON.stringify({
+      paneId: "w:p1",
+      sessionId: "session-1",
+      messages: [{ messageId: "assistant-1", text: "x".repeat(20_000) }],
+      commands: [],
+    });
+    const request = Readable.from([body]) as unknown as Parameters<typeof readPanelSessionJson>[0];
+
+    await expect(readPanelSessionJson(request)).resolves.toEqual(JSON.parse(body));
+  });
+});
+
+describe("LiveSnapshotPublisher", () => {
+  test("publishes a newer focused-pane snapshot immediately and does not republish unchanged state", async () => {
+    let current = { focusedPaneId: "w:p7", selectedMessageId: "w:p7:waiting" };
+    const publisher = new LiveSnapshotPublisher(async () => current);
+    const received: Array<{ revision: number; value: typeof current }> = [];
+
+    const first = await publisher.refresh();
+    const unsubscribe = publisher.subscribe((snapshot) => received.push(snapshot));
+    expect(first).toEqual({ revision: 1, value: { focusedPaneId: "w:p7", selectedMessageId: "w:p7:waiting" } });
+    expect(received).toEqual([first]);
+
+    const unchanged = await publisher.refresh();
+    expect(unchanged).toBe(first);
+    expect(received).toEqual([first]);
+
+    current = { focusedPaneId: "w:p1", selectedMessageId: "w:p1:response-1" };
+    const switched = await publisher.refresh();
+
+    expect(switched).toEqual({ revision: 2, value: { focusedPaneId: "w:p1", selectedMessageId: "w:p1:response-1" } });
+    expect(received).toEqual([first, switched]);
+    unsubscribe();
+  });
+});
 
 describe("feedbackBatch", () => {
   test("attributes global image attachments to the selected structured live response", () => {

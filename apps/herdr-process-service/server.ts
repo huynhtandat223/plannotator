@@ -19,12 +19,68 @@ const host = process.env.PLANNOTATOR_HERDR_HOST ?? "0.0.0.0";
 // loopback and Tailscale peers; Pi enrichment and feedback claiming remain
 // loopback-only because they carry the local Pi session identity.
 const browserWriteToken = process.env.PLANNOTATOR_HERDR_WRITE_TOKEN?.trim() || null;
+const MAX_ACTION_REQUEST_BODY_BYTES = 16_384;
+/** Up to five finalized assistant responses, delivered only from a local Pi pane. */
+export const MAX_PANEL_SESSION_BODY_BYTES = 1_000_000;
 export const HERDR_LIVE_MESSAGE_LIMIT = 5;
+export const HERDR_SNAPSHOT_POLL_MS = 750;
+
+export type PublishedLiveSnapshot<T> = {
+  revision: number;
+  value: T;
+};
+
+/**
+ * Owns one coherent live Herdr snapshot for every HTTP endpoint and SSE
+ * subscriber. A changed focus must be published once immediately, rather than
+ * allowing /api/plan and a per-client SSE poll to observe unrelated snapshots.
+ */
+export class LiveSnapshotPublisher<T> {
+  private current: PublishedLiveSnapshot<T> | null = null;
+  private refreshInFlight: Promise<PublishedLiveSnapshot<T>> | null = null;
+  private readonly subscribers = new Set<(snapshot: PublishedLiveSnapshot<T>) => void>();
+
+  constructor(private readonly read: () => Promise<T>) {}
+
+  async refresh(): Promise<PublishedLiveSnapshot<T>> {
+    // A slow older `herdr api snapshot` must not complete after a newer one
+    // and overwrite it. Coalescing keeps observation and publication ordered.
+    if (this.refreshInFlight) return this.refreshInFlight;
+    const refresh = (async () => {
+      const value = await this.read();
+      const serialized = JSON.stringify(value);
+      if (this.current && JSON.stringify(this.current.value) === serialized) return this.current;
+      const snapshot = { revision: (this.current?.revision ?? 0) + 1, value };
+      this.current = snapshot;
+      for (const subscriber of this.subscribers) subscriber(snapshot);
+      return snapshot;
+    })();
+    this.refreshInFlight = refresh;
+    try {
+      return await refresh;
+    } finally {
+      if (this.refreshInFlight === refresh) this.refreshInFlight = null;
+    }
+  }
+
+  async snapshot(): Promise<PublishedLiveSnapshot<T>> {
+    return this.current ?? this.refresh();
+  }
+
+  subscribe(subscriber: (snapshot: PublishedLiveSnapshot<T>) => void): () => void {
+    this.subscribers.add(subscriber);
+    if (this.current) subscriber(this.current);
+    return () => this.subscribers.delete(subscriber);
+  }
+}
+
 // The packaged Ex-Plannotator editor owns every visual decision, including its
 // responsive/mobile behavior. This service supplies data only.
 const editorHtml = readFileSync(join(import.meta.dir, "..", "ex-pi-extension", "ex-plannotator.html"), "utf8");
 
 type HerdrReviewSnapshot = {
+  /** Monotonic host snapshot version. The browser ignores stale SSE frames. */
+  revision?: number;
   messages: Array<{
     messageId: string;
     paneId: string;
@@ -363,11 +419,14 @@ function writeJson(response: ServerResponse, statusCode: number, body: unknown):
   response.end(JSON.stringify(body));
 }
 
-async function requestJson(request: IncomingMessage): Promise<Record<string, unknown> | null> {
+async function requestJson(
+  request: IncomingMessage,
+  maxBodyBytes = MAX_ACTION_REQUEST_BODY_BYTES,
+): Promise<Record<string, unknown> | null> {
   let body = "";
   for await (const chunk of request) {
     body += chunk;
-    if (body.length > 16_384) throw new Error("Request body is too large");
+    if (body.length > maxBodyBytes) throw new Error("Request body is too large");
   }
   try {
     const value: unknown = JSON.parse(body);
@@ -377,6 +436,11 @@ async function requestJson(request: IncomingMessage): Promise<Record<string, unk
   } catch {
     return null;
   }
+}
+
+/** Read the local Pi registration separately from smaller browser action bodies. */
+export function readPanelSessionJson(request: IncomingMessage): Promise<Record<string, unknown> | null> {
+  return requestJson(request, MAX_PANEL_SESSION_BODY_BYTES);
 }
 
 function annotationMessageId(annotation: unknown): string | null {
@@ -772,7 +836,7 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
     writeJson(response, 403, { error: "Pi session enrichment is loopback-only" });
     return;
   }
-  const body = await requestJson(request);
+  const body = await readPanelSessionJson(request);
   const paneId = text(body?.paneId);
   const sessionId = text(body?.sessionId);
   const messages = Array.isArray(body?.messages) ? body.messages : null;
@@ -818,6 +882,9 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
     return;
   }
   panelSessions.set(paneId, { paneId, sessionId, messages: normalizedMessages, commands: normalizedCommands });
+  // Publish the new structured response against the same host snapshot used by
+  // /api/plan and all connected browsers; do not wait for the next poll.
+  await refreshLiveState();
   const scout = [...managedScouts.values()].find((candidate) => candidate.paneId === paneId);
   if (scout?.status === "awaiting-registration" && scout.pending) {
     // Registration is the readiness gate: never send a prompt into an unbound
@@ -859,7 +926,7 @@ export function releasePanelSession(
   return true;
 }
 
-function deletePanelSession(request: IncomingMessage, response: ServerResponse, url: URL): void {
+async function deletePanelSession(request: IncomingMessage, response: ServerResponse, url: URL): Promise<void> {
   if (!isLoopback(request)) {
     writeJson(response, 403, { error: "Pi session enrichment is loopback-only" });
     return;
@@ -870,7 +937,8 @@ function deletePanelSession(request: IncomingMessage, response: ServerResponse, 
     writeJson(response, 400, { error: "paneId and sessionId are required" });
     return;
   }
-  releasePanelSession(panelSessions, paneId, sessionId);
+  const released = releasePanelSession(panelSessions, paneId, sessionId);
+  if (released) await refreshLiveState();
   writeJson(response, 200, { ok: true });
 }
 
@@ -964,6 +1032,7 @@ export function reviewSnapshotFromPanels(
     ? messages.find((message) => message.paneId === selected.id) ?? null
     : null;
   return {
+    revision: 0,
     messages,
     selectedMessageId: selectedMessage?.messageId ?? null,
     unreadMessageIds: [],
@@ -1081,7 +1150,9 @@ async function closeProcessPanel(request: IncomingMessage, response: ServerRespo
   writeJson(response, 200, { ok: true });
 }
 
-async function reviewSnapshot(): Promise<{ panels: HerdrPanel[]; snapshot: HerdrReviewSnapshot }> {
+type HerdrLiveState = { panels: HerdrPanel[]; snapshot: HerdrReviewSnapshot };
+
+async function readLiveState(): Promise<HerdrLiveState> {
   const panels = await discoverPanels();
   const livePaneIds = new Set(panels.map((panel) => panel.id));
   for (const paneId of panelSessions.keys()) {
@@ -1100,7 +1171,21 @@ async function reviewSnapshot(): Promise<{ panels: HerdrPanel[]; snapshot: Herdr
       pendingInstructionDeliveries.delete(deliveryId);
     }
   }
-  return { panels, snapshot: reviewSnapshotFromPanels(panels, null, panelSessions) }; 
+  return { panels, snapshot: reviewSnapshotFromPanels(panels, null, panelSessions) };
+}
+
+const liveSnapshotPublisher = new LiveSnapshotPublisher(readLiveState);
+
+async function refreshLiveState(): Promise<PublishedLiveSnapshot<HerdrLiveState>> {
+  return liveSnapshotPublisher.refresh();
+}
+
+async function reviewSnapshot(): Promise<HerdrLiveState> {
+  return (await refreshLiveState()).value;
+}
+
+async function currentLiveState(): Promise<PublishedLiveSnapshot<HerdrLiveState>> {
+  return liveSnapshotPublisher.snapshot();
 }
 
 const FILE_BROWSER_EXTENSIONS = /\.(mdx?|txt|html?)$/i;
@@ -1342,12 +1427,13 @@ async function serveWorkspaceDocument(response: ServerResponse, url: URL): Promi
 }
 
 async function servePlan(response: ServerResponse): Promise<void> {
-  const { panels, snapshot } = await reviewSnapshot();
+  const { revision, value: { panels, snapshot } } = await refreshLiveState();
   const selected = panels.find((panel) => panel.focused) ?? panels[0] ?? null;
   writeJson(response, 200, {
     // The existing Ex-Plannotator rich editor receives the live state through
     // its documented live-review seam. On phones its built-in picker opens the
     // mobile Messages sheet; desktop keeps the existing left sidebar.
+    revision,
     mode: "annotate-last",
     // Match /ex-plannotator-last: the root document is the selected pane's
     // latest structured assistant response, never the workspace overview.
@@ -1462,7 +1548,9 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/session") {
-    void reviewSnapshot().then(({ snapshot }) => writeJson(response, 200, snapshot)).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
+    void refreshLiveState()
+      .then(({ revision, value: { snapshot } }) => writeJson(response, 200, { ...snapshot, revision }))
+      .catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/session/events") {
@@ -1471,10 +1559,18 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
       "cache-control": "no-store",
       connection: "keep-alive",
     });
-    const publish = () => void reviewSnapshot().then(({ snapshot }) => response.write(`data: ${JSON.stringify(snapshot)}\n\n`)).catch(() => {});
-    publish();
-    const interval = setInterval(publish, 5_000);
-    request.once("close", () => clearInterval(interval));
+    let closed = false;
+    const publish = ({ revision, value: { snapshot } }: PublishedLiveSnapshot<HerdrLiveState>) => {
+      if (!closed) response.write(`data: ${JSON.stringify({ ...snapshot, revision })}\n\n`);
+    };
+    const unsubscribe = liveSnapshotPublisher.subscribe(publish);
+    // Refresh once after subscribing: a focus change between the initial
+    // snapshot and EventSource connection is emitted to this browser directly.
+    void refreshLiveState().catch(() => {});
+    request.once("close", () => {
+      closed = true;
+      unsubscribe();
+    });
     return;
   }
   if (request.method === "GET" && url.pathname === "/") {
@@ -1525,7 +1621,7 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
     return;
   }
   if (request.method === "DELETE" && url.pathname === "/api/panel-session") {
-    deletePanelSession(request, response, url);
+    void deletePanelSession(request, response, url).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
     return;
   }
   if (request.method === "PUT" && url.pathname === "/api/session/drafts") {
@@ -1550,7 +1646,13 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
 }
 
 if (import.meta.main) {
-  createServer(serve).listen(port, host, () => {
+  // Herdr's focus and pane status are the host's live selection authority.
+  // One shared refresh loop publishes transitions to every connected browser.
+  void refreshLiveState().catch(() => {});
+  const refreshTimer = setInterval(() => void refreshLiveState().catch(() => {}), HERDR_SNAPSHOT_POLL_MS);
+  const server = createServer(serve);
+  server.on("close", () => clearInterval(refreshTimer));
+  server.listen(port, host, () => {
     console.log(`Plannotator Herdr service listening on http://${host}:${port}`);
   });
 }

@@ -171,6 +171,8 @@ type MessageAnnotationState = {
 type LiveReviewRoundStatus = 'open' | 'submitting' | 'delivery_failed' | 'waiting' | 'agent_stopped';
 
 type LiveMessageReviewSnapshot = {
+  /** Host-owned monotonic version; prevents late SSE frames restoring stale focus. */
+  revision?: number;
   messages: PickerMessage[];
   selectedMessageId: string | null;
   reviewRoundStatus: LiveReviewRoundStatus;
@@ -392,6 +394,7 @@ const App: React.FC = () => {
   // previous setRecentMessages. Keep the last accepted snapshot synchronous so
   // a single pane session transition cannot discard drafts or toast repeatedly.
   const liveSnapshotMessagesRef = useRef<PickerMessage[]>([]);
+  const liveSnapshotRevisionRef = useRef<number | null>(null);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   // This capability is only emitted by Ex-Plannotator. Official annotate-last
   // sessions keep their terminal submit behavior and never open this adapter.
@@ -1165,6 +1168,13 @@ const App: React.FC = () => {
   // annotate-last state flow. Existing message states stay keyed by messageId,
   // so newly-arrived messages never discard drafts for older messages.
   const applyLiveReviewSnapshot = React.useCallback((snapshot: LiveMessageReviewSnapshot) => {
+    // Herdr's snapshots are complete and versioned. A late transport frame
+    // must never revert the pane that a newer focus update already selected.
+    if (typeof snapshot.revision === 'number') {
+      const acceptedRevision = liveSnapshotRevisionRef.current;
+      if (acceptedRevision !== null && snapshot.revision <= acceptedRevision) return;
+      liveSnapshotRevisionRef.current = snapshot.revision;
+    }
     const previousMessages = liveSnapshotMessagesRef.current.length > 0
       ? liveSnapshotMessagesRef.current
       : recentMessages;
@@ -2515,6 +2525,7 @@ const App: React.FC = () => {
           messageStateCacheRef.current = new Map();
           setCachedMessageAnnotationCounts(new Map());
           liveSnapshotMessagesRef.current = data.recentMessages;
+          liveSnapshotRevisionRef.current = typeof data.revision === 'number' ? data.revision : null;
           setRecentMessages(data.recentMessages);
           // Live Ex sessions provide their canonical selection in /api/plan.
           // This makes the first SSE snapshot after an automatic reload a
@@ -2531,6 +2542,7 @@ const App: React.FC = () => {
           messageStateCacheRef.current = new Map();
           setCachedMessageAnnotationCounts(new Map());
           liveSnapshotMessagesRef.current = [];
+          liveSnapshotRevisionRef.current = null;
           setRecentMessages([]);
           setSelectedMessageId(null);
         }

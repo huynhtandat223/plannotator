@@ -114,6 +114,22 @@ describe('live message session scope', () => {
     expect(result.nextSelectedMessageId).toBe('w:p2:response-1');
   });
 
+  test('follows the focus transition from a waiting pane to a structured response in another pane before user selection', () => {
+    const previous = [message('w:p7:waiting', 'w:p7', 'session-7')];
+    const next = [
+      message('w:p1:response-1', 'w:p1', 'session-1', 'response-1'),
+      message('w:p7:waiting', 'w:p7', 'session-7'),
+    ];
+
+    expect(reconcileLiveMessageSelection(
+      previous,
+      next,
+      'w:p7:waiting',
+      'w:p1:response-1',
+      null,
+    )).toEqual({ nextSelectedMessageId: 'w:p1:response-1', followNextPaneResponseReset: false });
+  });
+
   test('keeps an explicitly selected source when Herdr focus changes', () => {
     const previous = [message('w:p1:response-1', 'w:p1', 'session-1', 'response-1')];
     const next = [
