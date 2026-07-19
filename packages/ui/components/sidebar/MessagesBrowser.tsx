@@ -30,6 +30,10 @@ export interface PickerMessage {
   agentStatus?: 'working' | 'idle' | 'blocked' | 'unknown';
   /** Optional host-provided workspace root for the pane containing this response. */
   cwd?: string;
+  /** Optional host-provided workspace identity for exact matching. */
+  workspaceId?: string;
+  /** Canonical live workspace identity supplied by the Herdr host. */
+  workspaceKey?: string;
   /** Slash commands explicitly advertised by this live pane's current Pi session. */
   commands?: Array<{ name: string; description?: string; source: 'extension' | 'prompt' | 'skill' }>;
 }

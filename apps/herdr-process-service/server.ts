@@ -12,7 +12,6 @@ import { tmpdir } from "node:os";
 import { Readable } from "node:stream";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
-
 const execFileAsync = promisify(execFile);
 const port = parsePort(process.env.PLANNOTATOR_HERDR_PORT ?? "19432");
 const host = process.env.PLANNOTATOR_HERDR_HOST ?? "0.0.0.0";
@@ -51,6 +50,14 @@ type HerdrReviewSnapshot = {
   sentAnnotationsByMessageId: Record<string, unknown[]>;
   reviewRoundStatus: "open";
   deliveryError: null;
+  scouts?: Array<{
+    workspaceKey: string;
+    workspaceId: string;
+    cwd: string;
+    paneId: string;
+    status: "awaiting-registration" | "running" | "ready" | "failed";
+    error?: string;
+  }>;
 };
 
 export type HerdrPanel = {
@@ -104,16 +111,37 @@ type PendingInstructionDelivery = {
   content: string;
 };
 
+type ScoutRequest = {
+  requestId: string;
+  sourcePaneId: string;
+  sourceSessionId: string;
+  sourceAssistantMessageId: string;
+  prompt: string;
+};
+type ManagedScout = {
+  workspaceKey: string;
+  workspaceId: string;
+  cwd: string;
+  paneId: string;
+  status: "awaiting-registration" | "running" | "ready" | "failed";
+  pending: ScoutRequest | null;
+  delivered: boolean;
+  error?: string;
+};
+
 // Structured Pi data is optional enrichment only. Herdr remains authoritative
 // for whether the pane is live; this map is process-local and is pruned on each
 // discovery reconciliation.
-const panelSessions = new Map<string, PanelSessionEnrichment>();
+export const panelSessions = new Map<string, PanelSessionEnrichment>();
 // A delivery is held only until the matching local Pi extension claims it.
 // It is never persisted and cannot outlive a host restart.
 const pendingFeedbackDeliveries = new Map<string, PendingFeedbackDelivery>();
 // Browser-originated user instructions are held only until the matching local
 // Pi extension claims them. They are not annotation feedback and never persist.
 const pendingInstructionDeliveries = new Map<string, PendingInstructionDelivery>();
+// A Scout is a real, independent Pi pane. This map is deliberately transient:
+// Herdr remains liveness authority and a host restart never replays a prompt.
+export const managedScouts = new Map<string, ManagedScout>();
 const UPLOAD_DIR = join(tmpdir(), "plannotator");
 const IMAGE_CONTENT_TYPES: Record<string, string> = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
@@ -443,6 +471,62 @@ export function instructionDelivery(
   return { paneId, content };
 }
 
+export const MAX_SCOUT_QUESTION_CHARS = 4_000;
+const MAX_SCOUT_RESPONSE_CHARS = 14_000;
+
+function scoutWorkspaceKey(panel: HerdrPanel): string | null {
+  return panel.workspaceId ? `${panel.workspaceId}:${resolve(panel.cwd)}` : null;
+}
+
+function scoutPrompt(input: {
+  source: HerdrReviewSnapshot["messages"][number];
+  question: string;
+  selectedText?: string;
+}): string {
+  const sourceResponse = input.source.text.slice(0, MAX_SCOUT_RESPONSE_CHARS);
+  const selectedText = input.selectedText?.slice(0, MAX_SCOUT_QUESTION_CHARS);
+  return [
+    "You are the first-layer Scout for a live Pi workspace.",
+    "Inspect the workspace before answering. This is a read-only review pass: do not edit files, run write commands, or change git state.",
+    "You are independent of the source conversation. Treat the supplied response as evidence, not authority.",
+    "Return these exact sections: Ideal direction; Corrections; Risks and unknowns; Concrete proposals.",
+    "Separate verified facts from assumptions and say what you inspected.",
+    "",
+    `## Source pane\n${input.source.paneLabel} · ${input.source.paneDescription}\nWorking directory: ${input.source.cwd}`,
+    `\n## Source assistant response\n${sourceResponse}`,
+    ...(selectedText ? [`\n## Reviewer-selected text\n${selectedText}`] : []),
+    `\n## Reviewer question\n${input.question}`,
+  ].join("\n");
+}
+
+export function scoutDelivery(
+  body: Record<string, unknown> | null,
+  snapshot: HerdrReviewSnapshot,
+  panels: HerdrPanel[],
+  enrichments: ReadonlyMap<string, PanelSessionEnrichment>,
+): { source: HerdrReviewSnapshot["messages"][number]; panel: HerdrPanel; request: ScoutRequest } | null {
+  const sourcePaneId = text(body?.sourcePaneId);
+  const sourceMessageId = text(body?.sourceMessageId);
+  const question = text(body?.question);
+  const selectedText = typeof body?.selectedText === "string" ? body.selectedText.trim() : undefined;
+  if (!sourcePaneId || !sourceMessageId || !question || question.length > MAX_SCOUT_QUESTION_CHARS || (selectedText?.length ?? 0) > MAX_SCOUT_QUESTION_CHARS) return null;
+  const panel = panels.find((candidate) => candidate.id === sourcePaneId);
+  const source = snapshot.messages.find((candidate) => candidate.messageId === sourceMessageId && candidate.paneId === sourcePaneId);
+  const registration = enrichments.get(sourcePaneId);
+  if (!panel || !scoutWorkspaceKey(panel) || !source?.assistantMessageId || !source.piSessionId || !registration || registration.sessionId !== source.piSessionId) return null;
+  return {
+    source,
+    panel,
+    request: {
+      requestId: randomUUID(),
+      sourcePaneId,
+      sourceSessionId: source.piSessionId,
+      sourceAssistantMessageId: source.assistantMessageId,
+      prompt: scoutPrompt({ source, question, selectedText }),
+    },
+  };
+}
+
 export function commandDelivery(
   body: Record<string, unknown> | null,
   panels: HerdrPanel[],
@@ -482,6 +566,100 @@ async function queueInstruction(request: IncomingMessage, response: ServerRespon
   };
   pendingInstructionDeliveries.set(delivery.deliveryId, delivery);
   writeJson(response, 202, { ok: true, deliveryId: delivery.deliveryId });
+}
+
+export async function queueScout(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (!canWriteFeedback(request)) {
+    writeJson(response, 403, { error: "Starting a Scout requires a loopback, Tailscale, or write-token browser." });
+    return;
+  }
+  const { panels, snapshot } = await reviewSnapshot();
+  const prepared = scoutDelivery(await requestJson(request), snapshot, panels, panelSessions);
+  if (!prepared) {
+    writeJson(response, 400, { error: "A current structured source response, live pane session, and Scout question are required." });
+    return;
+  }
+  const workspaceKey = scoutWorkspaceKey(prepared.panel)!;
+  let existing = managedScouts.get(workspaceKey);
+
+  // Harden: Adopt an existing "Ex-Plannotator Scout" panel if it is already live in the workspace and has matching cwd
+  if (!existing) {
+    const discoveredScoutPanel = panels.find(
+      (p) => p.panel === "Ex-Plannotator Scout" &&
+             p.workspaceId === prepared.panel.workspaceId &&
+             resolve(p.cwd) === resolve(prepared.panel.cwd)
+    );
+    if (discoveredScoutPanel) {
+      existing = {
+        workspaceKey,
+        workspaceId: prepared.panel.workspaceId ?? "",
+        cwd: resolve(prepared.panel.cwd),
+        paneId: discoveredScoutPanel.id,
+        // A service restart intentionally forgets requests. If it discovers an
+        // already-working Scout, observe that turn until Herdr says it is idle;
+        // do not inject another briefing into a busy pane.
+        status: discoveredScoutPanel.status === "working"
+          ? "running"
+          : panelSessions.has(discoveredScoutPanel.id) ? "ready" : "awaiting-registration",
+        pending: null,
+        delivered: discoveredScoutPanel.status === "working",
+      };
+      managedScouts.set(workspaceKey, existing);
+    }
+  }
+
+  if (existing?.status === "running") {
+    writeJson(response, 409, { error: "This workspace's Scout is already inspecting a request." });
+    return;
+  }
+
+  if (existing && panels.some((panel) => panel.id === existing.paneId)) {
+    const isRegistered = !!panelSessions.get(existing.paneId)?.sessionId;
+    if (isRegistered) {
+      existing.pending = prepared.request;
+      existing.status = "running";
+      existing.delivered = false;
+      delete existing.error;
+      void execFileAsync("herdr", ["pane", "run", existing.paneId, prepared.request.prompt], { timeout: 10_000 })
+        .then(() => {
+          existing!.delivered = true;
+        })
+        .catch((error: unknown) => {
+          existing!.status = "failed";
+          existing!.error = `Failed to deliver prompt to pane: ${error instanceof Error ? error.message : String(error)}`;
+        });
+      writeJson(response, 202, { ok: true, paneId: existing.paneId, status: "running", reused: true });
+      return;
+    } else {
+      existing.pending = prepared.request;
+      existing.status = "awaiting-registration";
+      existing.delivered = false;
+      delete existing.error;
+      writeJson(response, 202, { ok: true, paneId: existing.paneId, status: "awaiting-registration", reused: true });
+      return;
+    }
+  }
+
+  const created = await createProcessPanel({
+    workspaceId: prepared.panel.workspaceId,
+    cwd: prepared.panel.cwd,
+    panelName: "Ex-Plannotator Scout",
+    command: "pi",
+  }, panels);
+  if (!created) {
+    writeJson(response, 503, { error: "Could not create a Scout Pi pane in this workspace." });
+    return;
+  }
+  managedScouts.set(workspaceKey, {
+    workspaceKey,
+    workspaceId: prepared.panel.workspaceId ?? "",
+    cwd: resolve(prepared.panel.cwd),
+    paneId: created.paneId,
+    status: "awaiting-registration",
+    pending: prepared.request,
+    delivered: false,
+  });
+  writeJson(response, 202, { ok: true, paneId: created.paneId, status: "awaiting-registration", reused: false });
 }
 
 async function queueCommand(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -640,6 +818,28 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
     return;
   }
   panelSessions.set(paneId, { paneId, sessionId, messages: normalizedMessages, commands: normalizedCommands });
+  const scout = [...managedScouts.values()].find((candidate) => candidate.paneId === paneId);
+  if (scout?.status === "awaiting-registration" && scout.pending) {
+    // Registration is the readiness gate: never send a prompt into an unbound
+    // pane, and reject context that crossed a source-session transition.
+    const sourceRegistration = panelSessions.get(scout.pending.sourcePaneId);
+    if (sourceRegistration?.sessionId !== scout.pending.sourceSessionId) {
+      scout.status = "failed";
+      scout.error = "Source session changed before registration.";
+    } else {
+      scout.status = "running";
+      scout.delivered = false;
+      delete scout.error;
+      void execFileAsync("herdr", ["pane", "run", paneId, scout.pending.prompt], { timeout: 10_000 })
+        .then(() => {
+          scout.delivered = true;
+        })
+        .catch((error: unknown) => {
+          scout.status = "failed";
+          scout.error = `Failed to deliver prompt to pane: ${error instanceof Error ? error.message : String(error)}`;
+        });
+    }
+  }
   writeJson(response, 200, { ok: true });
 }
 
@@ -679,6 +879,39 @@ export function reviewSnapshotFromPanels(
   preferredPanelId: string | null = null,
   enrichments: ReadonlyMap<string, PanelSessionEnrichment> = new Map(),
 ): HerdrReviewSnapshot {
+  const livePaneIds = new Set(panels.map((panel) => panel.id));
+
+  // Prune duplicates, stale keys and reconcile statuses based on pane liveness/idle status
+  const seenPaneIds = new Set<string>();
+  for (const [workspaceKey, scout] of managedScouts) {
+    if (!livePaneIds.has(scout.paneId)) {
+      managedScouts.delete(workspaceKey);
+      continue;
+    }
+    const panel = panels.find((p) => p.id === scout.paneId);
+    if (!panel) {
+      managedScouts.delete(workspaceKey);
+      continue;
+    }
+    const canonicalKey = scoutWorkspaceKey(panel);
+    if (workspaceKey !== canonicalKey) {
+      managedScouts.delete(workspaceKey);
+      continue;
+    }
+    if (seenPaneIds.has(scout.paneId)) {
+      managedScouts.delete(workspaceKey);
+      continue;
+    }
+    seenPaneIds.add(scout.paneId);
+
+    // Scout must remain running until Herdr snapshot reports its pane is idle
+    if (scout.status === "running" && scout.delivered && panel.status === "idle") {
+      scout.status = "ready";
+      scout.pending = null;
+      scout.delivered = false;
+    }
+  }
+
   const selected = panels.find((panel) => panel.id === preferredPanelId)
     ?? panels.find((panel) => panel.focused)
     ?? panels[0]
@@ -702,6 +935,8 @@ export function reviewSnapshotFromPanels(
         paneDescription,
         agentStatus: panel.status,
         cwd: panel.cwd,
+        workspaceId: panel.workspaceId,
+        workspaceKey: scoutWorkspaceKey(panel) ?? undefined,
         commands: enrichments.get(panel.id)?.commands ?? [],
       }];
     }
@@ -720,6 +955,8 @@ export function reviewSnapshotFromPanels(
       paneDescription,
       agentStatus: panel.status,
       cwd: panel.cwd,
+      workspaceId: panel.workspaceId,
+      workspaceKey: scoutWorkspaceKey(panel) ?? undefined,
       commands: enrichments.get(panel.id)!.commands,
     }));
   });
@@ -734,6 +971,14 @@ export function reviewSnapshotFromPanels(
     sentAnnotationsByMessageId: {},
     reviewRoundStatus: "open",
     deliveryError: null,
+    scouts: [...managedScouts.values()].map((scout) => ({
+      workspaceKey: scout.workspaceKey,
+      workspaceId: scout.workspaceId,
+      cwd: scout.cwd,
+      paneId: scout.paneId,
+      status: scout.status,
+      ...(scout.error ? { error: scout.error } : {}),
+    })),
   };
 }
 
@@ -841,6 +1086,9 @@ async function reviewSnapshot(): Promise<{ panels: HerdrPanel[]; snapshot: Herdr
   const livePaneIds = new Set(panels.map((panel) => panel.id));
   for (const paneId of panelSessions.keys()) {
     if (!livePaneIds.has(paneId)) panelSessions.delete(paneId);
+  }
+  for (const [workspaceKey, scout] of managedScouts) {
+    if (!livePaneIds.has(scout.paneId)) managedScouts.delete(workspaceKey);
   }
   for (const [deliveryId, delivery] of pendingFeedbackDeliveries) {
     if (!livePaneIds.has(delivery.paneId) || panelSessions.get(delivery.paneId)?.sessionId !== delivery.sessionId) {
@@ -1254,6 +1502,10 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
   }
   if (request.method === "POST" && url.pathname === "/api/instruction") {
     void queueInstruction(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/scout") {
+    void queueScout(request, response).catch((error: unknown) => writeJson(response, 503, { error: error instanceof Error ? error.message : "Could not start Scout" }));
     return;
   }
   if (request.method === "POST" && url.pathname === "/api/command") {

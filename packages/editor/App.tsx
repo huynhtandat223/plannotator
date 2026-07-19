@@ -77,6 +77,7 @@ import { generateId } from '@plannotator/ui/utils/generateId';
 import { SidebarTabs } from '@plannotator/ui/components/sidebar/SidebarTabs';
 import { SidebarContainer } from '@plannotator/ui/components/sidebar/SidebarContainer';
 import { PlanReviewSourcesBrowser, planFileSnapshotKey, type PlanReviewSnapshot, type PlanReviewSelection } from './components/PlanReviewSourcesBrowser';
+import { ScoutDock } from './components/ScoutDock';
 import type { ArchivedPlan } from '@plannotator/ui/components/sidebar/ArchiveBrowser';
 import type { PickerMessage } from '@plannotator/ui/components/sidebar/MessagesBrowser';
 import { PlanDiffViewer } from '@plannotator/ui/components/plan-diff/PlanDiffViewer';
@@ -174,6 +175,14 @@ type LiveMessageReviewSnapshot = {
   selectedMessageId: string | null;
   reviewRoundStatus: LiveReviewRoundStatus;
   deliveryError: string | null;
+  scouts?: Array<{
+    workspaceKey: string;
+    workspaceId: string;
+    cwd: string;
+    paneId: string;
+    status: 'awaiting-registration' | 'running' | 'ready' | 'failed';
+    error?: string;
+  }>;
 };
 
 type PlanReviewCapability = {
@@ -387,6 +396,12 @@ const App: React.FC = () => {
   // This capability is only emitted by Ex-Plannotator. Official annotate-last
   // sessions keep their terminal submit behavior and never open this adapter.
   const [liveMessageReview, setLiveMessageReview] = useState(false);
+  const [isScoutDockOpen, setIsScoutDockOpen] = useState(false);
+  const [scouts, setScouts] = useState<LiveMessageReviewSnapshot['scouts']>([]);
+  // False until a reviewer deliberately picks a response. Until then, the
+  // server-selected Herdr pane is authoritative, including focus changes that
+  // happen between /api/plan and the first SSE snapshot.
+  const [liveMessageSelectionPinned, setLiveMessageSelectionPinned] = useState(false);
   const [liveMessageReviewReloadOnSelection, setLiveMessageReviewReloadOnSelection] = useState(true);
   const [liveMessageReviewReadOnly, setLiveMessageReviewReadOnly] = useState(false);
   // Opt-in only: Plan Review is served by Ex-Plannotator's mixed-source session.
@@ -1134,6 +1149,7 @@ const App: React.FC = () => {
     );
 
     setSelectedMessageId(messageId);
+    if (liveMessageReview) setLiveMessageSelectionPinned(true);
     linkedDocHook.restoreSession(targetState.linkedDocSession);
     setCodeAnnotations([...targetState.codeAnnotations]);
     setSelectedCodeAnnotationId(targetState.selectedCodeAnnotationId);
@@ -1160,7 +1176,8 @@ const App: React.FC = () => {
       snapshot.messages,
       selectedMessageId,
       snapshot.selectedMessageId,
-      followNextPaneResponse
+      followNextPaneResponse,
+      liveMessageSelectionPinned,
     );
     if (changedPaneIds.size > 0) {
       messageStateCacheRef.current = discardMessageStatesForChangedPanes(
@@ -1180,6 +1197,9 @@ const App: React.FC = () => {
     liveSnapshotMessagesRef.current = snapshot.messages;
     setLiveReviewRoundStatus(snapshot.reviewRoundStatus);
     setLiveReviewDeliveryError(snapshot.deliveryError);
+    if (snapshot.scouts !== undefined) {
+      setScouts(snapshot.scouts);
+    }
     setRecentMessages(snapshot.messages);
     const selectedWorkspaceMessage = snapshot.messages.find((message) => message.messageId === nextSelectedMessageId);
     if (selectedWorkspaceMessage?.cwd) setProjectRoot(selectedWorkspaceMessage.cwd);
@@ -1208,7 +1228,7 @@ const App: React.FC = () => {
       toast('Agent response received', { description: 'Reloading the latest review state.' });
       window.location.reload();
     }
-  }, [selectedMessageId, recentMessages, followNextPaneResponse, saveCurrentMessageState, linkedDocHook.restoreSession, liveMessageReviewReloadOnSelection]);
+  }, [selectedMessageId, recentMessages, followNextPaneResponse, liveMessageSelectionPinned, saveCurrentMessageState, linkedDocHook.restoreSession, liveMessageReviewReloadOnSelection]);
 
   const handleLiveReviewAction = React.useCallback(async (
     path: '/api/session/feedback/retry' | '/api/session/resume' | '/api/session/cancel-waiting',
@@ -2474,8 +2494,12 @@ const App: React.FC = () => {
         }
         setIsApiMode(true);
         setLiveMessageReview(data.liveMessageReview === true);
+        setLiveMessageSelectionPinned(false);
         setLiveMessageReviewReloadOnSelection(data.liveMessageReviewReloadOnSelection !== false);
         setLiveMessageReviewReadOnly(data.liveMessageReviewReadOnly === true);
+        if (data.scouts !== undefined) {
+          setScouts(data.scouts);
+        }
         setPlanReview(data.planReview ?? null);
         if (data.mode === 'annotate' || data.mode === 'annotate-last' || data.mode === 'annotate-folder') {
           setAnnotateMode(true);
@@ -4445,7 +4469,27 @@ const App: React.FC = () => {
               <><span className="font-medium">Agent stopped while feedback is pending.</span>{error && <span>{error}</span>}</>
             ) : status === 'delivery_failed' ? (
               <><span className="font-medium">Feedback delivery failed.</span><span>{error || 'The agent did not receive the feedback.'}</span></>
-            ) : <span className="font-medium text-foreground">{liveWorkspaceMode ? 'Live Pi responses are read-only.' : `Ready to review ${planReview ? 'responses and Plan Files.' : 'live agent responses.'}`}</span>}
+            ) : (
+              <span className="font-medium text-foreground flex items-center gap-2">
+                {liveWorkspaceMode ? (
+                  <>
+                    <span>Live Pi responses are read-only.</span>
+                    <button
+                      type="button"
+                      onClick={() => setIsScoutDockOpen(true)}
+                      className="inline-flex items-center gap-1.5 rounded border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs font-semibold text-foreground hover:bg-primary/20 transition-all shadow-sm active:scale-95 cursor-pointer"
+                    >
+                      <svg className="w-3.5 h-3.5 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                      </svg>
+                      Launch Scout
+                    </button>
+                  </>
+                ) : (
+                  `Ready to review ${planReview ? 'responses and Plan Files.' : 'live agent responses.'}`
+                )}
+              </span>
+            )}
             {agentStatusLabel && <span className={`ml-auto inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${agentStatus === 'working' ? 'border-primary/30 bg-primary/10 text-foreground' : agentStatus === 'blocked' ? 'border-warning/30 bg-warning/10 text-warning-foreground' : 'border-border bg-muted/40 text-muted-foreground'}`}><span aria-hidden="true">●</span>{agentStatusLabel}</span>}
             {(status === 'waiting' || status === 'agent_stopped' || status === 'delivery_failed') && (
               <div className="ml-auto flex items-center gap-2 shrink-0">
@@ -4978,7 +5022,22 @@ const App: React.FC = () => {
               ancestor (`contents` = no layout box). */}
           <div className="contents group/sidebar">
           {/* Resize Handle */}
-          {!liveWorkspaceMode && isPanelOpen && wideModeType === null && !goalSetupMode && (rightSidebarTab === 'annotations' || canUseAskAI) && <ResizeHandle {...panelResize.handleProps} className="hidden md:block z-[55]" side="right" hideHoverTrack tooltip={RESIZE_HANDLE_TOOLTIP} onCollapse={() => setIsPanelOpen(false)} />}
+          {((!liveWorkspaceMode && isPanelOpen && wideModeType === null && !goalSetupMode && (rightSidebarTab === 'annotations' || canUseAskAI)) || (liveWorkspaceMode && isScoutDockOpen)) && (
+            <ResizeHandle
+              {...panelResize.handleProps}
+              className="hidden md:block z-[55]"
+              side="right"
+              hideHoverTrack
+              tooltip={RESIZE_HANDLE_TOOLTIP}
+              onCollapse={() => {
+                if (liveWorkspaceMode) {
+                  setIsScoutDockOpen(false);
+                } else {
+                  setIsPanelOpen(false);
+                }
+              }}
+            />
+          )}
 
           {/* Annotation Panel */}
           <AnnotationPanel
@@ -5012,6 +5071,21 @@ const App: React.FC = () => {
             isAnnotationReadOnly={planReview ? (annotation) => planReviewSentAnnotationIds.has(annotation.id) : undefined}
             onOtherFileAnnotationsClick={handleFlashAnnotatedFiles}
           />
+
+          {/* Scout Dock Panel */}
+          {liveWorkspaceMode && (
+            <ScoutDock
+              isOpen={isScoutDockOpen}
+              onClose={() => setIsScoutDockOpen(false)}
+              width={`var(--rpanel-w, ${panelResize.width}px)`}
+              selectedMessage={recentMessages.find((m) => m.messageId === selectedMessageId) || null}
+              currentScout={(() => {
+                const sel = recentMessages.find((m) => m.messageId === selectedMessageId);
+                if (!sel?.workspaceKey) return null;
+                return scouts?.find((scout) => scout.workspaceKey === sel.workspaceKey) || null;
+              })()}
+            />
+          )}
           {isPanelOpen && rightSidebarTab === 'ai' && wideModeType === null && !goalSetupMode && canUseAskAI && (
             <aside
               data-annotation-panel="true"
