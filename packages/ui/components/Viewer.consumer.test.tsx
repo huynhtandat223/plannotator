@@ -96,6 +96,18 @@ describe('Viewer consumer props', () => {
     expect(document.querySelector('button[title="Attachments"]')).toBeNull();
     expect(document.body.textContent).toContain('hello world');
   });
+
+  test.skipIf(!hasDom)('waiting message panes hide image attachments because instructions are text-only', async () => {
+    await mount(
+      <Viewer
+        {...viewerProps}
+        isWaiting
+        onAddGlobalAttachment={() => {}}
+        onRemoveGlobalAttachment={() => {}}
+      />,
+    );
+    expect(document.querySelector('button[title="Attachments"]')).toBeNull();
+  });
 });
 
 describe('CommentPopover allowImages', () => {
@@ -145,6 +157,65 @@ describe('CommentPopover allowImages', () => {
       );
     });
     expect(submitted).toEqual([{ text: 'a comment', images: undefined }]);
+  });
+
+  test.skipIf(!hasDom)('offers and explicitly runs a selected live Pi command without submitting it as a comment', async () => {
+    const submitted: Array<unknown> = [];
+    const runCalls: Array<unknown> = [];
+    await mount(
+      <CommentPopover
+        {...popoverProps}
+        anchorEl={makeAnchor()}
+        livePiCommands={[{ name: 'handoff', description: 'Create a handoff', source: 'extension' }]}
+        onSubmit={(text, images) => submitted.push({ text, images })}
+        onRunLivePiCommand={async (command, args) => { runCalls.push({ command, args }); }}
+      />,
+    );
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      const proto = Object.getPrototypeOf(textarea);
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      setter?.call(textarea, '/han');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const suggestion = Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.includes('/handoff'));
+    expect(suggestion).toBeDefined();
+    await act(async () => { suggestion?.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    await act(async () => {
+      const proto = Object.getPrototypeOf(textarea);
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      setter?.call(textarea, '/handoff summary');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const runButton = Array.from(document.querySelectorAll('button')).find((button) => button.title === 'Run /handoff in Pi');
+    expect(runButton).toBeDefined();
+    await act(async () => { runButton?.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(runCalls).toEqual([{ command: 'handoff', args: 'summary' }]);
+    expect(submitted).toEqual([]);
+  });
+
+  test.skipIf(!hasDom)('keeps typed slash text as a normal comment until a command is selected', async () => {
+    const submitted: Array<unknown> = [];
+    await mount(
+      <CommentPopover
+        {...popoverProps}
+        anchorEl={makeAnchor()}
+        livePiCommands={[{ name: 'handoff', source: 'extension' }]}
+        onRunLivePiCommand={async () => { throw new Error('must not run'); }}
+        onSubmit={(text, images) => submitted.push({ text, images })}
+      />,
+    );
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      const proto = Object.getPrototypeOf(textarea);
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      setter?.call(textarea, '/not-a-command');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true }));
+    });
+    expect(submitted).toEqual([{ text: '/not-a-command', images: undefined }]);
   });
 });
 

@@ -25,6 +25,7 @@ function fakePi() {
 			sendUserMessage(content: string) {
 				sentUserMessages.push(content);
 			},
+			getCommands() { return []; },
 			on(name: string, handler: (...args: never[]) => unknown) {
 				events.push(name);
 				handlers.set(name, handler);

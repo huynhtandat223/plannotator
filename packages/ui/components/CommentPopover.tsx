@@ -19,6 +19,13 @@ export type CommentAskAIHandler = (
   context: CommentAskAIContext,
 ) => boolean | void | Promise<boolean | void>;
 
+/** A slash command explicitly advertised by a live Pi pane. */
+export interface LivePiCommand {
+  name: string;
+  description?: string;
+  source: 'extension' | 'prompt' | 'skill';
+}
+
 interface CommentPopoverProps {
   /** Element to anchor the popover near (re-reads position on scroll) */
   anchorEl?: HTMLElement;
@@ -46,6 +53,13 @@ interface CommentPopoverProps {
   onAskAI?: CommentAskAIHandler;
   askAIContext?: CommentAskAIContext;
   askAIDisabled?: boolean;
+  /**
+   * Opt-in autocomplete for an existing global-comment flow. Raw text remains
+   * a comment unless the reviewer explicitly chooses a listed command and
+   * uses its separate Run action.
+   */
+  livePiCommands?: LivePiCommand[];
+  onRunLivePiCommand?: (command: string, args: string) => Promise<void>;
 }
 
 const MAX_POPOVER_WIDTH = 384;
@@ -96,11 +110,16 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   onAskAI,
   askAIContext,
   askAIDisabled = false,
+  livePiCommands = [],
+  onRunLivePiCommand,
 }) => {
   const [mode, setMode] = useState<'popover' | 'dialog'>('popover');
   const initialDraft = draftKey ? draftStore.get(draftKey) : undefined;
   const [text, setText] = useState(initialDraft?.text ?? initialText);
   const [images, setImages] = useState<ImageAttachment[]>(allowImages ? initialDraft?.images ?? [] : []);
+  const [selectedLivePiCommand, setSelectedLivePiCommand] = useState<LivePiCommand | null>(null);
+  const [isRunningLivePiCommand, setIsRunningLivePiCommand] = useState(false);
+  const [livePiCommandError, setLivePiCommandError] = useState<string | null>(null);
   const [position, setPosition] = useState<{ top: number; left: number; flipAbove: boolean; width: number } | null>(null);
   // Direction of an open popover that has scrolled out of view, or null when on-screen.
   const [offscreen, setOffscreen] = useState<'above' | 'below' | null>(null);
@@ -108,6 +127,19 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   const popoverRef = useRef<HTMLDivElement>(null);
   const hasUnsavedContent = hasUnsavedCommentContent(text, allowImages ? images : []);
   const hasUnsavedContentRef = useRef(hasUnsavedContent);
+  const commandQuery = text.match(/^\/([^\s]*)/)?.[1]?.toLowerCase() ?? '';
+  const matchingLivePiCommands = isGlobal && onRunLivePiCommand && text.startsWith('/')
+    ? livePiCommands.filter((command) =>
+        command.name.toLowerCase().includes(commandQuery) ||
+        command.description?.toLowerCase().includes(commandQuery),
+      ).slice(0, 6)
+    : [];
+  const selectedCommandPrefix = selectedLivePiCommand ? `/${selectedLivePiCommand.name}` : '';
+  const selectedCommandIsCurrent = !!selectedLivePiCommand &&
+    (text === selectedCommandPrefix || text.startsWith(`${selectedCommandPrefix} `));
+  const selectedCommandArgs = selectedCommandIsCurrent
+    ? text.slice(selectedCommandPrefix.length).trim()
+    : '';
   hasUnsavedContentRef.current = hasUnsavedContent;
   const { dragPosition, dragHandleProps, wasDragged, reset: resetDrag } = useDraggable(popoverRef);
 
@@ -115,6 +147,8 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     const nextDraft = draftKey ? draftStore.get(draftKey) : undefined;
     setText(nextDraft?.text ?? initialText);
     setImages(allowImages ? nextDraft?.images ?? [] : []);
+    setSelectedLivePiCommand(null);
+    setLivePiCommandError(null);
   }, [draftKey, initialText, allowImages]);
 
   useCommentDraftSync(draftKey, text, allowImages ? images : []);
@@ -209,6 +243,37 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     }
   }, [text, images, onSubmit, draftKey, allowImages, allowEmptySubmit, initialText, hasUnsavedContent]);
 
+  const handleTextChange = useCallback((nextText: string) => {
+    setText(nextText);
+    setLivePiCommandError(null);
+    if (selectedLivePiCommand && nextText !== `/${selectedLivePiCommand.name}` && !nextText.startsWith(`/${selectedLivePiCommand.name} `)) {
+      setSelectedLivePiCommand(null);
+    }
+  }, [selectedLivePiCommand]);
+
+  const handleSelectLivePiCommand = useCallback((command: LivePiCommand) => {
+    setText(`/${command.name} `);
+    setSelectedLivePiCommand(command);
+    setLivePiCommandError(null);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, []);
+
+  const handleRunLivePiCommand = useCallback(async () => {
+    if (!selectedLivePiCommand || !onRunLivePiCommand) return;
+    setLivePiCommandError(null);
+    setIsRunningLivePiCommand(true);
+    try {
+      await onRunLivePiCommand(selectedLivePiCommand.name, selectedCommandArgs);
+      if (draftKey) draftStore.delete(draftKey);
+      onDraftChange?.('', allowImages ? [] : undefined);
+      onClose();
+    } catch (error) {
+      setLivePiCommandError(error instanceof Error ? error.message : 'Could not run Pi command');
+    } finally {
+      setIsRunningLivePiCommand(false);
+    }
+  }, [allowImages, draftKey, onClose, onDraftChange, onRunLivePiCommand, selectedCommandArgs, selectedLivePiCommand]);
+
   const handleAskAI = useCallback(async () => {
     const question = text.trim();
     if (!question || !onAskAI) {
@@ -261,6 +326,40 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     hasUnsavedContent ||
     (allowEmptySubmit && initialText.trim().length > 0);
   const canAskAI = !!onAskAI && !askAIDisabled && text.trim().length > 0;
+  const canRunLivePiCommand = selectedCommandIsCurrent && !!onRunLivePiCommand && !isRunningLivePiCommand;
+
+  const commandAutocomplete = matchingLivePiCommands.length > 0 && (
+    <div className="mt-2 overflow-hidden rounded-md border border-border bg-muted/30" role="listbox" aria-label="Pi commands">
+      {matchingLivePiCommands.map((command) => (
+        <button
+          key={command.name}
+          type="button"
+          role="option"
+          aria-selected={selectedLivePiCommand?.name === command.name}
+          onClick={() => handleSelectLivePiCommand(command)}
+          className="flex w-full flex-col gap-0.5 border-b border-border px-2.5 py-2 text-left last:border-b-0 hover:bg-muted"
+        >
+          <code className="text-xs font-semibold text-foreground">/{command.name}</code>
+          {command.description && <span className="text-[11px] text-muted-foreground">{command.description}</span>}
+        </button>
+      ))}
+    </div>
+  );
+
+  const livePiCommandAction = selectedLivePiCommand && (
+    <>
+      <button
+        type="button"
+        onClick={() => void handleRunLivePiCommand()}
+        disabled={!canRunLivePiCommand}
+        className="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium rounded-md text-primary hover:bg-primary/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        title={`Run /${selectedLivePiCommand.name} in Pi`}
+      >
+        {isRunningLivePiCommand ? 'Running…' : `Run /${selectedLivePiCommand.name}`}
+      </button>
+      {livePiCommandError && <span role="alert" className="text-xs text-destructive">{livePiCommandError}</span>}
+    </>
+  );
 
   if (mode === 'dialog') {
     return createPortal(
@@ -312,12 +411,13 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
             <textarea
               ref={focusOnMountRef}
               value={text}
-              onChange={(e) => setText(e.target.value)}
+              onChange={(e) => handleTextChange(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={isGlobal ? 'Add a global comment...' : 'Add a comment...'}
               className="w-full bg-transparent text-sm placeholder:text-muted-foreground resize-none focus:outline-none min-h-48 max-h-96 px-1 py-0.5"
               style={{ fieldSizing: 'content' } as React.CSSProperties}
             />
+            {commandAutocomplete}
           </div>
 
           {/* Footer */}
@@ -333,6 +433,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
               )}
             </div>
             <div className="flex items-center gap-3">
+              {livePiCommandAction}
               {onAskAI && (
                 <button
                   onClick={handleAskAI}
@@ -434,12 +535,13 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
         <textarea
           ref={focusOnMountRef}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={(e) => handleTextChange(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={isGlobal ? 'Add a global comment...' : 'Add a comment...'}
           className="w-full bg-transparent text-sm placeholder:text-muted-foreground resize-none focus:outline-none max-h-64 min-h-[4.5rem] px-1 py-0.5"
           style={{ fieldSizing: 'content' } as React.CSSProperties}
         />
+        {commandAutocomplete}
       </div>
 
       {/* Footer */}
@@ -455,6 +557,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
           )}
         </div>
         <div className="flex items-center gap-3">
+          {livePiCommandAction}
           {onAskAI && (
             <button
               onClick={handleAskAI}

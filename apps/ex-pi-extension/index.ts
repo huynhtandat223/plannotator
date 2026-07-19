@@ -15,7 +15,7 @@ type ExPlannotatorDependencies = {
 		ctx: ExtensionContext,
 		messages: ReturnType<typeof getRecentAssistantMessages>,
 	) => Promise<LiveMessageReviewServer>;
-	reportHerdr: (ctx: ExtensionContext) => Promise<void>;
+	reportHerdr: (ctx: ExtensionContext, commands?: ReturnType<ExtensionAPI["getCommands"]>) => Promise<void>;
 	releaseHerdr: (ctx: ExtensionContext) => Promise<void>;
 	pollHerdrFeedback: (ctx: ExtensionContext, sendUserMessage: (content: string, options: { deliverAs: "followUp" }) => void) => Promise<void>;
 	pollHerdrInstruction: (ctx: ExtensionContext, sendUserMessage: (content: string, options: { deliverAs: "followUp" }) => void) => Promise<void>;
@@ -31,7 +31,7 @@ export default function exPlannotator(
 ): void {
 	const dependencies: ExPlannotatorDependencies = {
 		startBrowser: startLiveMessageReviewBrowser,
-		reportHerdr: reportHerdrSession,
+		reportHerdr: (ctx, commands) => reportHerdrSession(ctx, undefined, undefined, commands),
 		releaseHerdr: releaseHerdrSession,
 		pollHerdrFeedback,
 		pollHerdrInstruction,
@@ -52,7 +52,7 @@ export default function exPlannotator(
 	function startHerdrFeedbackPoll(ctx: ExtensionContext): void {
 		stopHerdrFeedbackPoll();
 		const poll = () => {
-			void dependencies.reportHerdr(ctx);
+			void dependencies.reportHerdr(ctx, pi.getCommands());
 			void dependencies.pollHerdrInstruction(ctx, pi.sendUserMessage.bind(pi));
 			void dependencies.pollHerdrFeedback(ctx, pi.sendUserMessage.bind(pi));
 		};
@@ -120,7 +120,7 @@ export default function exPlannotator(
 
 	pi.on("session_start", async (_event, ctx) => {
 		currentPiSessionId = ctx.sessionManager.getSessionId();
-		await dependencies.reportHerdr(ctx);
+		await dependencies.reportHerdr(ctx, pi.getCommands());
 		startHerdrFeedbackPoll(ctx);
 	});
 
@@ -130,7 +130,7 @@ export default function exPlannotator(
 		cancelPendingReconciliation();
 		pendingReconciliation = setTimeout(() => {
 			pendingReconciliation = null;
-			void dependencies.reportHerdr(ctx);
+			void dependencies.reportHerdr(ctx, pi.getCommands());
 			if (!session || activeServer !== session) return;
 			const activeBranchMessages = getActiveBranchAssistantMessages(ctx);
 			session.reconcile(
@@ -144,17 +144,17 @@ export default function exPlannotator(
 	// each lifecycle event so its in-memory enrichment returns without requiring
 	// the user to restart the active Pi pane.
 	pi.on("agent_start", (_event, ctx) => {
-		void dependencies.reportHerdr(ctx);
+		void dependencies.reportHerdr(ctx, pi.getCommands());
 		activeServer?.markAgentStarted?.();
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
-		void dependencies.reportHerdr(ctx);
+		void dependencies.reportHerdr(ctx, pi.getCommands());
 		activeServer?.markAgentStopped?.();
 	});
 
 	pi.on("session_tree", (_event, ctx) => {
-		void dependencies.reportHerdr(ctx);
+		void dependencies.reportHerdr(ctx, pi.getCommands());
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {

@@ -30,6 +30,8 @@ export interface PickerMessage {
   agentStatus?: 'working' | 'idle' | 'blocked' | 'unknown';
   /** Optional host-provided workspace root for the pane containing this response. */
   cwd?: string;
+  /** Slash commands explicitly advertised by this live pane's current Pi session. */
+  commands?: Array<{ name: string; description?: string; source: 'extension' | 'prompt' | 'skill' }>;
 }
 
 interface MessagesBrowserProps {

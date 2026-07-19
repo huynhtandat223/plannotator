@@ -15,19 +15,40 @@ function loopbackServiceUrl(env: NodeJS.ProcessEnv): string {
 	return url.origin;
 }
 
+export type HerdrCommandCapability = {
+	name: string;
+	description?: string;
+	source: "extension" | "prompt" | "skill";
+};
+
 export type HerdrSessionRegistration = {
 	paneId: string;
 	sessionId: string;
 	messages: ReturnType<typeof getActiveBranchAssistantMessages>;
+	commands: HerdrCommandCapability[];
 };
 
 type HerdrFeedbackDelivery = { deliveryId: string; batch: LiveFeedbackBatch };
 type HerdrInstructionDelivery = { deliveryId: string; content: string };
 type SendPiUserMessage = (content: string, options: { deliverAs: "followUp" }) => void;
 
+function herdrCommandCapabilities(commands: HerdrCommandCapability[]): HerdrCommandCapability[] {
+	const seen = new Set<string>();
+	return commands.flatMap((command) => {
+		if (!command.name || seen.has(command.name)) return [];
+		seen.add(command.name);
+		return [{
+			name: command.name,
+			...(command.description ? { description: command.description } : {}),
+			source: command.source,
+		}];
+	});
+}
+
 export function currentHerdrRegistration(
 	ctx: Pick<ExtensionContext, "sessionManager">,
 	env: NodeJS.ProcessEnv = process.env,
+	commands: HerdrCommandCapability[] = [],
 ): HerdrSessionRegistration | null {
 	const paneId = env.HERDR_PANE_ID?.trim();
 	if (env.HERDR_ENV !== "1" || !paneId) return null;
@@ -37,6 +58,7 @@ export function currentHerdrRegistration(
 		// Newest first, matching /ex-plannotator-last for the first entry while
 		// retaining a small structured history for the live workspace viewer.
 		messages: getActiveBranchAssistantMessages(ctx as ExtensionContext).slice(0, HERDR_LIVE_MESSAGE_LIMIT),
+		commands: herdrCommandCapabilities(commands),
 	};
 }
 
@@ -44,8 +66,9 @@ export async function reportHerdrSession(
 	ctx: Pick<ExtensionContext, "sessionManager">,
 	fetcher: typeof fetch = fetch,
 	env: NodeJS.ProcessEnv = process.env,
+	commands: HerdrCommandCapability[] = [],
 ): Promise<void> {
-	const registration = currentHerdrRegistration(ctx, env);
+	const registration = currentHerdrRegistration(ctx, env, commands);
 	if (!registration) return;
 	try {
 		await fetcher(`${loopbackServiceUrl(env)}/api/panel-session`, {

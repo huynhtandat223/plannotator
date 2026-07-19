@@ -119,6 +119,10 @@ interface ViewerProps {
    *  comment, attachments, checkbox toggles). Existing annotations still
    *  render and remain selectable. Default false — today's behavior. */
   readOnly?: boolean;
+  isWaiting?: boolean;
+  /** Optional live Pi commands shown as explicit autocomplete in global comments. */
+  livePiCommands?: Array<{ name: string; description?: string; source: 'extension' | 'prompt' | 'skill' }>;
+  onRunLivePiCommand?: (command: string, args: string) => Promise<void>;
 }
 
 export interface ViewerHandle {
@@ -200,6 +204,9 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   onAskAI,
   allowImages = true,
   readOnly = false,
+  isWaiting = false,
+  livePiCommands = [],
+  onRunLivePiCommand,
 }, ref) => {
   const [copied, setCopied] = useState(false);
   const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
@@ -292,7 +299,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     onSelectAnnotation,
     selectedAnnotationId,
     mode,
-    enabled: !readOnly,
+    enabled: !readOnly && !isWaiting,
   });
 
   // Refs for code block annotation path
@@ -622,7 +629,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
           )}
 
           {/* Attachments button */}
-          {!readOnly && onAddGlobalAttachment && onRemoveGlobalAttachment && (
+          {!readOnly && !isWaiting && onAddGlobalAttachment && onRemoveGlobalAttachment && (
             <AttachmentsButton
               images={globalAttachments}
               onAdd={onAddGlobalAttachment}
@@ -643,14 +650,23 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 isGlobal: true,
               });
             }}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted rounded-md transition-colors"
-            title="Add global comment"
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors ${
+              isWaiting
+                ? 'bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm cursor-pointer'
+                : 'text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted cursor-pointer'
+            }`}
+            title={isWaiting ? 'Message Pi' : 'Add global comment'}
+            aria-label={isWaiting ? 'Message Pi' : 'Add global comment'}
           >
             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
             </svg>
-            {actionsLabelMode === 'full' && <span>Global comment</span>}
-            {actionsLabelMode === 'short' && <span>Comment</span>}
+            {!isWaiting && (
+              <>
+                {actionsLabelMode === 'full' && <span>Global comment</span>}
+                {actionsLabelMode === 'short' && <span>Comment</span>}
+              </>
+            )}
           </button>
           )}
 
@@ -906,6 +922,8 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             onSubmit={handleViewerCommentSubmit}
             onClose={handleViewerCommentClose}
             allowImages={allowImages}
+            livePiCommands={viewerCommentPopover.isGlobal ? livePiCommands : []}
+            onRunLivePiCommand={viewerCommentPopover.isGlobal ? onRunLivePiCommand : undefined}
             onAskAI={onAskAI}
             askAIContext={{
               kind: viewerCommentPopover.isGlobal ? 'general' : 'selection',
@@ -944,6 +962,29 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               window.getSelection()?.removeAllRanges();
             }}
           />
+        )}
+        {isWaiting && (
+          <div className="mt-8 p-6 rounded-lg border border-primary/20 bg-primary/5 text-center flex flex-col items-center justify-center gap-3">
+            <p className="text-sm font-medium text-foreground">
+              Waiting for the Pi session to publish its latest assistant response.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setViewerCommentPopover({
+                  anchorEl: globalCommentButtonRef.current!,
+                  contextText: '',
+                  isGlobal: true,
+                });
+              }}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-primary-foreground bg-primary hover:bg-primary/95 active:bg-primary/90 rounded-md transition-colors shadow-md cursor-pointer"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+              </svg>
+              Message Pi
+            </button>
+          </div>
         )}
       </article>
 

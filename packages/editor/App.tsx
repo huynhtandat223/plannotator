@@ -150,7 +150,7 @@ import { fetchSourceDocumentSnapshot, probeSourceSave } from './sourceDocumentCl
 import { reconcileSourceDocuments, type SourceDocumentReconcileEvent } from './sourceDocumentReconciliation';
 import { dirnameBrowserPath, normalizeBrowserPath, pathIsInsideDir } from './sourceDocumentPaths';
 import { pickRestoredSingleFileDraftToDisplay } from './draftRestoreSelection';
-import { changedLivePaneSessionIds, discardMessageStatesForChangedPanes } from './liveMessageScope';
+import { changedLivePaneSessionIds, discardMessageStatesForChangedPanes, reconcileLiveMessageSelection } from './liveMessageScope';
 
 type NoteAutoSaveResults = {
   obsidian?: boolean;
@@ -379,6 +379,10 @@ const App: React.FC = () => {
   const [gate, setGate] = useState(false);
   const [annotateSource, setAnnotateSource] = useState<'file' | 'message' | 'folder' | null>(null);
   const [recentMessages, setRecentMessages] = useState<PickerMessage[]>([]);
+  // SSE can deliver identical complete snapshots before React commits the
+  // previous setRecentMessages. Keep the last accepted snapshot synchronous so
+  // a single pane session transition cannot discard drafts or toast repeatedly.
+  const liveSnapshotMessagesRef = useRef<PickerMessage[]>([]);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   // This capability is only emitted by Ex-Plannotator. Official annotate-last
   // sessions keep their terminal submit behavior and never open this adapter.
@@ -1075,6 +1079,19 @@ const App: React.FC = () => {
     Boolean(selectedLiveMessage?.paneId) &&
     !selectedLiveMessage?.assistantMessageId;
 
+  const clearSelectedLiveFeedback = React.useCallback(() => {
+    if (!selectedMessageId) return;
+    const nextStates = new Map(messageStateCacheRef.current);
+    nextStates.delete(selectedMessageId);
+    messageStateCacheRef.current = nextStates;
+    setCachedMessageAnnotationCounts(buildMessageAnnotationCounts(nextStates));
+    setAnnotations([]);
+    setCodeAnnotations([]);
+    setGlobalAttachments([]);
+    setSelectedAnnotationId(null);
+    setSelectedCodeAnnotationId(null);
+  }, [selectedMessageId]);
+
   const selectedLiveMessageAnnotationCount = React.useMemo(() => {
     if (!selectedMessageId) return 0;
     const current = buildCurrentMessageState();
@@ -1132,34 +1149,23 @@ const App: React.FC = () => {
   // annotate-last state flow. Existing message states stay keyed by messageId,
   // so newly-arrived messages never discard drafts for older messages.
   const applyLiveReviewSnapshot = React.useCallback((snapshot: LiveMessageReviewSnapshot) => {
-    // Live-workspace selection is local to this browser. Keep the response the
-    // reader chose while it remains in the pane's last-N window. If it rolls
-    // out, stay in that pane and show its newest response; only a closed pane
-    // falls back to the host's focused-pane newest response.
-    const selectedPaneId = recentMessages.find((message) => message.messageId === selectedMessageId)?.paneId;
-    const changedPaneIds = changedLivePaneSessionIds(recentMessages, snapshot.messages);
+    const previousMessages = liveSnapshotMessagesRef.current.length > 0
+      ? liveSnapshotMessagesRef.current
+      : recentMessages;
+    const selectedPaneId = previousMessages.find((message) => message.messageId === selectedMessageId)?.paneId;
+    const changedPaneIds = changedLivePaneSessionIds(previousMessages, snapshot.messages);
     const selectedPaneSessionChanged = changedPaneIds.has(selectedPaneId ?? '');
-    const followedPaneLatest = followNextPaneResponse
-      ? snapshot.messages.find((message) => message.paneId === followNextPaneResponse.paneId)
-      : null;
-    const receivedFollowedResponse = followedPaneLatest !== null &&
-      followedPaneLatest.messageId !== followNextPaneResponse?.latestMessageId;
-    const nextSelectedMessageId = receivedFollowedResponse
-      ? followedPaneLatest.messageId
-      : selectedPaneSessionChanged
-        ? snapshot.messages.find((message) => message.paneId === selectedPaneId)?.messageId ?? null
-        : snapshot.messages.some((message) => message.messageId === selectedMessageId)
-          ? selectedMessageId
-          : snapshot.messages.find((message) => message.paneId === selectedPaneId)?.messageId
-            ?? (snapshot.selectedMessageId !== null && snapshot.messages.some(
-              (message) => message.messageId === snapshot.selectedMessageId,
-            )
-              ? snapshot.selectedMessageId
-              : null);
+    const { nextSelectedMessageId, followNextPaneResponseReset } = reconcileLiveMessageSelection(
+      previousMessages,
+      snapshot.messages,
+      selectedMessageId,
+      snapshot.selectedMessageId,
+      followNextPaneResponse
+    );
     if (changedPaneIds.size > 0) {
       messageStateCacheRef.current = discardMessageStatesForChangedPanes(
         messageStateCacheRef.current,
-        recentMessages,
+        previousMessages,
         changedPaneIds,
       );
       setCachedMessageAnnotationCounts(buildMessageAnnotationCounts(messageStateCacheRef.current));
@@ -1168,12 +1174,16 @@ const App: React.FC = () => {
       });
     }
 
+    // Advance before scheduling React state. EventSource messages are allowed
+    // to arrive back-to-back, and each must compare with this accepted snapshot
+    // rather than the stale render closure above.
+    liveSnapshotMessagesRef.current = snapshot.messages;
     setLiveReviewRoundStatus(snapshot.reviewRoundStatus);
     setLiveReviewDeliveryError(snapshot.deliveryError);
     setRecentMessages(snapshot.messages);
     const selectedWorkspaceMessage = snapshot.messages.find((message) => message.messageId === nextSelectedMessageId);
     if (selectedWorkspaceMessage?.cwd) setProjectRoot(selectedWorkspaceMessage.cwd);
-    if (receivedFollowedResponse) {
+    if (followNextPaneResponseReset) {
       setFollowNextPaneResponse(null);
       toast('Agent response received', { description: 'Showing the latest response.' });
     }
@@ -2480,6 +2490,7 @@ const App: React.FC = () => {
         if (data.mode === 'annotate-last' && data.recentMessages && data.recentMessages.length > 0) {
           messageStateCacheRef.current = new Map();
           setCachedMessageAnnotationCounts(new Map());
+          liveSnapshotMessagesRef.current = data.recentMessages;
           setRecentMessages(data.recentMessages);
           // Live Ex sessions provide their canonical selection in /api/plan.
           // This makes the first SSE snapshot after an automatic reload a
@@ -2495,6 +2506,7 @@ const App: React.FC = () => {
         } else {
           messageStateCacheRef.current = new Map();
           setCachedMessageAnnotationCounts(new Map());
+          liveSnapshotMessagesRef.current = [];
           setRecentMessages([]);
           setSelectedMessageId(null);
         }
@@ -3130,6 +3142,9 @@ const App: React.FC = () => {
           feedback,
           annotations: liveAnnotations,
           codeAnnotations,
+          // The Herdr host validates and delivers these uploaded references
+          // with the selected live assistant response's feedback batch.
+          globalAttachments,
           ...(scopedSelectedMessageId ? { selectedMessageId: scopedSelectedMessageId } : {}),
           ...(messageMultiSelectMode && annotatedMessageIds.length > 1 ? { feedbackScope: 'messages' } : {}),
         }),
@@ -3146,7 +3161,9 @@ const App: React.FC = () => {
         if (selectedPaneId && latestPaneMessage) {
           setFollowNextPaneResponse({ paneId: selectedPaneId, latestMessageId: latestPaneMessage.messageId });
         }
+        clearSelectedLiveFeedback();
         dismissDraft();
+        toast('Feedback sent', { description: 'The selected response is clear for the next review.' });
         setIsSubmitting(false);
         return;
       }
@@ -4857,6 +4874,21 @@ const App: React.FC = () => {
                     onAddAnnotation={handleAddAnnotation}
                     onSelectAnnotation={handleSelectAnnotation}
                     selectedAnnotationId={selectedAnnotationId}
+                    isWaiting={sendsGlobalCommentAsUserMessage}
+                    livePiCommands={liveMessageReview ? selectedLiveMessage?.commands ?? [] : []}
+                    onRunLivePiCommand={async (command, args) => {
+                      if (!selectedLiveMessage?.paneId) throw new Error('Select a live Pi pane first.');
+                      const response = await fetch('/api/command', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ paneId: selectedLiveMessage.paneId, command, args }),
+                      });
+                      if (!response.ok) {
+                        const body = await response.json().catch(() => ({})) as { error?: string };
+                        throw new Error(body.error || 'Failed to run Pi command');
+                      }
+                      toast(`Running /${command}`, { description: 'Pi will handle the command in the selected pane.' });
+                    }}
                     mode={editorMode}
                     inputMethod={inputMethod}
                     taterMode={taterMode}
@@ -4893,7 +4925,9 @@ const App: React.FC = () => {
                     codePathBaseDir={activeDocBaseDir}
                     copyLabel={planReview ? (planReview.snapshot.selected?.kind === 'file' ? 'Copy file' : 'Copy response') : annotateSource === 'message' ? 'Copy message' : annotateSource === 'file' || annotateSource === 'folder' ? 'Copy file' : undefined}
                     readOnly={planReviewReadOnly || liveWorkspaceMode}
-                    allowImages={!planReview}
+                    // Browser instructions are text-only, but live feedback
+                    // batches include uploaded image references.
+                    allowImages={!planReview && !sendsGlobalCommentAsUserMessage}
                     archiveInfo={archive.currentInfo}
                     sourceInfo={sourceInfo}
                     openInAppPath={annotateMode ? (linkedDocHook.isActive ? (linkedDocHook.filepath ?? null) : sourceFilePath) : null}

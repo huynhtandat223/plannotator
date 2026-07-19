@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   commandArgv,
+  commandDelivery,
   feedbackBatch,
   instructionDelivery,
   panelsFromSnapshot,
@@ -11,6 +12,37 @@ import {
 } from "./server";
 
 describe("feedbackBatch", () => {
+  test("attributes global image attachments to the selected structured live response", () => {
+    const messages = [{
+      messageId: "w:p1:pi-message-1",
+      paneId: "w:p1",
+      assistantMessageId: "pi-message-1",
+      text: "Structured response",
+      label: "Response 1 · latest",
+      description: "Structured Pi assistant response",
+      paneLabel: "one",
+      paneDescription: "Pane p1",
+      agentStatus: "working" as const,
+      cwd: "/one",
+    }];
+
+    expect(feedbackBatch({
+      annotations: [],
+      codeAnnotations: [],
+      selectedMessageId: "w:p1:pi-message-1",
+      globalAttachments: [{ path: "/tmp/plannotator/reference.png", name: "reference" }],
+    }, messages)).toEqual({
+      paneId: "w:p1",
+      batch: expect.objectContaining({
+        messages: [expect.objectContaining({
+          messageId: "pi-message-1",
+          annotations: [],
+          globalAttachments: [{ path: "/tmp/plannotator/reference.png", name: "reference" }],
+        })],
+      }),
+    });
+  });
+
   test("attributes code-only feedback to the selected structured live response", () => {
     const messages = [{
       messageId: "w:p1:pi-message-1",
@@ -52,6 +84,38 @@ describe("commandArgv", () => {
     expect(commandArgv("   ")).toBeNull();
     expect(commandArgv("pi \\")).toBeNull();
     expect(commandArgv("pi 'unterminated")).toBeNull();
+  });
+});
+
+describe("commandDelivery", () => {
+  const panel: HerdrPanel = { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "idle", focused: true };
+  const registrations = new Map<string, PanelSessionEnrichment>([
+    ["w:p1", {
+      paneId: "w:p1",
+      sessionId: "session-1",
+      messages: [],
+      commands: [{ name: "handoff-to-continue", description: "Write a handoff", source: "extension" }],
+    }],
+  ]);
+
+  test("accepts an explicitly supported command for the current live pane session", () => {
+    expect(commandDelivery({ paneId: "w:p1", command: "handoff-to-continue", args: "preserve this task" }, [panel], registrations)).toEqual({
+      paneId: "w:p1",
+      command: "handoff-to-continue",
+      args: "preserve this task",
+    });
+  });
+
+  test("rejects a raw slash-prefixed message and commands absent from this pane session", () => {
+    expect(commandDelivery({ paneId: "w:p1", command: "/handoff-to-continue" }, [panel], registrations)).toBeNull();
+    expect(commandDelivery({ paneId: "w:p1", command: "continue-handoff" }, [panel], registrations)).toBeNull();
+    expect(commandDelivery({ paneId: "w:p2", command: "handoff-to-continue" }, [panel], registrations)).toBeNull();
+  });
+
+  test("drops the capability when the pane session is replaced", () => {
+    const replaced = new Map(registrations);
+    replaced.set("w:p1", { paneId: "w:p1", sessionId: "session-2", messages: [], commands: [] });
+    expect(commandDelivery({ paneId: "w:p1", command: "handoff-to-continue" }, [panel], replaced)).toBeNull();
   });
 });
 
@@ -134,11 +198,11 @@ describe("panelsFromSnapshot", () => {
       { id: "w:p2", workspace: "two", tab: "", panel: "Pane p2", cwd: "/two", status: "idle", focused: false },
     ];
     const enrichments = new Map<string, PanelSessionEnrichment>([
-      ["w:p1", { paneId: "w:p1", sessionId: "session-1", messages: [
+      ["w:p1", { paneId: "w:p1", sessionId: "session-1", commands: [], messages: [
         { messageId: "pi-message-1", text: "Newest response", timestamp: "2026-07-18T00:00:00.000Z" },
         { messageId: "pi-message-0", text: "Older response" },
       ] }],
-      ["w:p2", { paneId: "w:p2", sessionId: "session-2", messages: [{ messageId: "pi-message-2", text: "Second pane response" }] }],
+      ["w:p2", { paneId: "w:p2", sessionId: "session-2", commands: [], messages: [{ messageId: "pi-message-2", text: "Second pane response" }] }],
     ]);
 
     const snapshot = reviewSnapshotFromPanels(panels, "w:p2", enrichments);
@@ -178,7 +242,7 @@ describe("panelsFromSnapshot", () => {
       { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
     ];
     const enrichments = new Map<string, PanelSessionEnrichment>([
-      ["w:p1", { paneId: "w:p1", sessionId: "session", messages: [
+      ["w:p1", { paneId: "w:p1", sessionId: "session", commands: [], messages: [
         { messageId: "newest", text: "Newest" },
         { messageId: "older", text: "Older" },
       ] }],
@@ -195,6 +259,18 @@ describe("panelsFromSnapshot", () => {
     const snapshot = reviewSnapshotFromPanels(panels);
     expect(snapshot.selectedMessageId).toBe("w:p1:waiting");
     expect(snapshot.messages[0].text).toContain("Waiting for the Pi session");
+    expect(snapshot.messages[0].text).not.toContain("**Status:**");
+  });
+
+  test("escapes the waiting document working directory while preserving its copyable value", () => {
+    const cwd = '/work/\"><img src=x onerror=alert(1)>';
+    const snapshot = reviewSnapshotFromPanels([
+      { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd, status: "working", focused: true },
+    ]);
+
+    expect(snapshot.messages[0].text).toContain('title="Working directory — select to copy: /work/&quot;&gt;&lt;img src=x onerror=alert(1)&gt;"');
+    expect(snapshot.messages[0].text).toContain('/work/&quot;&gt;&lt;img src=x onerror=alert(1)&gt;</div>');
+    expect(snapshot.messages[0].text).not.toContain('<img src=x');
   });
 
   test("keeps a live user pane selection across assistant message changes", () => {
@@ -203,7 +279,7 @@ describe("panelsFromSnapshot", () => {
       { id: "w:p2", workspace: "two", tab: "", panel: "Pane p2", cwd: "/two", status: "idle", focused: false },
     ];
     const enrichments = new Map<string, PanelSessionEnrichment>([
-      ["w:p2", { paneId: "w:p2", sessionId: "session-2", messages: [{ messageId: "new-message", text: "New response" }] }],
+      ["w:p2", { paneId: "w:p2", sessionId: "session-2", commands: [], messages: [{ messageId: "new-message", text: "New response" }] }],
     ]);
 
     expect(reviewSnapshotFromPanels(panels, "w:p2", enrichments).selectedMessageId).toBe("w:p2:new-message");
@@ -219,7 +295,7 @@ describe("panelsFromSnapshot", () => {
 
   test("does not let a shutting-down previous session remove a newer pane registration", () => {
     const enrichments = new Map<string, PanelSessionEnrichment>([
-      ["w:p1", { paneId: "w:p1", sessionId: "new-session", messages: [{ messageId: "message", text: "Newest response" }] }],
+      ["w:p1", { paneId: "w:p1", sessionId: "new-session", commands: [], messages: [{ messageId: "message", text: "Newest response" }] }],
     ]);
 
     expect(releasePanelSession(enrichments, "w:p1", "old-session")).toBe(false);

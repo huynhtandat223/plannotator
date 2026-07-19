@@ -2,13 +2,15 @@ import { describe, expect, test } from 'bun:test';
 import {
   changedLivePaneSessionIds,
   discardMessageStatesForChangedPanes,
+  reconcileLiveMessageSelection,
   type LiveScopedMessage,
 } from './liveMessageScope';
 
-const message = (messageId: string, paneId: string, piSessionId: string): LiveScopedMessage => ({
+const message = (messageId: string, paneId: string, piSessionId: string, assistantMessageId?: string): LiveScopedMessage => ({
   messageId,
   paneId,
   piSessionId,
+  assistantMessageId,
 });
 
 describe('live message session scope', () => {
@@ -43,5 +45,54 @@ describe('live message session scope', () => {
 
     expect(changedPaneIds).toEqual(new Set());
     expect(discardMessageStatesForChangedPanes(drafts, previous, changedPaneIds)).toEqual(drafts);
+  });
+
+  test('recognizes a pane session transition only once after its new snapshot is accepted', () => {
+    const oldSnapshot = [message('w:p1:old-response', 'w:p1', 'pi-session-old')];
+    const newSnapshot = [message('w:p1:new-response', 'w:p1', 'pi-session-new')];
+
+    expect(changedLivePaneSessionIds(oldSnapshot, newSnapshot)).toEqual(new Set(['w:p1']));
+    // Repeated SSE events contain the same accepted snapshot. They must not
+    // be treated as another session replacement or produce another warning.
+    expect(changedLivePaneSessionIds(newSnapshot, newSnapshot)).toEqual(new Set());
+  });
+
+  test('reconciles selection off a synthetic waiting document when a real assistant response arrives', () => {
+    const previous = [
+      message('w:p1:waiting', 'w:p1', 'session-1'), // waiting document (no assistantMessageId)
+    ];
+    const next = [
+      message('w:p1:pi-msg-123', 'w:p1', 'session-1', 'pi-msg-123'), // real response (has assistantMessageId)
+    ];
+
+    const result = reconcileLiveMessageSelection(
+      previous,
+      next,
+      'w:p1:waiting',
+      'w:p1:pi-msg-123',
+      null
+    );
+
+    expect(result.nextSelectedMessageId).toBe('w:p1:pi-msg-123');
+    expect(result.followNextPaneResponseReset).toBe(false);
+  });
+
+  test('returns followed message if pane received a new response', () => {
+    const previous = [message('w:p1:response-1', 'w:p1', 'session-1', 'response-1')];
+    const next = [
+      message('w:p1:response-2', 'w:p1', 'session-1', 'response-2'),
+    ];
+    const follow = { paneId: 'w:p1', latestMessageId: 'w:p1:response-1' };
+
+    const result = reconcileLiveMessageSelection(
+      previous,
+      next,
+      'w:p1:response-1',
+      'w:p1:response-2',
+      follow
+    );
+
+    expect(result.nextSelectedMessageId).toBe('w:p1:response-2');
+    expect(result.followNextPaneResponseReset).toBe(true);
   });
 });

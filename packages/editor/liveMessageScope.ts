@@ -2,6 +2,7 @@ export type LiveScopedMessage = {
   messageId: string;
   paneId?: string;
   piSessionId?: string;
+  assistantMessageId?: string;
 };
 
 /**
@@ -35,4 +36,67 @@ export function discardMessageStatesForChangedPanes<T>(
   if (changedPaneIds.size === 0) return new Map(states);
   const paneByMessageId = new Map(previous.map((message) => [message.messageId, message.paneId]));
   return new Map([...states].filter(([messageId]) => !changedPaneIds.has(paneByMessageId.get(messageId) ?? "")));
+}
+
+/**
+ * Reconciles the selection for live messages, ensuring we switch off of synthetic waiting documents
+ * when real assistant messages arrive, and handling pane changes correctly.
+ */
+export function reconcileLiveMessageSelection(
+  previousMessages: readonly LiveScopedMessage[],
+  nextMessages: readonly LiveScopedMessage[],
+  currentSelectedMessageId: string | null,
+  snapshotSelectedMessageId: string | null,
+  followNextPaneResponse: { paneId: string; latestMessageId: string } | null,
+): { nextSelectedMessageId: string | null; followNextPaneResponseReset: boolean } {
+  const selectedPaneId = previousMessages.find((message) => message.messageId === currentSelectedMessageId)?.paneId;
+  const changedPaneIds = changedLivePaneSessionIds(previousMessages, nextMessages);
+  const selectedPaneSessionChanged = changedPaneIds.has(selectedPaneId ?? "");
+
+  const followedPaneLatest = followNextPaneResponse
+    ? nextMessages.find((message) => message.paneId === followNextPaneResponse.paneId)
+    : null;
+  const receivedFollowedResponse = followedPaneLatest !== null &&
+    followedPaneLatest.messageId !== followNextPaneResponse?.latestMessageId;
+
+  if (receivedFollowedResponse && followedPaneLatest) {
+    return {
+      nextSelectedMessageId: followedPaneLatest.messageId,
+      followNextPaneResponseReset: true,
+    };
+  }
+
+  // If currently selected message is a synthetic waiting document (ends with ':waiting' or has no assistantMessageId),
+  // and there is a real response (with an assistantMessageId) in the next snapshot for the same pane,
+  // we must transition to that real response.
+  const currentMessage = previousMessages.find((m) => m.messageId === currentSelectedMessageId);
+  const isCurrentlyWaiting = currentSelectedMessageId?.endsWith(":waiting") || (currentMessage && !currentMessage.assistantMessageId);
+
+  if (isCurrentlyWaiting && selectedPaneId) {
+    const realResponse = nextMessages.find((m) => m.paneId === selectedPaneId && m.assistantMessageId);
+    if (realResponse) {
+      return {
+        nextSelectedMessageId: realResponse.messageId,
+        followNextPaneResponseReset: false,
+      };
+    }
+  }
+
+  // Normal selection reconciliation logic
+  let nextSelectedId: string | null = null;
+  if (selectedPaneSessionChanged) {
+    nextSelectedId = nextMessages.find((message) => message.paneId === selectedPaneId)?.messageId ?? null;
+  } else if (nextMessages.some((message) => message.messageId === currentSelectedMessageId)) {
+    nextSelectedId = currentSelectedMessageId;
+  } else {
+    nextSelectedId = nextMessages.find((message) => message.paneId === selectedPaneId)?.messageId
+      ?? (snapshotSelectedMessageId !== null && nextMessages.some((message) => message.messageId === snapshotSelectedMessageId)
+        ? snapshotSelectedMessageId
+        : null);
+  }
+
+  return {
+    nextSelectedMessageId: nextSelectedId,
+    followNextPaneResponseReset: false,
+  };
 }

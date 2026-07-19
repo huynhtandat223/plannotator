@@ -6,8 +6,10 @@
 import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { readFile, readdir, realpath, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { Readable } from "node:stream";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 
@@ -40,6 +42,8 @@ type HerdrReviewSnapshot = {
     agentStatus: HerdrPanel["status"];
     /** Herdr's authoritative workspace root for the pane containing this response. */
     cwd: string;
+    /** Commands advertised by this pane's current Pi session. */
+    commands?: HerdrCommandCapability[];
   }>;
   selectedMessageId: string | null;
   unreadMessageIds: string[];
@@ -61,14 +65,22 @@ export type HerdrPanel = {
   focused: boolean;
 };
 
+export type HerdrCommandCapability = {
+  name: string;
+  description?: string;
+  source: "extension" | "prompt" | "skill";
+};
+
 export type PanelSessionEnrichment = {
   paneId: string;
   sessionId: string;
   messages: Array<{ messageId: string; text: string; timestamp?: string }>;
+  commands: HerdrCommandCapability[];
 };
 
 type LiveDraftAnnotation = { id: string; [key: string]: unknown };
 type LiveCodeDraftAnnotation = LiveDraftAnnotation;
+type LiveImageAttachment = { path: string; name: string };
 type LiveFeedbackBatch = {
   batchId: string;
   messages: Array<{
@@ -76,6 +88,7 @@ type LiveFeedbackBatch = {
     messageText: string;
     annotations: LiveDraftAnnotation[];
     codeAnnotations?: LiveCodeDraftAnnotation[];
+    globalAttachments?: LiveImageAttachment[];
   }>;
 };
 type PendingFeedbackDelivery = {
@@ -91,7 +104,6 @@ type PendingInstructionDelivery = {
   content: string;
 };
 
-
 // Structured Pi data is optional enrichment only. Herdr remains authoritative
 // for whether the pane is live; this map is process-local and is pruned on each
 // discovery reconciliation.
@@ -102,6 +114,13 @@ const pendingFeedbackDeliveries = new Map<string, PendingFeedbackDelivery>();
 // Browser-originated user instructions are held only until the matching local
 // Pi extension claims them. They are not annotation feedback and never persist.
 const pendingInstructionDeliveries = new Map<string, PendingInstructionDelivery>();
+const UPLOAD_DIR = join(tmpdir(), "plannotator");
+const IMAGE_CONTENT_TYPES: Record<string, string> = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
+  webp: "image/webp", svg: "image/svg+xml", bmp: "image/bmp", ico: "image/x-icon",
+  tiff: "image/tiff", tif: "image/tiff", avif: "image/avif",
+};
+const ALLOWED_IMAGE_EXTENSIONS = new Set(Object.keys(IMAGE_CONTENT_TYPES));
 
 type HerdrAgent = {
   agent?: unknown;
@@ -131,6 +150,82 @@ function parsePort(value: string): number {
 
 function text(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function imageExtension(path: string): string {
+  const lastDot = path.lastIndexOf(".");
+  return lastDot === -1 ? "" : path.slice(lastDot + 1).toLowerCase();
+}
+
+function imageAttachments(value: unknown): LiveImageAttachment[] | null {
+  if (!Array.isArray(value)) return null;
+  const attachments = value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const attachment = entry as Record<string, unknown>;
+    const path = text(attachment.path);
+    const name = text(attachment.name);
+    return path && name && ALLOWED_IMAGE_EXTENSIONS.has(imageExtension(path)) ? [{ path, name }] : [];
+  });
+  return attachments.length === value.length ? attachments : null;
+}
+
+function webRequest(request: IncomingMessage): Request {
+  const headers = new Headers();
+  for (const [key, value] of Object.entries(request.headers)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) value.forEach((item) => headers.append(key, item));
+    else headers.set(key, value);
+  }
+  return new Request(`http://localhost${request.url ?? "/"}`, {
+    method: request.method,
+    headers,
+    body: Readable.toWeb(request) as unknown as BodyInit,
+    duplex: "half",
+  } as RequestInit);
+}
+
+async function uploadImage(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (!canWriteFeedback(request)) {
+    writeJson(response, 403, { error: "Uploading an image requires a loopback browser or PLANNOTATOR_HERDR_WRITE_TOKEN." });
+    return;
+  }
+  try {
+    const file = (await webRequest(request).formData()).get("file");
+    if (!file || typeof file !== "object" || !("arrayBuffer" in file) || !("name" in file)) {
+      writeJson(response, 400, { error: "No image file was provided" });
+      return;
+    }
+    const upload = file as File;
+    const extension = imageExtension(upload.name) || "png";
+    if (!ALLOWED_IMAGE_EXTENSIONS.has(extension)) {
+      writeJson(response, 400, { error: `File extension .${extension} is not a supported image type` });
+      return;
+    }
+    mkdirSync(UPLOAD_DIR, { recursive: true });
+    const path = join(UPLOAD_DIR, `${randomUUID()}.${extension}`);
+    await Bun.write(path, upload);
+    writeJson(response, 200, { path, originalName: upload.name });
+  } catch (error) {
+    writeJson(response, 500, { error: error instanceof Error ? error.message : "Image upload failed" });
+  }
+}
+
+function serveImage(response: ServerResponse, url: URL): void {
+  const path = text(url.searchParams.get("path"));
+  if (!path || !ALLOWED_IMAGE_EXTENSIONS.has(imageExtension(path))) {
+    writeJson(response, 400, { error: "A supported image path is required" });
+    return;
+  }
+  try {
+    if (!existsSync(path)) {
+      writeJson(response, 404, { error: "Image not found" });
+      return;
+    }
+    response.writeHead(200, { "content-type": IMAGE_CONTENT_TYPES[imageExtension(path)]!, "cache-control": "no-store" });
+    response.end(readFileSync(path));
+  } catch {
+    writeJson(response, 404, { error: "Image not found" });
+  }
 }
 
 function status(value: unknown): HerdrPanel["status"] {
@@ -185,6 +280,21 @@ export async function discoverPanels(): Promise<HerdrPanel[]> {
   return panelsFromSnapshot(response.result?.snapshot ?? {});
 }
 
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[character]!);
+}
+
+function formattedWorkingDirectory(cwd: string): string {
+  const escapedCwd = escapeHtml(cwd);
+  return `<div style="font-family: monospace; font-size: 0.85em; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; background: rgba(120,120,120,0.08); border: 1px solid rgba(120,120,120,0.2); padding: 6px 10px; border-radius: 6px; margin-top: 4px; user-select: all;" title="Working directory — select to copy: ${escapedCwd}">${escapedCwd}</div>`;
+}
+
 function waitingDocument(panel: HerdrPanel): string {
   return [
     `# ${panel.workspace}`,
@@ -192,8 +302,8 @@ function waitingDocument(panel: HerdrPanel): string {
     "",
     "Waiting for the Pi session to publish its latest assistant response.",
     "",
-    `**Status:** ${panel.status}`,
-    `**Working directory:** \`${panel.cwd}\``,
+    "**Working directory:**",
+    formattedWorkingDirectory(panel.cwd),
   ].join("\n");
 }
 
@@ -209,12 +319,14 @@ function overviewDocument(panels: HerdrPanel[]): string {
     "",
     "Live Pi panels discovered from Herdr. Open **Messages** in the existing sidebar to select a panel.",
     "",
-    ...panels.flatMap((panel) => [
-      `## ${panel.workspace}`,
-      `${panel.tab ? `**Tab:** ${panel.tab} · ` : ""}**Panel:** ${panel.panel} · **Status:** ${panel.status}`,
-      `\`${panel.cwd}\``,
-      "",
-    ]),
+    ...panels.flatMap((panel) => {
+      return [
+        `## ${panel.workspace}`,
+        `${panel.tab ? `**Tab:** ${panel.tab} · ` : ""}**Panel:** ${panel.panel} · **Status:** ${panel.status}`,
+        formattedWorkingDirectory(panel.cwd),
+        "",
+      ];
+    }),
   ].join("\n");
 }
 
@@ -251,6 +363,8 @@ export function feedbackBatch(
 ): { paneId: string; batch: LiveFeedbackBatch } | null {
   if (!body || !Array.isArray(body.annotations) || !Array.isArray(body.codeAnnotations)) return null;
   const selectedMessageId = text(body.selectedMessageId);
+  const globalAttachments = imageAttachments(body.globalAttachments ?? []);
+  if (!globalAttachments) return null;
   const sourceMessages = new Map(messages.map((message) => [message.messageId, message]));
   const grouped = new Map<string, { annotations: LiveDraftAnnotation[]; codeAnnotations: LiveCodeDraftAnnotation[] }>();
   const add = (value: unknown, kind: "annotations" | "codeAnnotations"): boolean => {
@@ -265,6 +379,12 @@ export function feedbackBatch(
   };
   for (const annotation of body.annotations) if (!add(annotation, "annotations")) return null;
   for (const annotation of body.codeAnnotations) if (!add(annotation, "codeAnnotations")) return null;
+  if (globalAttachments.length > 0) {
+    const source = selectedMessageId ? sourceMessages.get(selectedMessageId) : null;
+    if (!source?.assistantMessageId) return null;
+    const entry = grouped.get(selectedMessageId) ?? { annotations: [], codeAnnotations: [] };
+    grouped.set(selectedMessageId, entry);
+  }
   if (grouped.size === 0) return null;
   const entries = [...grouped].map(([messageId, drafts]) => {
     const source = sourceMessages.get(messageId)!;
@@ -275,6 +395,7 @@ export function feedbackBatch(
         messageText: source.text,
         annotations: structuredClone(drafts.annotations),
         ...(drafts.codeAnnotations.length ? { codeAnnotations: structuredClone(drafts.codeAnnotations) } : {}),
+        ...(messageId === selectedMessageId && globalAttachments.length ? { globalAttachments: structuredClone(globalAttachments) } : {}),
       },
     };
   });
@@ -322,6 +443,21 @@ export function instructionDelivery(
   return { paneId, content };
 }
 
+export function commandDelivery(
+  body: Record<string, unknown> | null,
+  panels: HerdrPanel[],
+  enrichments: ReadonlyMap<string, PanelSessionEnrichment>,
+): { paneId: string; command: string; args: string } | null {
+  const paneId = text(body?.paneId);
+  const command = text(body?.command);
+  const args = typeof body?.args === "string" ? body.args.trim() : "";
+  if (!paneId || !command || !/^[-\w:.]+$/.test(command)) return null;
+  const registration = enrichments.get(paneId);
+  if (!registration || !panels.some((panel) => panel.id === paneId)) return null;
+  if (!registration.commands.some((capability) => capability.name === command)) return null;
+  return { paneId, command, args };
+}
+
 async function queueInstruction(request: IncomingMessage, response: ServerResponse): Promise<void> {
   if (!canWriteFeedback(request)) {
     writeJson(response, 403, { error: "Sending a message requires a loopback browser or PLANNOTATOR_HERDR_WRITE_TOKEN." });
@@ -346,6 +482,26 @@ async function queueInstruction(request: IncomingMessage, response: ServerRespon
   };
   pendingInstructionDeliveries.set(delivery.deliveryId, delivery);
   writeJson(response, 202, { ok: true, deliveryId: delivery.deliveryId });
+}
+
+async function queueCommand(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (!canWriteFeedback(request)) {
+    writeJson(response, 403, { error: "Running a Pi command requires a loopback browser or PLANNOTATOR_HERDR_WRITE_TOKEN." });
+    return;
+  }
+  const { panels } = await reviewSnapshot();
+  const prepared = commandDelivery(await requestJson(request), panels, panelSessions);
+  if (!prepared) {
+    writeJson(response, 400, { error: "A supported Pi command and one live pane session are required" });
+    return;
+  }
+  // `pane run` writes through Herdr's interactive input path, so Pi performs
+  // its normal extension-command dispatch and prompt/skill expansion. This is
+  // intentionally distinct from `/api/instruction`, which remains literal
+  // `sendUserMessage` text even when it starts with `/`.
+  const command = `/${prepared.command}${prepared.args ? ` ${prepared.args}` : ""}`;
+  await execFileAsync("herdr", ["pane", "run", prepared.paneId, command], { timeout: 10_000 });
+  writeJson(response, 202, { ok: true });
 }
 
 function claimingRegistration(body: Record<string, unknown> | null): { paneId: string; sessionId: string } | null {
@@ -442,7 +598,12 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
   const paneId = text(body?.paneId);
   const sessionId = text(body?.sessionId);
   const messages = Array.isArray(body?.messages) ? body.messages : null;
-  if (!paneId || !sessionId || !messages || messages.length > HERDR_LIVE_MESSAGE_LIMIT) {
+  // Older loaded Ex-Pi extensions do not yet publish command capabilities.
+  // Accept their established registration shape so a service upgrade never
+  // hides their live messages; they simply have no command picker until Pi
+  // reloads the updated extension.
+  const commands = body?.commands === undefined ? [] : Array.isArray(body.commands) ? body.commands : null;
+  if (!paneId || !sessionId || !messages || !commands || messages.length > HERDR_LIVE_MESSAGE_LIMIT || commands.length > 200) {
     writeJson(response, 400, { error: `paneId, sessionId, and at most ${HERDR_LIVE_MESSAGE_LIMIT} messages are required` });
     return;
   }
@@ -458,13 +619,27 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
     writeJson(response, 400, { error: "Invalid structured assistant messages" });
     return;
   }
+  const normalizedCommands = commands.flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const command = value as Record<string, unknown>;
+    const name = text(command.name);
+    const description = text(command.description) ?? undefined;
+    const source = command.source;
+    return name && /^[-\w:.]+$/.test(name) && (source === "extension" || source === "prompt" || source === "skill")
+      ? [{ name, ...(description ? { description } : {}), source }]
+      : [];
+  });
+  if (normalizedCommands.length !== commands.length || new Set(normalizedCommands.map((command) => command.name)).size !== normalizedCommands.length) {
+    writeJson(response, 400, { error: "Invalid Pi command capabilities" });
+    return;
+  }
 
   const panels = await discoverPanels();
   if (!panels.some((panel) => panel.id === paneId)) {
     writeJson(response, 404, { error: "The Pi panel is no longer live" });
     return;
   }
-  panelSessions.set(paneId, { paneId, sessionId, messages: normalizedMessages });
+  panelSessions.set(paneId, { paneId, sessionId, messages: normalizedMessages, commands: normalizedCommands });
   writeJson(response, 200, { ok: true });
 }
 
@@ -510,7 +685,10 @@ export function reviewSnapshotFromPanels(
     ?? null;
   const messages = panels.flatMap((panel) => {
     const paneLabel = panel.workspace;
-    const paneDescription = [panel.tab, panel.panel, panel.status].filter(Boolean).join(" · ");
+    const tabPart = (panel.tab && panel.tab !== panel.workspace && !panel.panel.toLowerCase().includes(panel.tab.toLowerCase()))
+      ? panel.tab
+      : "";
+    const paneDescription = [tabPart, panel.panel].filter(Boolean).join(" · ");
     const responses = enrichments.get(panel.id)?.messages ?? [];
     if (responses.length === 0) {
       return [{
@@ -524,6 +702,7 @@ export function reviewSnapshotFromPanels(
         paneDescription,
         agentStatus: panel.status,
         cwd: panel.cwd,
+        commands: enrichments.get(panel.id)?.commands ?? [],
       }];
     }
     return responses.map((response, index) => ({
@@ -541,6 +720,7 @@ export function reviewSnapshotFromPanels(
       paneDescription,
       agentStatus: panel.status,
       cwd: panel.cwd,
+      commands: enrichments.get(panel.id)!.commands,
     }));
   });
   const selectedMessage = selected
@@ -984,6 +1164,14 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
     writeJson(response, 200, { ok: true });
     return;
   }
+  if (request.method === "GET" && url.pathname === "/api/image") {
+    serveImage(response, url);
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/upload") {
+    void uploadImage(request, response);
+    return;
+  }
   if (request.method === "GET" && url.pathname === "/favicon.svg") {
     response.writeHead(200, { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" });
     response.end('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#18181b"/><path fill="#fafafa" d="M18 14h28v8H28v8h16v8H28v12h-10z"/></svg>');
@@ -1066,6 +1254,10 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
   }
   if (request.method === "POST" && url.pathname === "/api/instruction") {
     void queueInstruction(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/command") {
+    void queueCommand(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
     return;
   }
   if (request.method === "POST" && url.pathname === "/api/process-panels") {

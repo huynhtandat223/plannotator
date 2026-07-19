@@ -26,6 +26,7 @@ describe("Herdr session enrichment", () => {
 				{ messageId: "latest", text: "Latest response" },
 				{ messageId: "older", text: "Older response" },
 			],
+			commands: [],
 		});
 	});
 
@@ -103,6 +104,17 @@ describe("Herdr session enrichment", () => {
 		expect(delivered[0]).toContain("Feedback Batch: `batch-1`");
 		expect(delivered[0]).toContain("Improve it");
 		expect(delivered[0]).toContain("Use a safer boundary.");
+	});
+
+	test("publishes only explicit command capabilities for the current Pi session", () => {
+		const registration = currentHerdrRegistration(context() as never, {
+			HERDR_ENV: "1",
+			HERDR_PANE_ID: "w:p1",
+		}, [
+			{ name: "handoff-to-continue", description: "Write a handoff", source: "extension" },
+			{ name: "handoff-to-continue", description: "duplicate", source: "extension" },
+		]);
+		expect(registration?.commands).toEqual([{ name: "handoff-to-continue", description: "Write a handoff", source: "extension" }]);
 	});
 
 	test("delivers a claimed browser instruction as an unformatted Pi user message", async () => {
