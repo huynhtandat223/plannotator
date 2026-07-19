@@ -49,6 +49,8 @@ interface SidebarContainerProps {
   // Git Changes props
   showChangesTab?: boolean;
   changesRootPath?: string;
+  changesCompareMode?: "since-base" | "head" | "unstaged" | "staged";
+  onChangesCompareModeChange?: (mode: "since-base" | "head" | "unstaged" | "staged") => void;
   onChangesRefresh?: () => void;
   onChangesOpenFullReview?: () => void;
   // Version Browser props
@@ -112,6 +114,8 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
   onFilesRetryVaultDir,
   showChangesTab,
   changesRootPath,
+  changesCompareMode,
+  onChangesCompareModeChange,
   onChangesRefresh,
   onChangesOpenFullReview,
   showVersionsTab,
@@ -321,6 +325,8 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
             dirs={fileBrowser.dirs}
             rootPath={changesRootPath}
             onSelectFile={onFilesSelectFile}
+            compareMode={changesCompareMode}
+            onCompareModeChange={onChangesCompareModeChange}
             onRefresh={onChangesRefresh ?? (() => {})}
             onOpenFullReview={onChangesOpenFullReview}
           />
@@ -403,6 +409,8 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
               <GitChangesBrowser
                 dirs={fileBrowser.dirs}
                 rootPath={changesRootPath}
+                compareMode={changesCompareMode}
+                onCompareModeChange={onChangesCompareModeChange}
                 onSelectFile={(absolutePath, dirPath) => {
                   onFilesSelectFile?.(absolutePath, dirPath);
                   onClose();

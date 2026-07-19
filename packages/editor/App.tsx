@@ -171,6 +171,12 @@ type MessageAnnotationState = {
 
 type LiveReviewRoundStatus = 'open' | 'submitting' | 'delivery_failed' | 'waiting' | 'agent_stopped';
 
+type HerdrContextUsage = {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+};
+
 type LiveMessageReviewSnapshot = {
   /** Host-owned monotonic version; prevents late SSE frames restoring stale focus. */
   revision?: number;
@@ -195,6 +201,41 @@ type PlanReviewCapability = {
 
 const liveReviewIsLocked = (status: LiveReviewRoundStatus): boolean =>
   status === 'submitting' || status === 'waiting' || status === 'agent_stopped';
+
+const formatTokenCount = (tokens: number): string =>
+  tokens >= 1_000_000 ? `${(tokens / 1_000_000).toFixed(tokens % 1_000_000 === 0 ? 0 : 1)}m`
+    : tokens >= 1_000 ? `${(tokens / 1_000).toFixed(tokens % 1_000 === 0 ? 0 : 1)}k`
+      : String(tokens);
+
+const compactModelName = (model: PickerMessage['model']): string | undefined => {
+  const name = model?.name ?? model?.id;
+  if (!name) return undefined;
+  return name.replace(/^.*\//, '').replace(/^(?:GPT-|Claude |Gemini )/i, '');
+};
+
+const livePaneMetadata = (message: PickerMessage | undefined): string[] => {
+  if (!message) return [];
+  const metadata: string[] = [];
+  const model = compactModelName(message.model);
+  if (model) metadata.push(model);
+  if (message.gitBranch) metadata.push(message.gitBranch);
+  const usage = message.contextUsage as HerdrContextUsage | undefined;
+  if (usage) {
+    const context = usage.tokens === null
+      ? `ctx ? / ${formatTokenCount(usage.contextWindow)}`
+      : `ctx ${formatTokenCount(usage.tokens)} / ${formatTokenCount(usage.contextWindow)}${usage.percent === null ? '' : ` (${usage.percent.toFixed(1)}%)`}`;
+    metadata.push(context);
+  }
+  if (typeof message.totalUsedTokens === 'number') metadata.push(`used ${formatTokenCount(message.totalUsedTokens)}`);
+  if (typeof message.latestCompactionTokens === 'number') metadata.push(`compacted ${formatTokenCount(message.latestCompactionTokens)}`);
+  if (message.activity) {
+    const label = message.activity.kind === 'subagent'
+      ? `subagent${message.activity.count === 1 ? '' : ` ×${message.activity.count}`}`
+      : `${message.activity.name ?? 'tool'}${message.activity.count === 1 ? '' : ` ×${message.activity.count}`}`;
+    metadata.push(label);
+  }
+  return metadata;
+};
 
 const countLinkedDocSessionAnnotations = (session: LinkedDocSessionState): number => {
   let total =
@@ -913,6 +954,7 @@ const App: React.FC = () => {
 
   // Markdown file browser (also handles vault dirs via isVault flag)
   const fileBrowser = useFileBrowser();
+  const [gitChangesCompareMode, setGitChangesCompareMode] = useState<'since-base' | 'head' | 'unstaged' | 'staged'>('since-base');
   const vaultPath = useMemo(() => {
     if (!isVaultBrowserEnabled()) return '';
     return getEffectiveVaultPath(getObsidianSettings());
@@ -1008,7 +1050,7 @@ const App: React.FC = () => {
         const regularLoaded = fileBrowser.dirs.filter(d => !d.isVault).map(d => d.path);
         const needsRegular = requestedDirs.some(d => !regularLoaded.includes(d))
           || regularLoaded.some(d => !requestedDirs.includes(d));
-        if (needsRegular) fileBrowser.fetchAll(requestedDirs);
+        if (needsRegular) fileBrowser.fetchAll(requestedDirs, sidebar.activeTab === 'changes' ? { compareMode: gitChangesCompareMode } : undefined);
       }
       // Vaults belong to Files only and must never leak into the selected
       // pane's Git Changes view.
@@ -1016,7 +1058,7 @@ const App: React.FC = () => {
         fileBrowser.addVaultDir(vaultPath);
       }
     }
-  }, [sidebar.activeTab, showFilesTab, fileBrowserDirs, projectRoot, vaultPath]);
+  }, [sidebar.activeTab, showFilesTab, fileBrowserDirs, projectRoot, vaultPath, gitChangesCompareMode]);
 
   const buildCurrentMessageState = React.useCallback((): MessageAnnotationState | null => {
     if (annotateSource !== 'message' || !selectedMessageId) return null;
@@ -1297,7 +1339,7 @@ const App: React.FC = () => {
       const response = await fetch('/api/git-changes/review', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paneId: selectedLiveMessage.paneId }),
+        body: JSON.stringify({ paneId: selectedLiveMessage.paneId, compareMode: gitChangesCompareMode }),
       });
       const body = await response.json().catch(() => ({})) as { error?: string; reused?: boolean; port?: number };
       if (!response.ok) throw new Error(body.error || 'Could not open full review');
@@ -1317,7 +1359,7 @@ const App: React.FC = () => {
     } finally {
       setIsOpeningFullReview(false);
     }
-  }, [selectedLiveMessage?.paneId]);
+  }, [selectedLiveMessage?.paneId, gitChangesCompareMode]);
 
   const handleFileBrowserSelect = React.useCallback((absolutePath: string, dirPath: string) => {
     const normalizedAbsolutePath = normalizeBrowserPath(absolutePath);
@@ -4365,7 +4407,7 @@ const App: React.FC = () => {
   return (
     <ThemeProvider defaultTheme="dark">
       <TooltipProvider delayDuration={900} skipDelayDuration={200} disableHoverableContent>
-      <div data-print-region="root" className="h-screen flex flex-col bg-background overflow-hidden">
+      <div data-print-region="root" className="h-screen h-[100dvh] flex flex-col bg-background overflow-hidden">
         <div inert={liveReviewLockActive ? true : undefined} aria-busy={liveReviewLockActive}>
         <AppHeader
           htmlSurface={isHtmlSurface}
@@ -4511,7 +4553,8 @@ const App: React.FC = () => {
           const selectedMessage = recentMessages.find((message) => message.messageId === selectedMessageId);
           const agentStatus = selectedMessage?.agentStatus;
           const agentStatusLabel = agentStatus ? agentStatus[0].toUpperCase() + agentStatus.slice(1) : null;
-          return <div className={`border-b px-4 py-2 text-xs flex items-center gap-3 flex-shrink-0 ${
+          const paneMetadata = livePaneMetadata(selectedMessage);
+          return <div className={`border-b px-4 py-2 text-xs flex flex-wrap items-center gap-x-3 gap-y-1 flex-shrink-0 ${
             status === 'delivery_failed'
               ? 'border-destructive/25 bg-destructive/10 text-destructive'
               : status === 'agent_stopped'
@@ -4527,7 +4570,7 @@ const App: React.FC = () => {
             ) : status === 'delivery_failed' ? (
               <><span className="font-medium">Feedback delivery failed.</span><span>{error || 'The agent did not receive the feedback.'}</span></>
             ) : (
-              <span className="font-medium text-foreground flex items-center gap-2">
+              <span className="font-medium text-foreground flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
                 {liveWorkspaceMode ? (
                   <>
                     <span>Live Pi responses are read-only.</span>
@@ -4542,12 +4585,16 @@ const App: React.FC = () => {
                       Launch Scout
                     </button>
                   </>
+                ) : liveMessageReview ? (
+                  paneMetadata.length > 0
+                    ? <span className="font-normal text-muted-foreground break-words">{paneMetadata.join(' · ')}</span>
+                    : null
                 ) : (
-                  `Ready to review ${planReview ? 'responses and Plan Files.' : 'live agent responses.'}`
+                  <>Ready to review {planReview ? 'responses and Plan Files.' : 'responses.'}</>
                 )}
               </span>
             )}
-            {agentStatusLabel && <span className={`ml-auto inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${agentStatus === 'working' ? 'border-primary/30 bg-primary/10 text-foreground' : agentStatus === 'blocked' ? 'border-warning/30 bg-warning/10 text-warning-foreground' : 'border-border bg-muted/40 text-muted-foreground'}`}><span aria-hidden="true">●</span>{agentStatusLabel}</span>}
+            {agentStatusLabel && <span className={`ml-auto shrink-0 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${agentStatus === 'working' ? 'border-primary/30 bg-primary/10 text-foreground' : agentStatus === 'blocked' ? 'border-warning/30 bg-warning/10 text-warning-foreground' : 'border-border bg-muted/40 text-muted-foreground'}`}><span aria-hidden="true">●</span>{agentStatusLabel}</span>}
             {(status === 'waiting' || status === 'agent_stopped' || status === 'delivery_failed') && (
               <div className="ml-auto flex items-center gap-2 shrink-0">
                 {status === 'delivery_failed' && <button type="button" onClick={() => { if (planReview) void handlePlanReviewAction('/api/session/feedback/retry'); else void handleLiveReviewAction('/api/session/feedback/retry'); }} disabled={isLiveReviewActionPending} className="rounded border border-current/30 px-2 py-1 font-medium hover:bg-background/40 disabled:cursor-not-allowed disabled:opacity-50">Retry</button>}
@@ -4645,6 +4692,11 @@ const App: React.FC = () => {
                 showFilesTab={showFilesTab && !archive.archiveMode}
                 showChangesTab={liveMessageReview && !!projectRoot && !archive.archiveMode}
                 changesRootPath={projectRoot ?? undefined}
+                changesCompareMode={gitChangesCompareMode}
+                onChangesCompareModeChange={(mode) => {
+                  setGitChangesCompareMode(mode);
+                  fileBrowser.fetchAll(projectRoot ? [projectRoot] : [], { compareMode: mode });
+                }}
                 fileAnnotationCounts={fileAnnotationCounts}
                 highlightedFiles={highlightedFiles}
                 fileEditStatuses={editableDocuments.fileEditStatuses}
@@ -4664,7 +4716,7 @@ const App: React.FC = () => {
                 }}
                 onFilesFetchAll={() => fileBrowser.fetchAll(fileBrowserDirs)}
                 onFilesRetryVaultDir={(vaultPath) => fileBrowser.addVaultDir(vaultPath)}
-                onChangesRefresh={() => fileBrowser.fetchAll(projectRoot ? [projectRoot] : [])}
+                onChangesRefresh={() => fileBrowser.fetchAll(projectRoot ? [projectRoot] : [], { compareMode: gitChangesCompareMode })}
                 onChangesOpenFullReview={liveMessageReview && !isOpeningFullReview ? handleOpenFullReview : undefined}
                 hasFileAnnotations={hasFileAnnotations}
                 showVersionsTab={!isHtmlSurface && versionInfo !== null && versionInfo.totalVersions > 1}
@@ -4758,7 +4810,9 @@ const App: React.FC = () => {
                   comment/markup mode). Hidden during plan diff, and on HTML surfaces
                   when the header's "Hide tools" toggle is on (leaving the rendered HTML
                   free of overlay controls). On HTML it floats top-left over the doc. */}
-              {!goalSetupMode && !liveWorkspaceMode && !isPlanDiffActive && !archive.archiveMode && !isEditingMarkdown && !(isHtmlSurface && htmlToolsHidden) && (
+              {/* Live Herdr panes start in the normal selection mode, but keep
+                  the document clear: review controls are available on selection. */}
+              {!goalSetupMode && !liveMessageReview && !isPlanDiffActive && !archive.archiveMode && !isEditingMarkdown && !(isHtmlSurface && htmlToolsHidden) && (
                 <div
                   data-print-hide
                   className={isHtmlSurface
@@ -5000,7 +5054,7 @@ const App: React.FC = () => {
                     onAddGlobalAttachment={handleAddGlobalAttachment}
                     onRemoveGlobalAttachment={handleRemoveGlobalAttachment}
                     repoInfo={repoInfo}
-                    stickyActions={uiPrefs.stickyActionsEnabled && !liveMessageReview}
+                    stickyActions={uiPrefs.stickyActionsEnabled}
                     planDiffStats={linkedDocHook.isActive ? null : planDiff.diffStats}
                     isPlanDiffActive={isPlanDiffActive}
                     onPlanDiffToggle={() => setIsPlanDiffActive(!isPlanDiffActive)}

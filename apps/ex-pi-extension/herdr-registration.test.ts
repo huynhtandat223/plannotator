@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { currentHerdrRegistration, pollHerdrFeedback, pollHerdrInstruction, releaseHerdrSession, reportHerdrSession } from "./herdr-registration";
+import { beginHerdrTool, currentHerdrRegistration, endHerdrTool, pollHerdrFeedback, pollHerdrInstruction, releaseHerdrSession, reportHerdrSession } from "./herdr-registration";
 
 function context() {
 	return {
 		sessionManager: {
 			getSessionId: () => "session-1",
+			getEntries: () => [],
 			getBranch: () => [
 				{ id: "older", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Older response" }] } },
 				{ id: "user", type: "message", message: { role: "user", content: [{ type: "text", text: "Question" }] } },
@@ -27,6 +28,7 @@ describe("Herdr session enrichment", () => {
 				{ messageId: "older", text: "Older response" },
 			],
 			commands: [],
+			totalUsedTokens: 0,
 		});
 	});
 
@@ -39,6 +41,7 @@ describe("Herdr session enrichment", () => {
 		const registration = currentHerdrRegistration({
 			sessionManager: {
 				getSessionId: () => "session-1",
+				getEntries: () => [],
 				getBranch: () => branch,
 			},
 		} as never, { HERDR_ENV: "1", HERDR_PANE_ID: "w:p1" });
@@ -46,6 +49,67 @@ describe("Herdr session enrichment", () => {
 		expect(registration?.messages.map((message) => message.messageId)).toEqual([
 			"message-7", "message-6", "message-5", "message-4", "message-3",
 		]);
+	});
+
+	test("publishes context usage and the latest compaction token count", () => {
+		const registration = currentHerdrRegistration({
+			sessionManager: {
+				getSessionId: () => "session-1",
+				getEntries: () => [
+					{ type: "message", message: { role: "assistant", usage: { input: 10, output: 20, cacheRead: 30, cacheWrite: 40 } } },
+				],
+				getBranch: () => [
+					{ type: "compaction", tokensBefore: 156_000 },
+					{ id: "latest", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Latest response" }] } },
+				],
+			},
+			getContextUsage: () => ({ tokens: 84_000, contextWindow: 200_000, percent: 42 }),
+		} as never, { HERDR_ENV: "1", HERDR_PANE_ID: "w:p1" });
+
+		expect(registration).toMatchObject({
+			contextUsage: { tokens: 84_000, contextWindow: 200_000, percent: 42 },
+			totalUsedTokens: 100,
+			latestCompactionTokens: 156_000,
+		});
+	});
+
+	test("preserves an unknown post-compaction context token count", () => {
+		const registration = currentHerdrRegistration({
+			sessionManager: { getSessionId: () => "session-1", getBranch: () => [], getEntries: () => [] },
+			getContextUsage: () => ({ tokens: null, contextWindow: 200_000, percent: null }),
+		} as never, { HERDR_ENV: "1", HERDR_PANE_ID: "w:p1" });
+
+		expect(registration?.contextUsage).toEqual({ tokens: null, contextWindow: 200_000, percent: null });
+	});
+
+	test("falls back to a session model window and usage while Pi reloads", () => {
+		const registration = currentHerdrRegistration({
+			sessionManager: {
+				getSessionId: () => "session-1",
+				getBranch: () => [{ type: "message", message: { model: "cx/gpt-5.6-terra" } }],
+				getEntries: () => [{ type: "message", message: { role: "assistant", usage: { input: 1_000, output: 200, cacheRead: 5_000, cacheWrite: 0 } } }],
+			},
+		} as never, { HERDR_ENV: "1", HERDR_PANE_ID: "w:p1" });
+
+		expect(registration).toMatchObject({
+			contextUsage: { tokens: null, contextWindow: 1_050_000, percent: null },
+			totalUsedTokens: 6_200,
+		});
+	});
+
+	test("reports current model and active subagent activity", () => {
+		const sessionManager = {
+			getSessionId: () => "session-activity",
+			getEntries: () => [],
+			getBranch: () => [],
+		};
+		const context = { sessionManager, model: { id: "cx/gpt-5.6-terra", provider: "9route", name: "9route GPT-5.6 Terra", contextWindow: 1_050_000 } } as never;
+		beginHerdrTool(context, "tool-1", "subagent");
+		expect(currentHerdrRegistration(context, { HERDR_ENV: "1", HERDR_PANE_ID: "w:p1" })).toMatchObject({
+			model: { id: "cx/gpt-5.6-terra", provider: "9route" },
+			activity: { kind: "subagent", count: 1 },
+		});
+		endHerdrTool(context, "tool-1");
 	});
 
 	test("does nothing outside a Herdr pane", () => {

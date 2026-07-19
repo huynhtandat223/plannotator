@@ -36,6 +36,18 @@ export interface PickerMessage {
   workspaceKey?: string;
   /** Slash commands explicitly advertised by this live pane's current Pi session. */
   commands?: Array<{ name: string; description?: string; source: 'extension' | 'prompt' | 'skill' }>;
+  /** Pi-reported active context usage; null tokens are intentionally unknown. */
+  contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
+  /** Current model selected in the Pi session. */
+  model?: { id: string; provider?: string; name?: string };
+  /** Current tool or subagent activity reported by the Pi extension. */
+  activity?: { kind: 'tool' | 'subagent'; name?: string; count: number };
+  /** Cumulative model tokens charged over the complete Pi session. */
+  totalUsedTokens?: number;
+  /** Context tokens represented by the latest Pi compaction summary. */
+  latestCompactionTokens?: number;
+  /** Git branch resolved from this live pane's working directory. */
+  gitBranch?: string;
 }
 
 interface MessagesBrowserProps {

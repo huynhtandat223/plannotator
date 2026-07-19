@@ -18,6 +18,8 @@ export interface DirState {
   isLoading: boolean;
   error: string | null;
   workspaceStatus?: WorkspaceStatusPayload;
+  /** Git comparison represented by this workspace snapshot. */
+  compareMode?: string;
   /** True after the first successful snapshot; live watching waits for this so watcher setup cannot block initial load. */
   hasLoadedTree?: boolean;
   /** When true, fetches via /api/reference/obsidian/files and opens docs via /api/reference/obsidian/doc */
@@ -30,8 +32,8 @@ export interface UseFileBrowserReturn {
   toggleFolder: (key: string) => void;
   collapsedDirs: Set<string>;
   toggleCollapse: (dirPath: string) => void;
-  fetchTree: (dirPath: string, options?: { quiet?: boolean }) => void;
-  fetchAll: (directories: string[]) => void;
+  fetchTree: (dirPath: string, options?: { quiet?: boolean; compareMode?: string }) => void;
+  fetchAll: (directories: string[], options?: { compareMode?: string }) => void;
   addVaultDir: (vaultPath: string) => void;
   clearVaultDirs: () => void;
   activeFile: string | null;
@@ -90,7 +92,7 @@ function remapWorkspaceStatusForDir(
  */
 export interface FileTreeBackend {
   /** Load a directory tree. Resolves to the same shape the /api/reference/files endpoint returns: a Response whose JSON is { tree, workspaceStatus?, error? }. */
-  loadTree(dirPath: string): Promise<Response>;
+  loadTree(dirPath: string, options?: { compareMode?: string }): Promise<Response>;
   /** Load an Obsidian vault tree. Resolves to a Response whose JSON is { tree, error? }. */
   loadVaultTree(vaultPath: string): Promise<Response>;
   /**
@@ -102,8 +104,10 @@ export interface FileTreeBackend {
 }
 
 const defaultFileTreeBackend: FileTreeBackend = {
-  loadTree(dirPath) {
-    return fetch(`/api/reference/files?dirPath=${encodeURIComponent(dirPath)}`);
+  loadTree(dirPath, options) {
+    const params = new URLSearchParams({ dirPath });
+    if (options?.compareMode) params.set('compare', options.compareMode);
+    return fetch(`/api/reference/files?${params.toString()}`);
   },
   loadVaultTree(vaultPath) {
     return fetch(`/api/reference/obsidian/files?vaultPath=${encodeURIComponent(vaultPath)}`);
@@ -192,7 +196,7 @@ export function useFileBrowser(): UseFileBrowserReturn {
     });
   }, []);
 
-  const fetchTree = useCallback(async (dirPath: string, options: { quiet?: boolean } = {}) => {
+  const fetchTree = useCallback(async (dirPath: string, options: { quiet?: boolean; compareMode?: string } = {}) => {
     const name = dirPath.split("/").pop() || dirPath;
 
     setDirs((prev) => {
@@ -208,7 +212,7 @@ export function useFileBrowser(): UseFileBrowserReturn {
     });
 
     try {
-      const res = await fileTreeBackend.loadTree(dirPath);
+      const res = await fileTreeBackend.loadTree(dirPath, options);
       const data = await res.json();
 
       if (!res.ok || data.error) {
@@ -234,6 +238,7 @@ export function useFileBrowser(): UseFileBrowserReturn {
       }
 
       const workspaceStatus = remapWorkspaceStatusForDir(data.workspaceStatus, dirPath);
+      const compareMode = typeof data.compareMode === 'string' ? data.compareMode : (options.compareMode ?? 'since-base');
       setDirs((prev) =>
         prev.map((d) =>
           d.path === dirPath
@@ -241,6 +246,7 @@ export function useFileBrowser(): UseFileBrowserReturn {
               ...d,
               tree: data.tree,
               workspaceStatus,
+              compareMode,
               isLoading: false,
               hasLoadedTree: true,
               error: null,
@@ -271,12 +277,16 @@ export function useFileBrowser(): UseFileBrowserReturn {
   }, []);
 
   const fetchTreeRef = useRef(fetchTree);
+  const compareModesRef = useRef(new Map<string, string>());
   useEffect(() => {
     fetchTreeRef.current = fetchTree;
   }, [fetchTree]);
+  useEffect(() => {
+    compareModesRef.current = new Map(dirs.filter((dir) => !dir.isVault).map((dir) => [dir.path, dir.compareMode ?? 'since-base']));
+  }, [dirs]);
 
   const fetchAll = useCallback(
-    (directories: string[]) => {
+    (directories: string[], options: { compareMode?: string } = {}) => {
       setDirs((prev) => {
         // Preserve any vault dirs that were already loaded
         const vaultDirs = prev.filter((d) => d.isVault);
@@ -290,11 +300,12 @@ export function useFileBrowser(): UseFileBrowserReturn {
           // that the visible tree sits on "Loading..." for seconds.
           isLoading: true,
           error: null,
+          compareMode: options.compareMode ?? 'since-base',
           hasLoadedTree: false,
         }));
         return [...regularDirs, ...vaultDirs];
       });
-      directories.forEach((d) => fetchTree(d));
+      directories.forEach((d) => fetchTree(d, options));
     },
     [fetchTree]
   );
@@ -381,7 +392,7 @@ export function useFileBrowser(): UseFileBrowserReturn {
     if (!watchDirsKey) return;
     const paths = watchDirsKey.split("\n").filter(Boolean);
     return fileTreeBackend.watchTrees(paths, (path) => {
-      fetchTreeRef.current(path, { quiet: true });
+      fetchTreeRef.current(path, { quiet: true, compareMode: compareModesRef.current.get(path) ?? 'since-base' });
     });
   }, [watchDirsKey]);
 

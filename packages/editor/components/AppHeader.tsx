@@ -195,7 +195,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   octarineConfigured,
 }) => {
   return (
-    <header data-app-header="true" className="h-12 flex items-center justify-between px-2 md:px-4 border-b border-border/50 bg-card/50 backdrop-blur-xl sticky top-0 z-[50]">
+    <header data-app-header="true" className="h-12 shrink-0 flex items-center justify-between px-2 md:px-4 border-b border-border/50 bg-card/50 backdrop-blur-xl z-[50]">
       <div className="flex items-center gap-2">
         <AppHeaderLogo />
         {htmlSurface && onToggleHtmlTools && (

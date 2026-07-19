@@ -20,8 +20,8 @@ import {
   parseGitNumstat,
 } from "../../packages/shared/workspace-status";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { readFile, readdir, realpath } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, readdir, realpath, stat } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { Readable } from "node:stream";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
@@ -117,6 +117,18 @@ type HerdrReviewSnapshot = {
     cwd: string;
     /** Commands advertised by this pane's current Pi session. */
     commands?: HerdrCommandCapability[];
+    /** Pi-reported active context usage; null tokens are intentionally unknown. */
+    contextUsage?: HerdrContextUsage;
+    /** Current model selected in the Pi session. */
+    model?: HerdrModel;
+    /** Current tool/subagent activity reported by the Pi extension. */
+    activity?: HerdrActivity;
+    /** Cumulative model tokens charged over the complete Pi session. */
+    totalUsedTokens?: number;
+    /** Context tokens represented by the latest Pi compaction summary. */
+    latestCompactionTokens?: number;
+    /** Git branch resolved from this live pane's working directory. */
+    gitBranch?: string;
   }>;
   selectedMessageId: string | null;
   unreadMessageIds: string[];
@@ -144,6 +156,7 @@ export type HerdrPanel = {
   cwd: string;
   status: "working" | "idle" | "blocked" | "unknown";
   focused: boolean;
+  gitBranch?: string;
 };
 
 export type HerdrCommandCapability = {
@@ -152,11 +165,35 @@ export type HerdrCommandCapability = {
   source: "extension" | "prompt" | "skill";
 };
 
+export type HerdrContextUsage = {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+};
+
+export type HerdrModel = {
+  id: string;
+  provider?: string;
+  name?: string;
+};
+
+export type HerdrActivity = {
+  kind: "tool" | "subagent";
+  name?: string;
+  count: number;
+};
+
 export type PanelSessionEnrichment = {
   paneId: string;
   sessionId: string;
   messages: Array<{ messageId: string; text: string; timestamp?: string }>;
   commands: HerdrCommandCapability[];
+  contextUsage?: HerdrContextUsage;
+  model?: HerdrModel;
+  activity?: HerdrActivity;
+  /** Optional while an already-running, pre-metadata Pi extension republishs. */
+  totalUsedTokens?: number;
+  latestCompactionTokens?: number;
 };
 
 type LiveDraftAnnotation = { id: string; [key: string]: unknown };
@@ -188,8 +225,16 @@ type ActiveGitChangesReview = {
   paneId: string;
   sessionId: string;
   cwd: string;
+  compareMode: WorkspaceCompareMode;
   settled: boolean;
   server: ReviewServerResult;
+};
+
+type GitChangesReviewIdentity = {
+  paneId: string;
+  sessionId: string;
+  cwd: string;
+  compareMode?: WorkspaceCompareMode;
 };
 
 type ScoutRequest = {
@@ -224,6 +269,34 @@ const pendingInstructionDeliveries = new Map<string, PendingInstructionDelivery>
 // It deliberately reuses the same session-scoped instruction claim transport
 // rather than trying to translate comments back into document annotations.
 const activeGitChangesReviews = new Map<string, ActiveGitChangesReview>();
+export type SessionFileEntry = {
+  type?: unknown;
+  id?: unknown;
+  modelId?: unknown;
+  provider?: unknown;
+  tokensBefore?: unknown;
+  message?: {
+    role?: unknown;
+    model?: unknown;
+    provider?: unknown;
+    stopReason?: unknown;
+    usage?: { input?: unknown; output?: unknown; cacheRead?: unknown; cacheWrite?: unknown; totalTokens?: unknown };
+    content?: unknown;
+    toolCallId?: unknown;
+  };
+};
+export type SessionFallbackMetadata = Pick<PanelSessionEnrichment, "contextUsage" | "model" | "activity" | "totalUsedTokens" | "latestCompactionTokens">;
+type CachedSessionMetadata = {
+  file: string | null;
+  expiresAt: number;
+  mtimeMs?: number;
+  size?: number;
+  metadata?: SessionFallbackMetadata;
+};
+const sessionMetadataCache = new Map<string, CachedSessionMetadata>();
+const SESSION_METADATA_CACHE_MS = 2_000;
+const MAX_SESSION_METADATA_BYTES = 32 * 1024 * 1024;
+const PI_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // A pane can receive a click from multiple browser tabs (or a retried HTTP
 // request) before the first diff has finished preparing. This map coalesces
 // that asynchronous launch into exactly one isolated review server.
@@ -272,6 +345,200 @@ function text(value: unknown): string | null {
 function imageExtension(path: string): string {
   const lastDot = path.lastIndexOf(".");
   return lastDot === -1 ? "" : path.slice(lastDot + 1).toLowerCase();
+}
+
+function modelName(modelId: string): string {
+  const id = modelId.replace(/^.*\//, "");
+  if (/^gpt-5\.6-(?:terra|sol|luna)(?:-review)?$/i.test(id)) {
+    return id.replace(/^gpt/i, "GPT").replace(/-([a-z])/g, (_match, letter: string) => ` ${letter.toUpperCase()}`);
+  }
+  return id;
+}
+
+function sessionContextWindow(modelId: string): number | undefined {
+  if (/^cx\/gpt-5\.6-(?:terra|sol|luna)(?:-review)?$/i.test(modelId)) return 1_050_000;
+  return /(?:gpt-5|claude|gemini)/i.test(modelId) ? 200_000 : undefined;
+}
+
+function finiteUsageTokens(usage: SessionFileEntry["message"] extends { usage?: infer T } ? T : never): number {
+  if (!usage || typeof usage !== "object") return 0;
+  return [usage.input, usage.output, usage.cacheRead, usage.cacheWrite]
+    .reduce((sum, value) => sum + (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0), 0);
+}
+
+function contextTokensFromUsage(usage: SessionFileEntry["message"] extends { usage?: infer T } ? T : never): number {
+  if (!usage || typeof usage !== "object") return 0;
+  // Pi uses the provider's totalTokens for current context. It may be smaller
+  // than the billable component sum because cache reads are priced separately.
+  if (typeof usage.totalTokens === "number" && Number.isFinite(usage.totalTokens) && usage.totalTokens > 0) return usage.totalTokens;
+  return finiteUsageTokens(usage);
+}
+
+function sessionActivity(entries: SessionFileEntry[]): HerdrActivity | undefined {
+  const activeCalls = new Map<string, string>();
+  for (const entry of entries) {
+    const message = entry.message;
+    if (!message || typeof message !== "object") continue;
+    if (message.role === "toolResult" && typeof message.toolCallId === "string") {
+      activeCalls.delete(message.toolCallId);
+      continue;
+    }
+    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+    for (const content of message.content) {
+      if (!content || typeof content !== "object") continue;
+      const toolCall = content as { type?: unknown; id?: unknown; name?: unknown };
+      if (toolCall.type === "toolCall" && typeof toolCall.id === "string" && typeof toolCall.name === "string") {
+        activeCalls.set(toolCall.id, toolCall.name);
+      }
+    }
+  }
+  if (activeCalls.size === 0) return undefined;
+  const subagentCount = [...activeCalls.values()].filter((name) => name === "subagent").length;
+  if (subagentCount > 0) return { kind: "subagent", count: subagentCount };
+  const [name] = activeCalls.values();
+  return { kind: "tool", name, count: activeCalls.size };
+}
+
+async function findPiSessionFile(sessionId: string): Promise<string | null> {
+  if (!PI_SESSION_ID_PATTERN.test(sessionId)) return null;
+  const root = join(homedir(), ".pi", "agent", "sessions");
+  const suffix = `_${sessionId}.jsonl`;
+  try {
+    const projects = await readdir(root, { withFileTypes: true });
+    for (const project of projects) {
+      if (!project.isDirectory()) continue;
+      const projectPath = join(root, project.name);
+      const files = await readdir(projectPath, { withFileTypes: true });
+      const session = files.find((entry) => entry.isFile() && entry.name.endsWith(suffix));
+      if (session) return join(projectPath, session.name);
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export function sessionFallbackMetadataFromEntries(entries: SessionFileEntry[]): SessionFallbackMetadata {
+  let latestModel: HerdrModel | undefined;
+  let latestAssistantUsage: SessionFileEntry["message"]["usage"] | undefined;
+  let latestAssistantIndex = -1;
+  let latestCompactionIndex = -1;
+  let latestCompactionTokens: number | undefined;
+  let totalUsedTokens = 0;
+  for (const [index, entry] of entries.entries()) {
+    if (entry.type === "model_change" && typeof entry.modelId === "string") {
+      latestModel = { id: entry.modelId, ...(typeof entry.provider === "string" ? { provider: entry.provider } : {}), name: modelName(entry.modelId) };
+    }
+    if (entry.type === "compaction" && typeof entry.tokensBefore === "number" && Number.isFinite(entry.tokensBefore) && entry.tokensBefore >= 0) {
+      latestCompactionIndex = index;
+      latestCompactionTokens = entry.tokensBefore;
+    }
+    if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
+    const message = entry.message;
+    if (typeof message.model === "string") {
+      latestModel = { id: message.model, ...(typeof message.provider === "string" ? { provider: message.provider } : {}), name: modelName(message.model) };
+    }
+    totalUsedTokens += finiteUsageTokens(message.usage);
+    if (message.stopReason !== "aborted" && message.stopReason !== "error" && contextTokensFromUsage(message.usage) > 0) {
+      latestAssistantUsage = message.usage;
+      latestAssistantIndex = index;
+    }
+  }
+  const contextWindow = latestModel ? sessionContextWindow(latestModel.id) : undefined;
+  const contextTokens = latestAssistantIndex > latestCompactionIndex && latestAssistantUsage
+    ? contextTokensFromUsage(latestAssistantUsage)
+    : null;
+  const activity = sessionActivity(entries);
+  return {
+    ...(latestModel ? { model: latestModel } : {}),
+    ...(contextWindow ? { contextUsage: { tokens: contextTokens, contextWindow, percent: contextTokens === null ? null : (contextTokens / contextWindow) * 100 } } : {}),
+    totalUsedTokens,
+    ...(latestCompactionTokens !== undefined ? { latestCompactionTokens } : {}),
+    ...(activity ? { activity } : {}),
+  };
+}
+
+async function sessionFallbackMetadata(sessionId: string): Promise<SessionFallbackMetadata | undefined> {
+  const now = Date.now();
+  const cached = sessionMetadataCache.get(sessionId);
+  if (cached?.expiresAt && cached.expiresAt > now) return cached.metadata;
+  const file = cached?.file ?? await findPiSessionFile(sessionId);
+  if (!file) {
+    sessionMetadataCache.set(sessionId, { file: null, expiresAt: now + SESSION_METADATA_CACHE_MS });
+    return undefined;
+  }
+  try {
+    const fileStat = await stat(file);
+    if (!fileStat.isFile() || fileStat.size > MAX_SESSION_METADATA_BYTES) return undefined;
+    if (cached?.metadata && cached.file === file && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) {
+      cached.expiresAt = now + SESSION_METADATA_CACHE_MS;
+      return cached.metadata;
+    }
+    const entries = (await readFile(file, "utf8")).split("\n").flatMap((line): SessionFileEntry[] => {
+      if (!line.trim()) return [];
+      try {
+        const value = JSON.parse(line) as unknown;
+        return value && typeof value === "object" ? [value as SessionFileEntry] : [];
+      } catch {
+        return [];
+      }
+    });
+    const metadata = sessionFallbackMetadataFromEntries(entries);
+    sessionMetadataCache.set(sessionId, { file, expiresAt: now + SESSION_METADATA_CACHE_MS, mtimeMs: fileStat.mtimeMs, size: fileStat.size, metadata });
+    return metadata;
+  } catch {
+    sessionMetadataCache.set(sessionId, { file, expiresAt: now + SESSION_METADATA_CACHE_MS });
+    return undefined;
+  }
+}
+
+async function enrichPanelSessionMetadata(enrichments: ReadonlyMap<string, PanelSessionEnrichment>): Promise<Map<string, PanelSessionEnrichment>> {
+  const result = new Map(enrichments);
+  await Promise.all([...enrichments.entries()].map(async ([paneId, registration]) => {
+    if (registration.contextUsage && registration.model && registration.totalUsedTokens !== undefined && registration.latestCompactionTokens !== undefined && registration.activity) return;
+    const fallback = await sessionFallbackMetadata(registration.sessionId);
+    if (!fallback) return;
+    result.set(paneId, {
+      ...registration,
+      ...(registration.contextUsage ? {} : fallback.contextUsage ? { contextUsage: fallback.contextUsage } : {}),
+      ...(registration.model ? {} : fallback.model ? { model: fallback.model } : {}),
+      ...(registration.activity ? {} : fallback.activity ? { activity: fallback.activity } : {}),
+      ...(registration.totalUsedTokens !== undefined ? {} : fallback.totalUsedTokens !== undefined ? { totalUsedTokens: fallback.totalUsedTokens } : {}),
+      ...(registration.latestCompactionTokens !== undefined ? {} : fallback.latestCompactionTokens !== undefined ? { latestCompactionTokens: fallback.latestCompactionTokens } : {}),
+    });
+  }));
+  return result;
+}
+
+function normalizeActivity(value: unknown): HerdrActivity | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const activity = value as Record<string, unknown>;
+  const kind = activity.kind;
+  const name = text(activity.name) ?? undefined;
+  const count = activity.count;
+  if ((kind !== "tool" && kind !== "subagent") || typeof count !== "number" || !Number.isInteger(count) || count < 1 || count > 100) return null;
+  return { kind, ...(name ? { name } : {}), count };
+}
+
+function normalizeModel(value: unknown): HerdrModel | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const model = value as Record<string, unknown>;
+  const id = text(model.id);
+  const provider = text(model.provider) ?? undefined;
+  const name = text(model.name) ?? undefined;
+  return id && id.length <= 200 ? { id, ...(provider ? { provider } : {}), ...(name ? { name } : {}) } : null;
+}
+
+function normalizeContextUsage(value: unknown): HerdrContextUsage | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const usage = value as Record<string, unknown>;
+  const tokens = usage.tokens;
+  const contextWindow = usage.contextWindow;
+  const percent = usage.percent;
+  if ((tokens !== null && (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens < 0))
+    || typeof contextWindow !== "number" || !Number.isFinite(contextWindow) || contextWindow <= 0
+    || (percent !== null && (typeof percent !== "number" || !Number.isFinite(percent) || percent < 0))) return null;
+  return { tokens, contextWindow, percent };
 }
 
 function imageAttachments(value: unknown): LiveImageAttachment[] | null {
@@ -933,13 +1200,51 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
     writeJson(response, 400, { error: "Invalid Pi command capabilities" });
     return;
   }
+  const context = body?.contextUsage;
+  const contextUsage = context === undefined ? undefined : normalizeContextUsage(context);
+  if (context !== undefined && !contextUsage) {
+    writeJson(response, 400, { error: "Invalid Pi context usage" });
+    return;
+  }
+  const modelValue = body?.model;
+  const model = modelValue === undefined ? undefined : normalizeModel(modelValue);
+  if (modelValue !== undefined && !model) {
+    writeJson(response, 400, { error: "Invalid Pi model" });
+    return;
+  }
+  const activityValue = body?.activity;
+  const activity = activityValue === undefined ? undefined : normalizeActivity(activityValue);
+  if (activityValue !== undefined && !activity) {
+    writeJson(response, 400, { error: "Invalid Pi activity" });
+    return;
+  }
+  const totalUsedTokens = body?.totalUsedTokens;
+  if (totalUsedTokens !== undefined && (typeof totalUsedTokens !== "number" || !Number.isFinite(totalUsedTokens) || totalUsedTokens < 0)) {
+    writeJson(response, 400, { error: "Invalid Pi total token usage" });
+    return;
+  }
+  const compactedTokens = body?.latestCompactionTokens;
+  if (compactedTokens !== undefined && (!Number.isFinite(compactedTokens) || typeof compactedTokens !== "number" || compactedTokens < 0)) {
+    writeJson(response, 400, { error: "Invalid Pi compaction tokens" });
+    return;
+  }
 
   const panels = await discoverPanels();
   if (!panels.some((panel) => panel.id === paneId)) {
     writeJson(response, 404, { error: "The Pi panel is no longer live" });
     return;
   }
-  const incoming: PanelSessionEnrichment = { paneId, sessionId, messages: normalizedMessages, commands: normalizedCommands };
+  const incoming: PanelSessionEnrichment = {
+    paneId,
+    sessionId,
+    messages: normalizedMessages,
+    commands: normalizedCommands,
+    ...(typeof totalUsedTokens === "number" ? { totalUsedTokens } : {}),
+    ...(contextUsage ? { contextUsage } : {}),
+    ...(model ? { model } : {}),
+    ...(activity ? { activity } : {}),
+    ...(typeof compactedTokens === "number" ? { latestCompactionTokens: compactedTokens } : {}),
+  };
   if (!acceptsPanelSessionUpdate(panelSessions.get(paneId), incoming, isSubagent)) {
     // A nested Pi child inherited this pane's HERDR_PANE_ID. It is not the
     // browser-facing session owner and must not cause repeated session resets.
@@ -982,15 +1287,10 @@ function stopGitChangesReview(review: ActiveGitChangesReview): void {
   }
 }
 
-type GitChangesReviewIdentity = {
-  paneId: string;
-  sessionId: string;
-  cwd: string;
-};
-
 export type PendingGitChangesReviewLaunch<T extends GitChangesReviewIdentity> = {
   sessionId: string;
   cwd: string;
+  compareMode?: WorkspaceCompareMode;
   cancelled: boolean;
   promise: Promise<T>;
 };
@@ -1026,14 +1326,15 @@ export async function reuseOrLaunchGitChangesReview<T extends GitChangesReviewId
   cwd: string,
   launch: () => Promise<T>,
   disposeSuperseded?: (review: T) => void,
+  compareMode?: WorkspaceCompareMode,
 ): Promise<{ review: T; reused: boolean }> {
   const current = active.get(paneId);
-  if (current?.sessionId === sessionId && current.cwd === cwd) {
+  if (current?.sessionId === sessionId && current.cwd === cwd && current.compareMode === compareMode) {
     return { review: current, reused: true };
   }
 
   const inFlight = pending.get(paneId);
-  if (inFlight?.sessionId === sessionId && inFlight.cwd === cwd && !inFlight.cancelled) {
+  if (inFlight?.sessionId === sessionId && inFlight.cwd === cwd && inFlight.compareMode === compareMode && !inFlight.cancelled) {
     try {
       const review = await inFlight.promise;
       if (inFlight.cancelled) {
@@ -1058,6 +1359,7 @@ export async function reuseOrLaunchGitChangesReview<T extends GitChangesReviewId
   const entry = {
     sessionId,
     cwd,
+    ...(compareMode ? { compareMode } : {}),
     cancelled: false,
   } as PendingGitChangesReviewLaunch<T>;
   entry.promise = Promise.resolve().then(launch);
@@ -1184,6 +1486,12 @@ export function reviewSnapshotFromPanels(
         workspaceId: panel.workspaceId,
         workspaceKey: scoutWorkspaceKey(panel) ?? undefined,
         commands: enrichments.get(panel.id)?.commands ?? [],
+        ...(enrichments.get(panel.id)?.contextUsage ? { contextUsage: enrichments.get(panel.id)!.contextUsage } : {}),
+        ...(enrichments.get(panel.id)?.model ? { model: enrichments.get(panel.id)!.model } : {}),
+        ...(enrichments.get(panel.id)?.activity ? { activity: enrichments.get(panel.id)!.activity } : {}),
+        ...(enrichments.get(panel.id)?.totalUsedTokens !== undefined ? { totalUsedTokens: enrichments.get(panel.id)!.totalUsedTokens } : {}),
+        ...(enrichments.get(panel.id)?.latestCompactionTokens !== undefined ? { latestCompactionTokens: enrichments.get(panel.id)!.latestCompactionTokens } : {}),
+        ...(panel.gitBranch ? { gitBranch: panel.gitBranch } : {}),
       }];
     }
     return responses.map((response, index) => ({
@@ -1204,6 +1512,12 @@ export function reviewSnapshotFromPanels(
       workspaceId: panel.workspaceId,
       workspaceKey: scoutWorkspaceKey(panel) ?? undefined,
       commands: enrichments.get(panel.id)!.commands,
+      ...(enrichments.get(panel.id)?.contextUsage ? { contextUsage: enrichments.get(panel.id)!.contextUsage } : {}),
+      ...(enrichments.get(panel.id)?.model ? { model: enrichments.get(panel.id)!.model } : {}),
+      ...(enrichments.get(panel.id)?.activity ? { activity: enrichments.get(panel.id)!.activity } : {}),
+      ...(enrichments.get(panel.id)?.totalUsedTokens !== undefined ? { totalUsedTokens: enrichments.get(panel.id)!.totalUsedTokens } : {}),
+      ...(enrichments.get(panel.id)?.latestCompactionTokens !== undefined ? { latestCompactionTokens: enrichments.get(panel.id)!.latestCompactionTokens } : {}),
+      ...(panel.gitBranch ? { gitBranch: panel.gitBranch } : {}),
     }));
   });
   const selectedMessage = selected
@@ -1330,6 +1644,19 @@ async function closeProcessPanel(request: IncomingMessage, response: ServerRespo
 
 type HerdrLiveState = { panels: HerdrPanel[]; snapshot: HerdrReviewSnapshot };
 
+type CachedGitBranch = { branch: string | undefined; expiresAt: number };
+const gitBranchCache = new Map<string, CachedGitBranch>();
+const GIT_BRANCH_CACHE_MS = 2_000;
+
+async function gitBranch(cwd: string): Promise<string | undefined> {
+  const cached = gitBranchCache.get(cwd);
+  if (cached && cached.expiresAt > Date.now()) return cached.branch;
+  const result = await runHerdrGit(["--no-optional-locks", "branch", "--show-current"], { cwd, timeoutMs: 2_000 });
+  const branch = result.exitCode === 0 && result.stdout.trim() ? result.stdout.trim() : undefined;
+  gitBranchCache.set(cwd, { branch, expiresAt: Date.now() + GIT_BRANCH_CACHE_MS });
+  return branch;
+}
+
 async function readLiveState(): Promise<HerdrLiveState> {
   const panels = await discoverPanels();
   const livePaneIds = new Set(panels.map((panel) => panel.id));
@@ -1359,7 +1686,14 @@ async function readLiveState(): Promise<HerdrLiveState> {
       pendingInstructionDeliveries.delete(deliveryId);
     }
   }
-  return { panels, snapshot: reviewSnapshotFromPanels(panels, null, panelSessions) };
+  const [panelsWithGitBranches, enrichedSessions] = await Promise.all([
+    Promise.all(panels.map(async (panel) => {
+      const branch = await gitBranch(panel.cwd);
+      return { ...panel, ...(branch ? { gitBranch: branch } : {}) };
+    })),
+    enrichPanelSessionMetadata(panelSessions),
+  ]);
+  return { panels: panelsWithGitBranches, snapshot: reviewSnapshotFromPanels(panelsWithGitBranches, null, enrichedSessions) };
 }
 
 const liveSnapshotPublisher = new LiveSnapshotPublisher(readLiveState);
@@ -1529,7 +1863,24 @@ const herdrGitRuntime: ReviewGitRuntime = {
   },
 };
 
-export async function workspaceStatus(rootPath: string): Promise<WorkspaceStatus> {
+export type WorkspaceCompareMode = "since-base" | "head" | "unstaged" | "staged";
+
+function parseWorkspaceCompareMode(value: unknown): WorkspaceCompareMode | null {
+  return value === "since-base" || value === "head" || value === "unstaged" || value === "staged" ? value : null;
+}
+
+function workspaceCompareDiffType(mode: WorkspaceCompareMode): "since-base" | "uncommitted" | "unstaged" | "staged" {
+  return mode === "head" ? "uncommitted" : mode;
+}
+
+function workspaceCompareLabel(mode: WorkspaceCompareMode, base?: string): string {
+  if (mode === "since-base") return `All changes since ${base ?? "base"}`;
+  if (mode === "head") return "Working tree vs HEAD";
+  if (mode === "unstaged") return "Unstaged changes";
+  return "Staged changes";
+}
+
+export async function workspaceStatus(rootPath: string, compareMode: WorkspaceCompareMode = "since-base"): Promise<WorkspaceStatus> {
   try {
     const repoResult = await runHerdrGit(["--no-optional-locks", "rev-parse", "--show-toplevel"], { cwd: rootPath });
     if (repoResult.exitCode !== 0 || !repoResult.stdout.trim()) throw new Error("not a git repository");
@@ -1540,6 +1891,62 @@ export async function workspaceStatus(rootPath: string): Promise<WorkspaceStatus
       includeWorkspaceChange,
     );
     if (!workspace.available) return workspace;
+    if (compareMode !== "since-base") {
+      const rootPathspec = relative(repoRoot, rootPath).replace(/\\/g, "/") || ".";
+      const diffType = workspaceCompareDiffType(compareMode);
+      const diffArgs = diffType === "uncommitted"
+        ? ["--no-optional-locks", "diff", "--numstat", "-z", "HEAD", "--", rootPathspec]
+        : diffType === "staged"
+          ? ["--no-optional-locks", "diff", "--cached", "--numstat", "-z", "--", rootPathspec]
+          : ["--no-optional-locks", "diff", "--numstat", "-z", "--", rootPathspec];
+      const nameArgs = diffType === "uncommitted"
+        ? ["--no-optional-locks", "diff", "--name-status", "-z", "HEAD", "--", rootPathspec]
+        : diffType === "staged"
+          ? ["--no-optional-locks", "diff", "--cached", "--name-status", "-z", "--", rootPathspec]
+          : ["--no-optional-locks", "diff", "--name-status", "-z", "--", rootPathspec];
+      const [names, countsResult] = await Promise.all([
+        runHerdrGit(nameArgs, { cwd: repoRoot }),
+        runHerdrGit(diffArgs, { cwd: repoRoot }),
+      ]);
+      if (names.exitCode !== 0 || countsResult.exitCode !== 0) throw new Error("git diff failed");
+      const counts = parseGitNumstat(countsResult.stdout);
+      const files: WorkspaceStatus["files"] = {};
+      for (const change of parseNameStatus(names.stdout)) {
+        if (!pathIsInWorkspace(rootPath, repoRoot, change.repoRelativePath)) continue;
+        const countsForFile = counts.get(change.repoRelativePath) ?? { additions: 0, deletions: 0 };
+        const oldCounts = change.oldRepoRelativePath
+          ? counts.get(change.oldRepoRelativePath) ?? { additions: 0, deletions: 0 }
+          : { additions: 0, deletions: 0 };
+        files[resolve(repoRoot, change.repoRelativePath)] = {
+          path: resolve(repoRoot, change.repoRelativePath),
+          repoRelativePath: change.repoRelativePath,
+          oldPath: change.oldRepoRelativePath ? resolve(repoRoot, change.oldRepoRelativePath) : undefined,
+          status: change.status,
+          additions: countsForFile.additions + oldCounts.additions,
+          deletions: countsForFile.deletions + oldCounts.deletions,
+          staged: compareMode === "staged",
+          unstaged: compareMode === "unstaged",
+        };
+      }
+      if (compareMode !== "staged") {
+        for (const change of Object.values(workspace.files)) {
+          if (change.status !== "untracked") continue;
+          files[change.path] = { ...change, staged: false, unstaged: true };
+        }
+      }
+      const values = Object.values(files);
+      return {
+        available: true,
+        rootPath,
+        repoRoot,
+        files,
+        totals: {
+          files: values.length,
+          additions: values.reduce((sum, file) => sum + file.additions, 0),
+          deletions: values.reduce((sum, file) => sum + file.deletions, 0),
+        },
+      };
+    }
     const defaultBranch = await getDefaultBranch(herdrGitRuntime, repoRoot);
     const baseResolves = (await herdrGitRuntime.runGit(
       ["rev-parse", "--verify", "--quiet", "--end-of-options", `${defaultBranch}^{commit}`],
@@ -1672,6 +2079,11 @@ async function openGitChangesReview(request: IncomingMessage, response: ServerRe
   }
   const body = await requestJson(request);
   const paneId = text(body?.paneId);
+  const compareMode = body?.compareMode === undefined ? "since-base" : parseWorkspaceCompareMode(body.compareMode);
+  if (!compareMode) {
+    writeJson(response, 400, { error: "Invalid Git compare mode" });
+    return;
+  }
   if (!paneId) {
     writeJson(response, 400, { error: "A live Pi pane is required" });
     return;
@@ -1698,7 +2110,7 @@ async function openGitChangesReview(request: IncomingMessage, response: ServerRe
     const existing = activeGitChangesReviews.get(paneId);
     if (existing?.settled) stopGitChangesReview(existing);
     const liveExisting = activeGitChangesReviews.get(paneId);
-    if (liveExisting && (liveExisting.sessionId !== requestedSessionId || liveExisting.cwd !== workspace.root)) {
+    if (liveExisting && (liveExisting.sessionId !== requestedSessionId || liveExisting.cwd !== workspace.root || liveExisting.compareMode !== compareMode)) {
       stopGitChangesReview(liveExisting);
     }
 
@@ -1723,6 +2135,7 @@ async function openGitChangesReview(request: IncomingMessage, response: ServerRe
           // Prefer the same composite Git Changes view when the VCS offers it;
           // prepareLocalReviewDiff falls back to its first valid mode otherwise.
           configuredDiffType: "since-base",
+          requestedDiffType: workspaceCompareDiffType(compareMode),
           hideWhitespace: config.diffOptions?.hideWhitespace ?? false,
           ...(pathspec ? { pathspec } : {}),
         });
@@ -1765,7 +2178,7 @@ async function openGitChangesReview(request: IncomingMessage, response: ServerRe
             pendingInstructionDeliveries.set(delivery.deliveryId, delivery);
           },
         });
-        const review: ActiveGitChangesReview = { ...captured, cwd: workspace.root, settled: false, server };
+        const review: ActiveGitChangesReview = { ...captured, cwd: workspace.root, compareMode, settled: false, server };
         // Give the review tab time to receive its submission response before the
         // isolated listener closes, matching the standalone review command.
         void server.waitForDecision().finally(() => {
@@ -1775,6 +2188,7 @@ async function openGitChangesReview(request: IncomingMessage, response: ServerRe
           return review;
         },
         stopGitChangesReview,
+        compareMode,
       );
     } catch (error) {
       if (error instanceof GitChangesReviewLaunchSuperseded) {
@@ -1808,6 +2222,12 @@ async function openGitChangesReview(request: IncomingMessage, response: ServerRe
 
 async function serveWorkspaceFiles(response: ServerResponse, url: URL): Promise<void> {
   const dirPath = text(url.searchParams.get("dirPath"));
+  const requestedCompareMode = url.searchParams.get("compare");
+  const compareMode = requestedCompareMode === null ? "since-base" : parseWorkspaceCompareMode(requestedCompareMode);
+  if (!compareMode) {
+    writeJson(response, 400, { error: "Invalid Git compare mode" });
+    return;
+  }
   if (!dirPath) {
     writeJson(response, 400, { error: "dirPath is required" });
     return;
@@ -1819,7 +2239,7 @@ async function serveWorkspaceFiles(response: ServerResponse, url: URL): Promise<
   }
 
   const { root } = workspace;
-  const status = await workspaceStatus(root);
+  const status = await workspaceStatus(root, compareMode);
   const state: FileBrowserWalkState = { files: new Set(), truncated: false };
   // Git changes are seeded first so changed/deleted files remain visible when a
   // large workspace reaches the tree cap.
@@ -1831,6 +2251,8 @@ async function serveWorkspaceFiles(response: ServerResponse, url: URL): Promise<
   writeJson(response, 200, {
     tree: buildFileTree([...state.files].sort()),
     workspaceStatus: status,
+    compareMode,
+    compareLabel: workspaceCompareLabel(compareMode, status.sinceBase?.base),
     truncated: state.truncated,
     fileLimit: FILE_BROWSER_MAX_FILES,
   });

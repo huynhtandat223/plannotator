@@ -6,6 +6,8 @@ interface GitChangesBrowserProps {
   dirs: DirState[];
   rootPath?: string;
   onSelectFile?: (absolutePath: string, dirPath: string) => void;
+  compareMode?: "since-base" | "head" | "unstaged" | "staged";
+  onCompareModeChange?: (mode: "since-base" | "head" | "unstaged" | "staged") => void;
   onRefresh: () => void;
   onOpenFullReview?: () => void;
 }
@@ -51,7 +53,7 @@ const ChangeRow: React.FC<{ entry: ChangeEntry; onSelectFile?: GitChangesBrowser
   );
 };
 
-export const GitChangesBrowser: React.FC<GitChangesBrowserProps> = ({ dirs, rootPath, onSelectFile, onRefresh, onOpenFullReview }) => {
+export const GitChangesBrowser: React.FC<GitChangesBrowserProps> = ({ dirs, rootPath, onSelectFile, compareMode = "since-base", onCompareModeChange, onRefresh, onOpenFullReview }) => {
   const selectedDirs = React.useMemo(
     () => rootPath ? dirs.filter((dir) => normalizePath(dir.path) === normalizePath(rootPath)) : dirs,
     [dirs, rootPath],
@@ -84,15 +86,34 @@ export const GitChangesBrowser: React.FC<GitChangesBrowserProps> = ({ dirs, root
 
   return (
     <div className="flex flex-col">
-      <div className="flex items-center justify-between border-b border-border/30 px-3 py-2">
-        <span className="text-[10px] text-muted-foreground">
-          {usesSinceBase ? `All changes since ${bases.join(", ") || "base"}` : "Current Git repository"}
-        </span>
-        <div className="flex items-center gap-1">
+      <div className="border-b border-border/30 px-3 py-2">
+        <div className="flex items-center justify-between gap-2">
+          <label className="inline-flex min-w-0 items-center gap-1.5 text-[10px] font-medium text-muted-foreground">
+            <span>Compare</span>
+            <span className="relative inline-flex shrink-0 items-center">
+              <select
+                value={compareMode}
+                onChange={(event) => onCompareModeChange?.(event.target.value as "since-base" | "head" | "unstaged" | "staged")}
+                disabled={!onCompareModeChange}
+                className="h-7 max-w-[13.5rem] cursor-pointer appearance-none rounded-md border border-border bg-background py-1 pl-2 pr-7 text-[10px] font-medium text-foreground shadow-sm outline-none transition-colors hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-default disabled:opacity-70"
+                aria-label="Compare Git changes"
+              >
+                <option value="since-base">Since {usesSinceBase ? bases.join(", ") || "base" : "base"}</option>
+                <option value="head">Working tree vs HEAD</option>
+                <option value="unstaged">Unstaged changes</option>
+                <option value="staged">Staged changes</option>
+              </select>
+              <svg aria-hidden="true" className="pointer-events-none absolute right-2 h-3 w-3 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="m6 9 6 6 6-6" />
+              </svg>
+            </span>
+          </label>
+          <div className="flex shrink-0 items-center gap-1">
           {onOpenFullReview && entries.length > 0 && (
             <button type="button" onClick={onOpenFullReview} data-open-full-review className="rounded px-2 py-1 text-[10px] text-primary hover:bg-muted/50">Open full review</button>
           )}
           <button type="button" onClick={onRefresh} className="rounded px-2 py-1 text-[10px] text-primary hover:bg-muted/50">Refresh</button>
+          </div>
         </div>
       </div>
       {isLoading ? (

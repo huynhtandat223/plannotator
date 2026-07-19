@@ -116,6 +116,13 @@ describe("Ex-Plannotator package surface", () => {
 		await waitForDeferredReconciliation();
 		expect(reports.at(-1)).toEqual([{ messageId: "latest", text: "Latest" }]);
 
+		const reportCountBeforeToolLifecycle = reports.length;
+		pi.handlers.get("turn_end")!({} as never, context as never);
+		pi.handlers.get("tool_execution_start")!({ toolCallId: "call-1", toolName: "bash" } as never, context as never);
+		pi.handlers.get("tool_execution_end")!({ toolCallId: "call-1", toolName: "bash" } as never, context as never);
+		await Promise.resolve();
+		expect(reports).toHaveLength(reportCountBeforeToolLifecycle + 3);
+
 		const reportCountBeforeAgentLifecycle = reports.length;
 		pi.handlers.get("agent_start")!({} as never, context as never);
 		pi.handlers.get("agent_end")!({} as never, context as never);

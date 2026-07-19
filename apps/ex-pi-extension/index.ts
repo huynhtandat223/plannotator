@@ -6,7 +6,7 @@ import {
 import { startLiveMessageReviewBrowser } from "./browser.js";
 import { formatLiveFeedbackBatch } from "./session.js";
 import type { LiveMessageReviewServer } from "./server.js";
-import { pollHerdrFeedback, pollHerdrInstruction, releaseHerdrSession, reportHerdrSession } from "./herdr-registration.js";
+import { beginHerdrTool, clearHerdrTools, endHerdrTool, pollHerdrFeedback, pollHerdrInstruction, releaseHerdrSession, reportHerdrSession } from "./herdr-registration.js";
 
 export const EX_PLANNOTATOR_COMMAND = "ex-plannotator-last";
 
@@ -124,6 +124,23 @@ export default function exPlannotator(
 		startHerdrFeedbackPoll(ctx);
 	});
 
+	// Context usage is updated after every provider response. Tool boundaries
+	// publish independently so the live pane reports both ordinary tools and
+	// concurrently running subagents while the response is still in progress.
+	pi.on("turn_end", (_event, ctx) => {
+		void dependencies.reportHerdr(ctx, pi.getCommands());
+	});
+
+	pi.on("tool_execution_start", (event, ctx) => {
+		beginHerdrTool(ctx, event.toolCallId, event.toolName);
+		void dependencies.reportHerdr(ctx, pi.getCommands());
+	});
+
+	pi.on("tool_execution_end", (event, ctx) => {
+		endHerdrTool(ctx, event.toolCallId);
+		void dependencies.reportHerdr(ctx, pi.getCommands());
+	});
+
 	pi.on("message_end", (event, ctx) => {
 		if (event.message.role !== "assistant") return;
 		const session = activeServer;
@@ -158,6 +175,7 @@ export default function exPlannotator(
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		clearHerdrTools(ctx);
 		closeActiveServer();
 		stopHerdrFeedbackPoll();
 		await dependencies.releaseHerdr(ctx);

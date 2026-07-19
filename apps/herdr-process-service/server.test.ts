@@ -23,6 +23,7 @@ import {
   type HerdrPanel,
   type PanelSessionEnrichment,
   workspaceStatus,
+  sessionFallbackMetadataFromEntries,
   reuseOrLaunchGitChangesReview,
   cancelPendingGitChangesReviewLaunch,
   type PendingGitChangesReviewLaunch,
@@ -104,6 +105,30 @@ describe("panel-session transport", () => {
   });
 });
 
+describe("Pi session metadata fallback", () => {
+  test("uses Pi totalTokens for context but totals all billable usage", () => {
+    const metadata = sessionFallbackMetadataFromEntries([
+      { type: "model_change", provider: "9route", modelId: "cx/gpt-5.6-terra" },
+      { type: "message", message: { role: "assistant", model: "cx/gpt-5.6-terra", provider: "9route", usage: { input: 4_000, output: 500, cacheRead: 200_000, cacheWrite: 0, totalTokens: 204_500 } } },
+    ]);
+
+    expect(metadata.contextUsage).toEqual({ tokens: 204_500, contextWindow: 1_050_000, percent: (204_500 / 1_050_000) * 100 });
+    expect(metadata.totalUsedTokens).toBe(204_500);
+    expect(metadata.model).toMatchObject({ id: "cx/gpt-5.6-terra", provider: "9route", name: "GPT-5.6 Terra" });
+  });
+
+  test("keeps context unknown until an assistant response after compaction", () => {
+    const metadata = sessionFallbackMetadataFromEntries([
+      { type: "model_change", provider: "9route", modelId: "cx/gpt-5.6-terra" },
+      { type: "message", message: { role: "assistant", usage: { input: 3_000, output: 200, cacheRead: 100_000, cacheWrite: 0, totalTokens: 103_200 } } },
+      { type: "compaction", tokensBefore: 103_200 },
+    ]);
+
+    expect(metadata.contextUsage).toEqual({ tokens: null, contextWindow: 1_050_000, percent: null });
+    expect(metadata.latestCompactionTokens).toBe(103_200);
+  });
+});
+
 describe("Git Changes full-review launch", () => {
   test("coalesces simultaneous launches for the same pane session into one review", async () => {
     type Review = { paneId: string; sessionId: string; cwd: string; port: number };
@@ -127,6 +152,34 @@ describe("Git Changes full-review launch", () => {
     expect(second).toEqual({ review: { paneId: "w:p1", sessionId: "session-1", cwd: "/repo", port: 41001 }, reused: true });
     expect(active.get("w:p1")).toEqual(first.review);
     expect(launches.has("w:p1")).toBe(false);
+  });
+
+  test("does not reuse a review launched with a different compare mode", async () => {
+    type Review = { paneId: string; sessionId: string; cwd: string; compareMode?: "since-base" | "head" | "unstaged" | "staged" };
+    const active = new Map<string, Review>();
+    const launches = new Map<string, PendingGitChangesReviewLaunch<Review>>();
+    let created = 0;
+
+    const first = await reuseOrLaunchGitChangesReview(
+      active, launches, "w:p1", "session-1", "/repo",
+      async () => ({ paneId: "w:p1", sessionId: "session-1", cwd: "/repo", compareMode: "since-base" }),
+      undefined,
+      "since-base",
+    );
+    const second = await reuseOrLaunchGitChangesReview(
+      active, launches, "w:p1", "session-1", "/repo",
+      async () => {
+        created += 1;
+        return { paneId: "w:p1", sessionId: "session-1", cwd: "/repo", compareMode: "head" };
+      },
+      undefined,
+      "head",
+    );
+
+    expect(first.reused).toBe(false);
+    expect(second.reused).toBe(false);
+    expect(created).toBe(1);
+    expect(active.get("w:p1")?.compareMode).toBe("head");
   });
 
   test("releases the reservation after a failed launch so the pane can retry", async () => {
@@ -305,6 +358,31 @@ describe("workspaceStatus", () => {
       "apps/pane/committed.ts": { group: "committed", staged: false },
       "apps/pane/untracked.ts": { group: "untracked", staged: false },
     });
+  });
+
+  test("switches Git Changes comparison to HEAD, unstaged, or staged", async () => {
+    const repo = createTemporaryRepository();
+    writeFileSync(join(repo, "tracked.ts"), "export const version = 1;\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "base");
+
+    writeFileSync(join(repo, "tracked.ts"), "export const version = 2;\n");
+    git(repo, "add", "tracked.ts");
+    writeFileSync(join(repo, "tracked.ts"), "export const version = 3;\n");
+    writeFileSync(join(repo, "untracked.ts"), "export const fresh = true;\n");
+
+    const head = await workspaceStatus(repo, "head");
+    expect(Object.keys(head.files).sort()).toEqual([join(repo, "tracked.ts"), join(repo, "untracked.ts")]);
+    expect(head.files[join(repo, "tracked.ts")]).toMatchObject({ additions: 1, deletions: 1, staged: false, unstaged: false });
+    expect(head.files[join(repo, "untracked.ts")]).toMatchObject({ status: "untracked", additions: 1 });
+
+    const unstaged = await workspaceStatus(repo, "unstaged");
+    expect(Object.keys(unstaged.files).sort()).toEqual([join(repo, "tracked.ts"), join(repo, "untracked.ts")]);
+    expect(unstaged.files[join(repo, "tracked.ts")]).toMatchObject({ additions: 1, deletions: 1, staged: false, unstaged: true });
+
+    const staged = await workspaceStatus(repo, "staged");
+    expect(Object.keys(staged.files)).toEqual([join(repo, "tracked.ts")]);
+    expect(staged.files[join(repo, "tracked.ts")]).toMatchObject({ additions: 1, deletions: 1, staged: true, unstaged: false });
   });
 
   test("keeps composite since-base line counts for a committed-and-modified file", async () => {
@@ -718,6 +796,32 @@ describe("panelsFromSnapshot", () => {
         paneLabel: "two",
       }),
     ]);
+  });
+
+  test("passes Pi context, compaction, and Git branch metadata to every response in a pane", () => {
+    const panels: HerdrPanel[] = [
+      { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true, gitBranch: "feature/herdr-metadata" },
+    ];
+    const enrichments = new Map<string, PanelSessionEnrichment>([["w:p1", {
+      paneId: "w:p1",
+      sessionId: "session-1",
+      commands: [],
+      contextUsage: { tokens: null, contextWindow: 200_000, percent: null },
+      model: { id: "cx/gpt-5.6-terra", provider: "9route" },
+      activity: { kind: "subagent", count: 2 },
+      totalUsedTokens: 5_300_000,
+      latestCompactionTokens: 156_000,
+      messages: [{ messageId: "assistant-1", text: "Response" }],
+    }]]);
+
+    expect(reviewSnapshotFromPanels(panels, null, enrichments).messages[0]).toMatchObject({
+      gitBranch: "feature/herdr-metadata",
+      contextUsage: { tokens: null, contextWindow: 200_000, percent: null },
+      model: { id: "cx/gpt-5.6-terra", provider: "9route" },
+      activity: { kind: "subagent", count: 2 },
+      totalUsedTokens: 5_300_000,
+      latestCompactionTokens: 156_000,
+    });
   });
 
   test("selects the newest response in the focused pane by default", () => {
