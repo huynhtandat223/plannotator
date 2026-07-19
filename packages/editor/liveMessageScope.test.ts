@@ -95,4 +95,41 @@ describe('live message session scope', () => {
     expect(result.nextSelectedMessageId).toBe('w:p1:response-2');
     expect(result.followNextPaneResponseReset).toBe(true);
   });
+
+  test('follows Herdr’s focused-pane selection until the reviewer picks a source', () => {
+    const previous = [message('w:p1:response-1', 'w:p1', 'session-1', 'response-1')];
+    const next = [
+      message('w:p1:response-1', 'w:p1', 'session-1', 'response-1'),
+      message('w:p2:response-1', 'w:p2', 'session-2', 'response-1'),
+    ];
+
+    const result = reconcileLiveMessageSelection(
+      previous,
+      next,
+      'w:p1:response-1',
+      'w:p2:response-1',
+      null,
+    );
+
+    expect(result.nextSelectedMessageId).toBe('w:p2:response-1');
+  });
+
+  test('keeps an explicitly selected source when Herdr focus changes', () => {
+    const previous = [message('w:p1:response-1', 'w:p1', 'session-1', 'response-1')];
+    const next = [
+      message('w:p1:response-1', 'w:p1', 'session-1', 'response-1'),
+      message('w:p2:response-1', 'w:p2', 'session-2', 'response-1'),
+    ];
+
+    const result = reconcileLiveMessageSelection(
+      previous,
+      next,
+      'w:p1:response-1',
+      'w:p2:response-1',
+      null,
+      true,
+    );
+
+    expect(result.nextSelectedMessageId).toBe('w:p1:response-1');
+  });
 });

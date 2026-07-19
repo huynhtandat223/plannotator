@@ -48,6 +48,8 @@ export function reconcileLiveMessageSelection(
   currentSelectedMessageId: string | null,
   snapshotSelectedMessageId: string | null,
   followNextPaneResponse: { paneId: string; latestMessageId: string } | null,
+  /** A reviewer-selected source must remain stable across live snapshots. */
+  hasUserSelectedMessage = false,
 ): { nextSelectedMessageId: string | null; followNextPaneResponseReset: boolean } {
   const selectedPaneId = previousMessages.find((message) => message.messageId === currentSelectedMessageId)?.paneId;
   const changedPaneIds = changedLivePaneSessionIds(previousMessages, nextMessages);
@@ -80,6 +82,17 @@ export function reconcileLiveMessageSelection(
         followNextPaneResponseReset: false,
       };
     }
+  }
+
+  // Before a reviewer explicitly picks a source, follow the server's selected
+  // live pane. That selection is Herdr's focused-pane truth; retaining the
+  // initial /api/plan source after focus changed makes the viewer's content
+  // and feedback target silently diverge.
+  if (!hasUserSelectedMessage && snapshotSelectedMessageId !== null && nextMessages.some((message) => message.messageId === snapshotSelectedMessageId)) {
+    return {
+      nextSelectedMessageId: snapshotSelectedMessageId,
+      followNextPaneResponseReset: false,
+    };
   }
 
   // Normal selection reconciliation logic

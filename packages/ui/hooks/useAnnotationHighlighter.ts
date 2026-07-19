@@ -1016,6 +1016,14 @@ export function useAnnotationHighlighter({
     };
   }, [clearPendingSelection, enabled]);
 
+  // Restore annotations received after the viewer mounts (for example, a
+  // server-loaded Plan File selection). The highlighter's class-only pass
+  // below can style an existing mark, but cannot create one from a persisted
+  // annotation by itself.
+  useEffect(() => {
+    applyAnnotationsInternal(annotations);
+  }, [annotations, applyAnnotationsInternal]);
+
   // Apply CSS classes to existing annotations
   useEffect(() => {
     const highlighter = highlighterRef.current;

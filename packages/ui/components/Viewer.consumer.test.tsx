@@ -10,7 +10,7 @@ import React from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 
-import { AnnotationType, type Block } from '../types';
+import { AnnotationType, type Annotation, type Block } from '../types';
 
 const hasDom = typeof document !== 'undefined';
 
@@ -107,6 +107,31 @@ describe('Viewer consumer props', () => {
       />,
     );
     expect(document.querySelector('button[title="Attachments"]')).toBeNull();
+  });
+
+  test.skipIf(!hasDom)('restores server-loaded comment annotations as yellow comment highlights', async () => {
+    const annotation: Annotation = {
+      id: 'server-comment',
+      blockId: 'b1',
+      startOffset: 0,
+      endOffset: 5,
+      type: AnnotationType.COMMENT,
+      text: 'Clarify this',
+      originalText: 'hello',
+      createdA: Date.now(),
+    };
+
+    await mount(<Viewer {...viewerProps} />);
+    await act(async () => {
+      root!.render(<Viewer {...viewerProps} annotations={[annotation]} />);
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const mark = [...document.querySelectorAll<HTMLElement>('mark.annotation-highlight')]
+      .find((element) => element.textContent === 'hello');
+    expect(mark).toBeDefined();
+    expect(mark?.classList.contains('comment')).toBe(true);
+    expect(mark?.getAttribute('data-bind-id')).toBe(annotation.id);
   });
 });
 
