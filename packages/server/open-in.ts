@@ -314,6 +314,8 @@ export interface HandleOpenInOptions {
    * several roots (annotate passes the session's reference roots).
    */
   resolveRoot?: () => string | string[];
+  /** Optional server-owned scope check for a repo-relative diff path. */
+  isAllowedPath?: (filePath: string) => boolean;
 }
 
 /**
@@ -344,6 +346,9 @@ export async function handleOpenIn(
   }
   const base = typeof body.base === "string" ? body.base : null;
   const appId = typeof body.appId === "string" ? body.appId : undefined;
+  if (options.isAllowedPath && !options.isAllowedPath(filePath)) {
+    return Response.json({ ok: false, error: "Access denied" }, { status: 403 });
+  }
 
   const abs = resolveOpenInTarget(filePath, base, options.resolveRoot);
   if (abs == null) {

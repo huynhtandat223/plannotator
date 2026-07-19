@@ -1,7 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { Readable } from "node:stream";
+import { createServer as createHttpServer } from "node:http";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import {
   LiveSnapshotPublisher,
+  acceptsPanelSessionUpdate,
   commandArgv,
   commandDelivery,
   feedbackBatch,
@@ -11,13 +17,80 @@ import {
   releasePanelSession,
   reviewSnapshotFromPanels,
   readPanelSessionJson,
+  serveWorkspaceFilesStream,
   managedScouts,
   panelSessions,
   type HerdrPanel,
   type PanelSessionEnrichment,
+  workspaceStatus,
+  reuseOrLaunchGitChangesReview,
+  cancelPendingGitChangesReviewLaunch,
+  type PendingGitChangesReviewLaunch,
 } from "./server";
 
+const temporaryRepos: string[] = [];
+
+function createTemporaryRepository(): string {
+  const repo = mkdtempSync(join(tmpdir(), "plannotator-herdr-workspace-"));
+  temporaryRepos.push(repo);
+  git(repo, "init", "-b", "main");
+  git(repo, "config", "user.email", "test@plannotator.dev");
+  git(repo, "config", "user.name", "Plannotator Test");
+  return repo;
+}
+
+function git(cwd: string, ...args: string[]): void {
+  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  if (result.status !== 0) {
+    throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+  }
+}
+
+afterEach(() => {
+  for (const repo of temporaryRepos.splice(0)) {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 describe("panel-session transport", () => {
+  test("rejects a nested subagent registration that would replace the pane owner's command-capable session", () => {
+    const owner: PanelSessionEnrichment = {
+      paneId: "w:p1",
+      sessionId: "owner-session",
+      messages: [],
+      commands: [{ name: "ex-plannotator-last", source: "extension" }],
+    };
+    const nestedSubagent: PanelSessionEnrichment = {
+      paneId: "w:p1",
+      sessionId: "subagent-session",
+      messages: [],
+      commands: [{ name: "run", source: "extension" }],
+    };
+
+    expect(acceptsPanelSessionUpdate(owner, nestedSubagent, true)).toBe(false);
+    // Compatibility fallback for a child running an extension version before
+    // it labelled itself as a subagent.
+    expect(acceptsPanelSessionUpdate(owner, nestedSubagent, false)).toBe(false);
+    expect(acceptsPanelSessionUpdate(undefined, nestedSubagent, false)).toBe(true);
+  });
+
+  test("accepts a new pane-owner session that advertises its live-review command", () => {
+    const owner: PanelSessionEnrichment = {
+      paneId: "w:p1",
+      sessionId: "owner-session",
+      messages: [],
+      commands: [{ name: "ex-plannotator-last", source: "extension" }],
+    };
+    const replacementOwner: PanelSessionEnrichment = {
+      paneId: "w:p1",
+      sessionId: "replacement-session",
+      messages: [],
+      commands: [{ name: "ex-plannotator-last", source: "extension" }],
+    };
+
+    expect(acceptsPanelSessionUpdate(owner, replacementOwner, false)).toBe(true);
+  });
+
   test("accepts a structured assistant response beyond the generic 16 KiB action-body limit", async () => {
     const body = JSON.stringify({
       paneId: "w:p1",
@@ -30,6 +103,348 @@ describe("panel-session transport", () => {
     await expect(readPanelSessionJson(request)).resolves.toEqual(JSON.parse(body));
   });
 });
+
+describe("Git Changes full-review launch", () => {
+  test("coalesces simultaneous launches for the same pane session into one review", async () => {
+    type Review = { paneId: string; sessionId: string; cwd: string; port: number };
+    const active = new Map<string, Review>();
+    const launches = new Map<string, PendingGitChangesReviewLaunch<Review>>();
+    let created = 0;
+
+    const launch = async () => {
+      created += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return { paneId: "w:p1", sessionId: "session-1", cwd: "/repo", port: 41000 + created };
+    };
+
+    const [first, second] = await Promise.all([
+      reuseOrLaunchGitChangesReview(active, launches, "w:p1", "session-1", "/repo", launch),
+      reuseOrLaunchGitChangesReview(active, launches, "w:p1", "session-1", "/repo", launch),
+    ]);
+
+    expect(created).toBe(1);
+    expect(first).toEqual({ review: { paneId: "w:p1", sessionId: "session-1", cwd: "/repo", port: 41001 }, reused: false });
+    expect(second).toEqual({ review: { paneId: "w:p1", sessionId: "session-1", cwd: "/repo", port: 41001 }, reused: true });
+    expect(active.get("w:p1")).toEqual(first.review);
+    expect(launches.has("w:p1")).toBe(false);
+  });
+
+  test("releases the reservation after a failed launch so the pane can retry", async () => {
+    type Review = { paneId: string; sessionId: string; cwd: string };
+    const active = new Map<string, Review>();
+    const launches = new Map<string, PendingGitChangesReviewLaunch<Review>>();
+
+    await expect(reuseOrLaunchGitChangesReview(
+      active,
+      launches,
+      "w:p1",
+      "session-1",
+      "/repo",
+      () => { throw new Error("review startup failed"); },
+    )).rejects.toThrow("review startup failed");
+
+    const retried = await reuseOrLaunchGitChangesReview(
+      active,
+      launches,
+      "w:p1",
+      "session-1",
+      "/repo",
+      async () => ({ paneId: "w:p1", sessionId: "session-1", cwd: "/repo" }),
+    );
+
+    expect(retried.reused).toBe(false);
+    expect(launches.has("w:p1")).toBe(false);
+  });
+
+  test("does not make a replacement session await a stale failed launch", async () => {
+    type Review = { paneId: string; sessionId: string; cwd: string };
+    const active = new Map<string, Review>();
+    const launches = new Map<string, PendingGitChangesReviewLaunch<Review>>();
+    let rejectOldLaunch!: (error: Error) => void;
+    const oldLaunch = reuseOrLaunchGitChangesReview(
+      active,
+      launches,
+      "w:p1",
+      "session-a",
+      "/repo",
+      () => new Promise<Review>((_, reject) => { rejectOldLaunch = reject; }),
+    );
+    await Promise.resolve();
+
+    const replacement = await reuseOrLaunchGitChangesReview(
+      active,
+      launches,
+      "w:p1",
+      "session-b",
+      "/repo",
+      async () => ({ paneId: "w:p1", sessionId: "session-b", cwd: "/repo" }),
+    );
+    rejectOldLaunch(new Error("stale launch failed"));
+
+    await expect(oldLaunch).rejects.toThrow("superseded");
+    expect(replacement).toEqual({
+      review: { paneId: "w:p1", sessionId: "session-b", cwd: "/repo" },
+      reused: false,
+    });
+    expect(active.get("w:p1")).toEqual(replacement.review);
+  });
+
+  test("disposes a launch cancelled before its review server becomes active", async () => {
+    type Review = { paneId: string; sessionId: string; cwd: string };
+    const active = new Map<string, Review>();
+    const launches = new Map<string, PendingGitChangesReviewLaunch<Review>>();
+    let resolveLaunch!: (review: Review) => void;
+    let disposed = 0;
+    const pending = reuseOrLaunchGitChangesReview(
+      active,
+      launches,
+      "w:p1",
+      "session-a",
+      "/repo",
+      () => new Promise<Review>((resolve) => { resolveLaunch = resolve; }),
+      () => { disposed += 1; },
+    );
+    await Promise.resolve();
+
+    cancelPendingGitChangesReviewLaunch(launches, "w:p1", "session-a");
+    resolveLaunch({ paneId: "w:p1", sessionId: "session-a", cwd: "/repo" });
+
+    await expect(pending).rejects.toThrow("superseded");
+    expect(disposed).toBe(1);
+    expect(active.has("w:p1")).toBe(false);
+  });
+});
+
+describe("workspaceStatus", () => {
+  test("includes committed branch changes in the Git Changes payload", async () => {
+    const repo = createTemporaryRepository();
+    writeFileSync(join(repo, "base.ts"), "export const base = true;\n");
+    writeFileSync(join(repo, "changed.ts"), "export const version = 1;\n");
+    writeFileSync(join(repo, "renamed.ts"), "export const name = 'old';\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "base");
+
+    git(repo, "checkout", "-b", "feature/live-review");
+    writeFileSync(join(repo, "committed.ts"), "export const committed = true;\n");
+    writeFileSync(join(repo, "changed.ts"), "export const version = 2;\nexport const extra = true;\n");
+    git(repo, "mv", "renamed.ts", "renamed-new.ts");
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "committed branch changes");
+
+    const cleanStatus = spawnSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" });
+    expect(cleanStatus.stdout).toBe("");
+
+    const status = await workspaceStatus(repo);
+
+    expect(status.available).toBe(true);
+    expect(status.files[join(repo, "committed.ts")]).toMatchObject({
+      status: "added",
+      additions: 1,
+      deletions: 0,
+      staged: false,
+      unstaged: false,
+    });
+    expect(status.files[join(repo, "changed.ts")]).toMatchObject({
+      status: "modified",
+      additions: 2,
+      deletions: 1,
+      staged: false,
+      unstaged: false,
+    });
+    expect(status.files[join(repo, "renamed-new.ts")]).toMatchObject({
+      status: "renamed",
+      oldPath: join(repo, "renamed.ts"),
+      additions: 0,
+      deletions: 0,
+      staged: false,
+      unstaged: false,
+    });
+    expect(status.sinceBase).toMatchObject({
+      base: "main",
+      files: {
+        "committed.ts": { group: "committed", staged: false },
+        "changed.ts": { group: "committed", staged: false },
+        "renamed-new.ts": { group: "committed", staged: false },
+      },
+    });
+  });
+
+  test("combines committed, working-tree, and untracked changes without leaking a sibling directory", async () => {
+    const repo = createTemporaryRepository();
+    const pane = join(repo, "apps", "pane");
+    const sibling = join(repo, "apps", "sibling");
+    mkdirSync(pane, { recursive: true });
+    mkdirSync(sibling, { recursive: true });
+    writeFileSync(join(pane, "base.ts"), "export const base = true;\n");
+    writeFileSync(join(sibling, "secret.ts"), "export const secret = false;\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "base");
+
+    git(repo, "checkout", "-b", "feature/live-review");
+    writeFileSync(join(pane, "committed.ts"), "export const committed = true;\n");
+    writeFileSync(join(sibling, "secret.ts"), "export const secret = true;\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "branch work");
+
+    writeFileSync(join(pane, "base.ts"), "export const base = false;\n");
+    writeFileSync(join(pane, "untracked.ts"), "export const untracked = true;\n");
+
+    const status = await workspaceStatus(pane);
+
+    expect(status.available).toBe(true);
+    expect(Object.keys(status.files).sort()).toEqual([
+      join(pane, "base.ts"),
+      join(pane, "committed.ts"),
+      join(pane, "untracked.ts"),
+    ]);
+    expect(status.files[join(pane, "committed.ts")]?.staged).toBe(false);
+    expect(status.files[join(pane, "base.ts")]).toMatchObject({ status: "modified", unstaged: true });
+    expect(status.files[join(pane, "untracked.ts")]).toMatchObject({ status: "untracked", additions: 1 });
+    expect(status.sinceBase?.files).toEqual({
+      "apps/pane/base.ts": { group: "changes", staged: false },
+      "apps/pane/committed.ts": { group: "committed", staged: false },
+      "apps/pane/untracked.ts": { group: "untracked", staged: false },
+    });
+  });
+
+  test("keeps composite since-base line counts for a committed-and-modified file", async () => {
+    const repo = createTemporaryRepository();
+    writeFileSync(join(repo, "tracked.ts"), "export const version = 1;\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "base");
+
+    git(repo, "checkout", "-b", "feature/live-review");
+    writeFileSync(join(repo, "tracked.ts"), "export const version = 2;\n");
+    git(repo, "add", "tracked.ts");
+    git(repo, "commit", "-m", "committed change");
+    writeFileSync(join(repo, "tracked.ts"), "export const version = 3;\nexport const working = true;\n");
+
+    const status = await workspaceStatus(repo);
+
+    expect(status.files[join(repo, "tracked.ts")]).toMatchObject({
+      status: "modified",
+      additions: 2,
+      deletions: 1,
+      staged: false,
+      unstaged: true,
+    });
+    expect(status.sinceBase?.files["tracked.ts"]).toEqual({ group: "changes", staged: false });
+  });
+});
+
+describe("Git Changes live stream", () => {
+  test("rejects a directory that is not a currently live pane root", async () => {
+    const repo = createTemporaryRepository();
+    const outside = mkdtempSync(join(tmpdir(), "plannotator-herdr-outside-"));
+    temporaryRepos.push(outside);
+    const response = await invokeWorkspaceFilesStream(outside, [{
+      id: "w:p1",
+      workspace: "one",
+      tab: "",
+      panel: "Pane p1",
+      cwd: repo,
+      status: "idle",
+      focused: true,
+    }]);
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "Directory is not a currently live Herdr Pi workspace" });
+  });
+
+  test("publishes a changed event after a file changes in an authorized live pane root", async () => {
+    const repo = createTemporaryRepository();
+    writeFileSync(join(repo, "base.ts"), "export const base = true;\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-m", "base");
+    const panels: HerdrPanel[] = [{
+      id: "w:p1",
+      workspace: "one",
+      tab: "",
+      panel: "Pane p1",
+      cwd: repo,
+      status: "idle",
+      focused: true,
+    }];
+    const server = createHttpServer((request, response) => {
+      const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      void serveWorkspaceFilesStream(request, response, url, panels);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Missing test server address");
+      const streamUrl = new URL(`http://127.0.0.1:${address.port}/api/reference/files/stream`);
+      streamUrl.searchParams.append("dirPath", repo);
+      const response = await fetch(streamUrl);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/event-stream");
+
+      const eventsPromise = readSSEEvents(response, 2);
+      // Chokidar emits the stream's ready frame before its recursive watcher
+      // finishes attaching. Let this tiny fixture settle, then exercise a live
+      // user edit rather than racing watcher initialization.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      writeFileSync(join(repo, "changed.ts"), "export const changed = true;\n");
+      const events = await eventsPromise;
+
+      expect(events.map(({ type, dirPath }) => ({ type, dirPath }))).toEqual([
+        { type: "ready", dirPath: repo },
+        { type: "changed", dirPath: repo },
+      ]);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+});
+
+async function invokeWorkspaceFilesStream(dirPath: string, panels: HerdrPanel[]): Promise<Response> {
+  const server = createHttpServer((request, response) => {
+    const url = new URL(request.url ?? "/", "http://127.0.0.1");
+    void serveWorkspaceFilesStream(request, response, url, panels);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Missing test server address");
+    return await fetch(`http://127.0.0.1:${address.port}/api/reference/files/stream?dirPath=${encodeURIComponent(dirPath)}`);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+}
+
+async function readSSEEvents(
+  response: Response,
+  count: number,
+): Promise<Array<{ type?: string; dirPath?: string }>> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Missing response body");
+  const decoder = new TextDecoder();
+  const events: Array<{ type?: string; dirPath?: string }> = [];
+  let pending = "";
+
+  try {
+    while (events.length < count) {
+      const result = await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for SSE event")), 3_000)),
+      ]);
+      if (result.done) break;
+      pending += decoder.decode(result.value, { stream: true });
+      const blocks = pending.split("\n\n");
+      pending = blocks.pop() ?? "";
+      for (const block of blocks) {
+        const line = block.split("\n").find((candidate) => candidate.startsWith("data: "));
+        if (line) events.push(JSON.parse(line.slice("data: ".length)));
+      }
+    }
+    return events;
+  } finally {
+    await reader.cancel();
+  }
+}
 
 describe("LiveSnapshotPublisher", () => {
   test("publishes a newer focused-pane snapshot immediately and does not republish unchanged state", async () => {

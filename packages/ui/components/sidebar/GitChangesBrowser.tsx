@@ -4,11 +4,17 @@ import type { DirState } from "../../hooks/useFileBrowser";
 
 interface GitChangesBrowserProps {
   dirs: DirState[];
+  rootPath?: string;
   onSelectFile?: (absolutePath: string, dirPath: string) => void;
   onRefresh: () => void;
+  onOpenFullReview?: () => void;
 }
 
-type ChangeEntry = { change: WorkspaceFileChange; dirPath: string };
+type ChangeEntry = { change: WorkspaceFileChange; dirPath: string; section?: "committed" | "changes" | "untracked" };
+
+function normalizePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/, "");
+}
 
 function statusMarker(change: WorkspaceFileChange): { label: string; className: string; title: string } {
   switch (change.status) {
@@ -45,14 +51,29 @@ const ChangeRow: React.FC<{ entry: ChangeEntry; onSelectFile?: GitChangesBrowser
   );
 };
 
-export const GitChangesBrowser: React.FC<GitChangesBrowserProps> = ({ dirs, onSelectFile, onRefresh }) => {
-  const entries = React.useMemo(() => dirs.flatMap((dir) =>
-    Object.values(dir.workspaceStatus?.files ?? {}).map((change) => ({ change, dirPath: dir.path })),
-  ), [dirs]);
-  const staged = entries.filter(({ change }) => change.staged);
-  const untracked = entries.filter(({ change }) => change.status === "untracked");
-  const changes = entries.filter(({ change }) => !change.staged && change.status !== "untracked");
-  const unavailable = dirs.length > 0 && dirs.every((dir) => dir.workspaceStatus?.available === false);
+export const GitChangesBrowser: React.FC<GitChangesBrowserProps> = ({ dirs, rootPath, onSelectFile, onRefresh, onOpenFullReview }) => {
+  const selectedDirs = React.useMemo(
+    () => rootPath ? dirs.filter((dir) => normalizePath(dir.path) === normalizePath(rootPath)) : dirs,
+    [dirs, rootPath],
+  );
+  const entries = React.useMemo(() => selectedDirs.flatMap((dir) =>
+    Object.values(dir.workspaceStatus?.files ?? {}).map((change) => ({
+      change,
+      dirPath: dir.path,
+      section: dir.workspaceStatus?.sinceBase?.files[change.repoRelativePath]?.group,
+    })),
+  ), [selectedDirs]);
+  const usesSinceBase = entries.some((entry) => entry.section !== undefined);
+  const staged = entries.filter(({ change, section }) => !usesSinceBase && change.staged && section !== "untracked");
+  const committed = entries.filter(({ section }) => usesSinceBase && section === "committed");
+  const untracked = entries.filter(({ change, section }) => usesSinceBase ? section === "untracked" : change.status === "untracked");
+  const changes = entries.filter(({ change, section }) => usesSinceBase
+    ? section === "changes" || section === undefined
+    : !change.staged && change.status !== "untracked");
+  const bases = [...new Set(selectedDirs.map((dir) => dir.workspaceStatus?.sinceBase?.base).filter((base): base is string => !!base))];
+  const isLoading = selectedDirs.length === 0 || selectedDirs.some((dir) => dir.isLoading);
+  const error = selectedDirs.find((dir) => dir.error)?.error;
+  const unavailable = selectedDirs.length > 0 && selectedDirs.every((dir) => dir.workspaceStatus?.available === false);
 
   const group = (label: string, items: ChangeEntry[]) => items.length > 0 && (
     <section className="border-b border-border/30 last:border-0">
@@ -64,10 +85,22 @@ export const GitChangesBrowser: React.FC<GitChangesBrowserProps> = ({ dirs, onSe
   return (
     <div className="flex flex-col">
       <div className="flex items-center justify-between border-b border-border/30 px-3 py-2">
-        <span className="text-[10px] text-muted-foreground">Current Git repository</span>
-        <button type="button" onClick={onRefresh} className="rounded px-2 py-1 text-[10px] text-primary hover:bg-muted/50">Refresh</button>
+        <span className="text-[10px] text-muted-foreground">
+          {usesSinceBase ? `All changes since ${bases.join(", ") || "base"}` : "Current Git repository"}
+        </span>
+        <div className="flex items-center gap-1">
+          {onOpenFullReview && entries.length > 0 && (
+            <button type="button" onClick={onOpenFullReview} data-open-full-review className="rounded px-2 py-1 text-[10px] text-primary hover:bg-muted/50">Open full review</button>
+          )}
+          <button type="button" onClick={onRefresh} className="rounded px-2 py-1 text-[10px] text-primary hover:bg-muted/50">Refresh</button>
+        </div>
       </div>
-      {entries.length > 0 ? <>
+      {isLoading ? (
+        <div className="px-3 py-6 text-center text-[11px] text-muted-foreground">Loading Git changes…</div>
+      ) : error ? (
+        <div className="px-3 py-6 text-center text-[11px] text-destructive">{error}</div>
+      ) : entries.length > 0 ? <>
+        {group("Committed", committed)}
         {group("Staged", staged)}
         {group("Changes", changes)}
         {group("Untracked", untracked)}

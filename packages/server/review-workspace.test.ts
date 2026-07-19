@@ -169,6 +169,89 @@ describe("review-workspace", () => {
       }
     });
 
+    it("honors an explicit ephemeral port override", async () => {
+      const server = await startReviewServer({
+        rawPatch,
+        gitRef: "test",
+        origin: "pi",
+        port: 0,
+        htmlContent: "<!doctype html><html><body>review</body></html>",
+      });
+
+      try {
+        expect(server.port).toBeGreaterThan(0);
+        await expect(fetch(`${server.url}/api/diff`)).resolves.toMatchObject({ status: 200 });
+      } finally {
+        server.stop();
+      }
+    });
+
+    it("binds an isolated review to the host-provided interface", async () => {
+      const server = await startReviewServer({
+        rawPatch,
+        gitRef: "test",
+        origin: "pi",
+        port: 0,
+        hostname: "0.0.0.0",
+        htmlContent: "<!doctype html><html><body>review</body></html>",
+      });
+
+      try {
+        await expect(fetch(`http://127.0.0.1:${server.port}/api/diff`)).resolves.toMatchObject({ status: 200 });
+      } finally {
+        server.stop();
+      }
+    });
+
+    it("resolves a waiting decision when an isolated review is stopped", async () => {
+      const server = await startReviewServer({
+        rawPatch,
+        gitRef: "test",
+        origin: "pi",
+        port: 0,
+        htmlContent: "<!doctype html><html><body>review</body></html>",
+      });
+      const decision = server.waitForDecision();
+      server.stop();
+
+      await expect(decision).resolves.toEqual({
+        approved: false,
+        feedback: "",
+        annotations: [],
+        exit: true,
+      });
+    });
+
+    it("submits a decision only once", async () => {
+      const deliveries: string[] = [];
+      const server = await startReviewServer({
+        rawPatch,
+        gitRef: "test",
+        origin: "pi",
+        port: 0,
+        htmlContent: "<!doctype html><html><body>review</body></html>",
+        onDecision: async (decision) => { deliveries.push(decision.feedback); },
+      });
+
+      try {
+        const first = await fetch(`${server.url}/api/feedback`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ feedback: "exactly once", annotations: [] }),
+        });
+        const duplicate = await fetch(`${server.url}/api/feedback`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ feedback: "duplicate", annotations: [] }),
+        });
+        expect(first.status).toBe(200);
+        expect(duplicate.status).toBe(409);
+        expect(deliveries).toEqual(["exactly once"]);
+      } finally {
+        server.stop();
+      }
+    });
+
     it("runs semantic diff from the local agent cwd when one is available", async () => {
       const dir = makeTempDir("plannotator-sem-agent-");
       const agentCwd = makeTempDir("plannotator-sem-agent-cwd-");

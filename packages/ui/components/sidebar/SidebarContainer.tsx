@@ -48,7 +48,9 @@ interface SidebarContainerProps {
   onFilesRetryVaultDir?: (vaultPath: string) => void;
   // Git Changes props
   showChangesTab?: boolean;
+  changesRootPath?: string;
   onChangesRefresh?: () => void;
+  onChangesOpenFullReview?: () => void;
   // Version Browser props
   showVersionsTab?: boolean;
   versionInfo: VersionInfo | null;
@@ -109,7 +111,9 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
   onFilesFetchAll,
   onFilesRetryVaultDir,
   showChangesTab,
+  changesRootPath,
   onChangesRefresh,
+  onChangesOpenFullReview,
   showVersionsTab,
   versionInfo,
   versions,
@@ -315,8 +319,10 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
         {activeTab === "changes" && showChangesTab && fileBrowser && (
           <GitChangesBrowser
             dirs={fileBrowser.dirs}
+            rootPath={changesRootPath}
             onSelectFile={onFilesSelectFile}
             onRefresh={onChangesRefresh ?? (() => {})}
+            onOpenFullReview={onChangesOpenFullReview}
           />
         )}
         {activeTab === "archive" && showArchiveTab && (
@@ -396,11 +402,13 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
             ) : activeTab === "changes" && fileBrowser ? (
               <GitChangesBrowser
                 dirs={fileBrowser.dirs}
+                rootPath={changesRootPath}
                 onSelectFile={(absolutePath, dirPath) => {
                   onFilesSelectFile?.(absolutePath, dirPath);
                   onClose();
                 }}
                 onRefresh={onChangesRefresh ?? (() => {})}
+                onOpenFullReview={onChangesOpenFullReview}
               />
             ) : (
               <MessagesBrowser

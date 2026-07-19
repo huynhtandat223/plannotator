@@ -227,7 +227,7 @@ function parsePorcelain(output: string): Array<{
 	return result;
 }
 
-function parseNumstat(output: string): Map<string, { additions: number; deletions: number }> {
+export function parseGitNumstat(output: string): Map<string, { additions: number; deletions: number }> {
 	const counts = new Map<string, { additions: number; deletions: number }>();
 	const records = output.split("\0");
 	for (let i = 0; i < records.length; i++) {
@@ -289,7 +289,7 @@ async function computeWorkspaceStatusForDirectory(rootPath: string): Promise<Wor
 
 	const entries = parsePorcelain(status.stdout);
 	const numstat = await runGitAsync(repo.repoRoot, ["diff", "--numstat", "-z", "HEAD", "--", rootPathspec]);
-	const headLineCounts = numstat.ok ? parseNumstat(numstat.stdout) : new Map<string, { additions: number; deletions: number }>();
+	const headLineCounts = numstat.ok ? parseGitNumstat(numstat.stdout) : new Map<string, { additions: number; deletions: number }>();
 	let splitLineCounts: Map<string, { additions: number; deletions: number }> | null = null;
 	if (entries.some((entry) => entry.staged && entry.unstaged)) {
 		const [cached, unstaged] = await Promise.all([
@@ -297,8 +297,8 @@ async function computeWorkspaceStatusForDirectory(rootPath: string): Promise<Wor
 			runGitAsync(repo.repoRoot, ["diff", "--numstat", "-z", "--", rootPathspec]),
 		]);
 		splitLineCounts = combinedLineCounts(
-			cached.ok ? parseNumstat(cached.stdout) : new Map<string, { additions: number; deletions: number }>(),
-			unstaged.ok ? parseNumstat(unstaged.stdout) : new Map<string, { additions: number; deletions: number }>(),
+			cached.ok ? parseGitNumstat(cached.stdout) : new Map<string, { additions: number; deletions: number }>(),
+			unstaged.ok ? parseGitNumstat(unstaged.stdout) : new Map<string, { additions: number; deletions: number }>(),
 		);
 	}
 

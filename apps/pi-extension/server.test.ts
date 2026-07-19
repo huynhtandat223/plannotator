@@ -509,6 +509,30 @@ describe("pi review server", () => {
     }
   });
 
+  test("stopping a review resolves a waiting decision", async () => {
+    const homeDir = makeTempDir("plannotator-pi-home-");
+    const repoDir = initRepo();
+    process.env.HOME = homeDir;
+    process.chdir(repoDir);
+    process.env.PLANNOTATOR_PORT = String(await reservePort());
+
+    const server = await startReviewServer({
+      rawPatch: "",
+      gitRef: "test",
+      origin: "pi",
+      htmlContent: "<!doctype html><html><body>review</body></html>",
+    });
+    const decision = server.waitForDecision();
+    server.stop();
+
+    await expect(decision).resolves.toEqual({
+      approved: false,
+      feedback: "",
+      annotations: [],
+      exit: true,
+    });
+  });
+
   test("exit endpoint resolves decision with exit flag", async () => {
     const homeDir = makeTempDir("plannotator-pi-home-");
     const repoDir = initRepo();

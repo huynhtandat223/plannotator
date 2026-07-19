@@ -26,6 +26,8 @@ export type HerdrSessionRegistration = {
 	sessionId: string;
 	messages: ReturnType<typeof getActiveBranchAssistantMessages>;
 	commands: HerdrCommandCapability[];
+	/** Prevent a nested Pi child that inherited HERDR_PANE_ID from replacing its pane owner. */
+	isSubagent?: true;
 };
 
 type HerdrFeedbackDelivery = { deliveryId: string; batch: LiveFeedbackBatch };
@@ -55,6 +57,7 @@ export function currentHerdrRegistration(
 	return {
 		paneId,
 		sessionId: ctx.sessionManager.getSessionId(),
+		...(env.PI_SUBAGENT_CHILD === "1" ? { isSubagent: true as const } : {}),
 		// Newest first, matching /ex-plannotator-last for the first entry while
 		// retaining a small structured history for the live workspace viewer.
 		messages: getActiveBranchAssistantMessages(ctx as ExtensionContext).slice(0, HERDR_LIVE_MESSAGE_LIMIT),
@@ -69,7 +72,7 @@ export async function reportHerdrSession(
 	commands: HerdrCommandCapability[] = [],
 ): Promise<void> {
 	const registration = currentHerdrRegistration(ctx, env, commands);
-	if (!registration) return;
+	if (!registration || registration.isSubagent) return;
 	try {
 		await fetcher(`${loopbackServiceUrl(env)}/api/panel-session`, {
 			method: "PUT",
@@ -90,7 +93,7 @@ export async function pollHerdrFeedback(
 	env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
 	const registration = currentHerdrRegistration(ctx, env);
-	if (!registration) return;
+	if (!registration || registration.isSubagent) return;
 	try {
 		const claim = await fetcher(`${loopbackServiceUrl(env)}/api/panel-feedback/claim`, {
 			method: "POST",
@@ -117,7 +120,7 @@ export async function pollHerdrInstruction(
 	env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
 	const registration = currentHerdrRegistration(ctx, env);
-	if (!registration) return;
+	if (!registration || registration.isSubagent) return;
 	try {
 		const claim = await fetcher(`${loopbackServiceUrl(env)}/api/panel-instruction/claim`, {
 			method: "POST",

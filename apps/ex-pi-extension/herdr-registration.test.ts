@@ -52,6 +52,38 @@ describe("Herdr session enrichment", () => {
 		expect(currentHerdrRegistration(context() as never, {})).toBeNull();
 	});
 
+	test("marks a nested Pi subagent so the host can reject its registration", () => {
+		expect(currentHerdrRegistration(context() as never, {
+			HERDR_ENV: "1",
+			HERDR_PANE_ID: "w:p1",
+			PI_SUBAGENT_CHILD: "1",
+		})).toMatchObject({
+			paneId: "w:p1",
+			sessionId: "session-1",
+			isSubagent: true,
+		});
+	});
+
+	test("does not report or claim delivery from a nested Pi subagent", async () => {
+		let reported = false;
+		let claimed = false;
+		const env = { HERDR_ENV: "1", HERDR_PANE_ID: "w:p1", PI_SUBAGENT_CHILD: "1" };
+		await reportHerdrSession(context() as never, async () => {
+			reported = true;
+			return new Response(null, { status: 204 });
+		}, env);
+		await pollHerdrFeedback(context() as never, () => {}, async () => {
+			claimed = true;
+			return new Response(null, { status: 204 });
+		}, env);
+		await pollHerdrInstruction(context() as never, () => {}, async () => {
+			claimed = true;
+			return new Response(null, { status: 204 });
+		}, env);
+		expect(reported).toBe(false);
+		expect(claimed).toBe(false);
+	});
+
 	test("sends enrichment only to the loopback host endpoint", async () => {
 		const calls: Array<{ url: string; init?: RequestInit }> = [];
 		await reportHerdrSession(

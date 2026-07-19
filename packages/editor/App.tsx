@@ -148,6 +148,7 @@ import {
   validateSavedFileChanges,
 } from './savedFileChangeValidation';
 import { fetchSourceDocumentSnapshot, probeSourceSave } from './sourceDocumentClient';
+import { fullReviewUrlForBrowser } from './fullReviewUrl';
 import { reconcileSourceDocuments, type SourceDocumentReconcileEvent } from './sourceDocumentReconciliation';
 import { dirnameBrowserPath, normalizeBrowserPath, pathIsInsideDir } from './sourceDocumentPaths';
 import { pickRestoredSingleFileDraftToDisplay } from './draftRestoreSelection';
@@ -998,20 +999,24 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if ((sidebar.activeTab === 'files' || sidebar.activeTab === 'changes') && showFilesTab) {
-      // Load regular dirs
-      if (fileBrowserDirs.length > 0) {
+      // Files keeps the user's configured roots; Git Changes is deliberately
+      // scoped to the currently selected live Pi pane.
+      const requestedDirs = sidebar.activeTab === 'changes'
+        ? (projectRoot ? [projectRoot] : [])
+        : fileBrowserDirs;
+      if (requestedDirs.length > 0) {
         const regularLoaded = fileBrowser.dirs.filter(d => !d.isVault).map(d => d.path);
-        const needsRegular = fileBrowserDirs.some(d => !regularLoaded.includes(d))
-          || regularLoaded.some(d => !fileBrowserDirs.includes(d));
-        if (needsRegular) fileBrowser.fetchAll(fileBrowserDirs);
+        const needsRegular = requestedDirs.some(d => !regularLoaded.includes(d))
+          || regularLoaded.some(d => !requestedDirs.includes(d));
+        if (needsRegular) fileBrowser.fetchAll(requestedDirs);
       }
-      // Load vault dir; addVaultDir atomically replaces any existing vault entry so
-      // switching vault paths never accumulates stale sections
-      if (vaultPath && !fileBrowser.dirs.find(d => d.isVault && d.path === vaultPath && !d.error)) {
+      // Vaults belong to Files only and must never leak into the selected
+      // pane's Git Changes view.
+      if (sidebar.activeTab === 'files' && vaultPath && !fileBrowser.dirs.find(d => d.isVault && d.path === vaultPath && !d.error)) {
         fileBrowser.addVaultDir(vaultPath);
       }
     }
-  }, [sidebar.activeTab, showFilesTab, fileBrowserDirs, vaultPath]);
+  }, [sidebar.activeTab, showFilesTab, fileBrowserDirs, projectRoot, vaultPath]);
 
   const buildCurrentMessageState = React.useCallback((): MessageAnnotationState | null => {
     if (annotateSource !== 'message' || !selectedMessageId) return null;
@@ -1093,6 +1098,7 @@ const App: React.FC = () => {
     () => recentMessages.find((message) => message.messageId === selectedMessageId) ?? null,
     [recentMessages, selectedMessageId],
   );
+  const [isOpeningFullReview, setIsOpeningFullReview] = useState(false);
   const sendsGlobalCommentAsUserMessage = liveMessageReview &&
     Boolean(selectedLiveMessage?.paneId) &&
     !selectedLiveMessage?.assistantMessageId;
@@ -1273,6 +1279,45 @@ const App: React.FC = () => {
       setIsLiveReviewActionPending(false);
     }
   }, []);
+
+  const handleOpenFullReview = React.useCallback(async () => {
+    if (!selectedLiveMessage?.paneId) return;
+    // Reserve the tab while this is still a direct user gesture. Waiting for
+    // fetch() first makes mobile Chrome treat the eventual window.open() as an
+    // unsolicited pop-up.
+    const reviewWindow = window.open('about:blank', '_blank');
+    if (!reviewWindow) {
+      toast.error('Could not open full review', {
+        description: 'Allow pop-ups for this site, then try again.',
+      });
+      return;
+    }
+    setIsOpeningFullReview(true);
+    try {
+      const response = await fetch('/api/git-changes/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paneId: selectedLiveMessage.paneId }),
+      });
+      const body = await response.json().catch(() => ({})) as { error?: string; reused?: boolean; port?: number };
+      if (!response.ok) throw new Error(body.error || 'Could not open full review');
+      if (!body.port) throw new Error('Full review did not return a browser-accessible port');
+      // This request started in the reviewer's browser. Use its host (for
+      // example, the Tailnet address) rather than WSL's localhost.
+      reviewWindow.opener = null;
+      reviewWindow.location.replace(fullReviewUrlForBrowser(window.location.href, body.port));
+      toast(body.reused ? 'Full review reopened' : 'Full review opened', {
+        description: 'Opened in a new tab for the selected Pi pane.',
+      });
+    } catch (error) {
+      reviewWindow.close();
+      toast.error('Could not open full review', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setIsOpeningFullReview(false);
+    }
+  }, [selectedLiveMessage?.paneId]);
 
   const handleFileBrowserSelect = React.useCallback((absolutePath: string, dirPath: string) => {
     const normalizedAbsolutePath = normalizeBrowserPath(absolutePath);
@@ -2566,10 +2611,10 @@ const App: React.FC = () => {
         if (data.repoInfo) {
           setRepoInfo(data.repoInfo);
         }
-        if (data.projectRoot) {
-          setProjectRoot(data.projectRoot);
-        } else {
-          setProjectRoot(null);
+        // A live review's selected message owns its workspace. Do not replace
+        // it with the host's focused-pane root after selecting another pane.
+        if (data.liveMessageReview !== true) {
+          setProjectRoot(data.projectRoot ?? null);
         }
         setAgentTerminalCapability(data.agentTerminal ?? null);
         // Capture plan version history data
@@ -4599,6 +4644,7 @@ const App: React.FC = () => {
                 backLabel={backLabel}
                 showFilesTab={showFilesTab && !archive.archiveMode}
                 showChangesTab={liveMessageReview && !!projectRoot && !archive.archiveMode}
+                changesRootPath={projectRoot ?? undefined}
                 fileAnnotationCounts={fileAnnotationCounts}
                 highlightedFiles={highlightedFiles}
                 fileEditStatuses={editableDocuments.fileEditStatuses}
@@ -4619,6 +4665,7 @@ const App: React.FC = () => {
                 onFilesFetchAll={() => fileBrowser.fetchAll(fileBrowserDirs)}
                 onFilesRetryVaultDir={(vaultPath) => fileBrowser.addVaultDir(vaultPath)}
                 onChangesRefresh={() => fileBrowser.fetchAll(projectRoot ? [projectRoot] : [])}
+                onChangesOpenFullReview={liveMessageReview && !isOpeningFullReview ? handleOpenFullReview : undefined}
                 hasFileAnnotations={hasFileAnnotations}
                 showVersionsTab={!isHtmlSurface && versionInfo !== null && versionInfo.totalVersions > 1}
                 versionInfo={versionInfo}

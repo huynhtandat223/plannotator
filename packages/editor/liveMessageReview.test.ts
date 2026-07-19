@@ -9,20 +9,22 @@ test('live-message updates are applied in place without a full-page reload', () 
     source.indexOf('const handleLiveReviewAction'),
   );
 
-  expect(callback).not.toContain('window.location.reload');
+  expect(callback).toContain("snapshot.reviewRoundStatus === 'open' && liveMessageReviewReloadOnSelection");
+  expect(callback).toContain('window.location.reload');
   expect(callback).not.toContain('document.reload');
   expect(callback).toContain('linkedDocHook.restoreSession');
   expect(callback).toContain('setSelectedMessageId(nextSelectedMessageId)');
-  expect(callback).toContain("New assistant response ready to review.");
-  expect(callback).toContain('announceLiveUpdate');
-  expect(callback).toContain('snapshot.draftsByMessageId');
+  expect(callback).toContain("toast('Agent response received'");
+  expect(callback).toContain('liveSnapshotMessagesRef.current = snapshot.messages');
+  expect(callback).toContain('changedLivePaneSessionIds');
   expect(callback).toContain('messageStateCacheRef.current');
 });
 
 test('live-message SSE failures leave the review usable with a status message', () => {
   const source = readFileSync(resolve(import.meta.dir, 'App.tsx'), 'utf8');
-  expect(source).toContain("setLiveReviewUpdateError('Live response updates disconnected. Reconnecting…')");
-  expect(source).toContain('role="status" aria-live="polite"');
+  expect(source).toContain('setLiveReviewDeliveryError(snapshot.deliveryError)');
+  expect(source).toContain("status === 'delivery_failed'");
+  expect(source).toContain('Feedback delivery failed.');
 });
 
 test('live feedback saves the current source before submitting all retained drafts', () => {
@@ -32,22 +34,11 @@ test('live feedback saves the current source before submitting all retained draf
     source.indexOf('const handleAnnotateApprove'),
   );
 
-  expect(callback).toContain('saveLiveReviewDrafts(selectedMessageId)');
-  expect(callback).toContain('Promise.all([...liveDraftSaveQueuesRef.current.values()])');
-  expect(callback).toContain("fetch('/api/session/feedback'");
-  expect(source).toContain('const saveLiveReviewDrafts');
-  expect(source).toContain('liveDraftSaveQueuesRef');
-  expect(source).toContain('liveDraftSaveVersionsRef');
-  expect(source).toContain('preservePendingDraftsForMessageIds');
-  expect(source).toContain('liveDraftSaveQueuesRef.current.keys()');
-  expect(source).toContain('liveDeliveredDraftMessageIdsRef');
-  expect(source).toContain('snapshot.sentMessageIds');
-  expect(source).toContain('return createEmptyMessageState(msg)');
-  expect(source).toContain('liveDeliveredDraftMessageIdsRef.current.add(selectedMessageId)');
-  expect(source).toContain('liveDeliveredDraftMessageIdsRef.current.delete(messageId)');
-  expect(source).toContain("replaceDrafts: path === '/api/session/feedback/retry'");
-  expect(source).toContain('...(options?.replaceDrafts ? states.keys() : [])');
+  expect(callback).toContain("fetch('/api/feedback'");
+  expect(callback).toContain('selectedMessageId: scopedSelectedMessageId');
+  expect(callback).toContain('clearSelectedLiveFeedback()');
+  expect(source).toContain('createEmptyMessageState(targetMessage)');
   expect(source).toContain('globalAttachments: state.linkedDocSession.root.globalAttachments');
-  expect(source).toContain('linkedDocuments');
-  expect(source).toContain('applyLiveReviewSnapshot(snapshot, {');
+  expect(source).toContain('linkedDocHook.restoreSession');
+  expect(source).toContain('liveSnapshotMessagesRef.current = snapshot.messages');
 });

@@ -121,6 +121,72 @@ describe("review-core", () => {
     expect(result.patch).toContain("+++ b/untracked.txt");
   });
 
+  test("restricts a since-base diff to the requested pane pathspec", async () => {
+    const repoDir = initRepo();
+    const runtime = makeRuntime(repoDir);
+    mkdirSync(join(repoDir, "apps", "pane"), { recursive: true });
+    mkdirSync(join(repoDir, "apps", "sibling"), { recursive: true });
+    writeFileSync(join(repoDir, "apps", "pane", "committed.ts"), "export const committed = false;\n", "utf-8");
+    writeFileSync(join(repoDir, "apps", "sibling", "secret.ts"), "export const secret = false;\n", "utf-8");
+    git(repoDir, ["add", "."]);
+    git(repoDir, ["commit", "-m", "add pane files"]);
+
+    git(repoDir, ["checkout", "-b", "feature/pane-review"]);
+    writeFileSync(join(repoDir, "apps", "pane", "committed.ts"), "export const committed = true;\n", "utf-8");
+    writeFileSync(join(repoDir, "apps", "sibling", "secret.ts"), "export const secret = true;\n", "utf-8");
+    git(repoDir, ["add", "."]);
+    git(repoDir, ["commit", "-m", "branch changes"]);
+    writeFileSync(join(repoDir, "apps", "pane", "working.ts"), "export const working = true;\n", "utf-8");
+    writeFileSync(join(repoDir, "apps", "sibling", "outside.ts"), "export const outside = true;\n", "utf-8");
+
+    const result = await runGitDiff(runtime, "since-base", "main", join(repoDir, "apps", "pane"), {
+      pathspec: ":(top)apps/pane",
+    });
+
+    expect(result.patch).toContain("apps/pane/committed.ts");
+    expect(result.patch).toContain("apps/pane/working.ts");
+    expect(result.patch).not.toContain("apps/sibling/secret.ts");
+    expect(result.patch).not.toContain("apps/sibling/outside.ts");
+  });
+
+  test("pathspec applies to uncommitted and switched diff families", async () => {
+    const repoDir = initRepo();
+    const runtime = makeRuntime(repoDir);
+    mkdirSync(join(repoDir, "apps", "pane"), { recursive: true });
+    mkdirSync(join(repoDir, "apps", "sibling"), { recursive: true });
+    writeFileSync(join(repoDir, "apps", "pane", "tracked.ts"), "export const pane = false;\n", "utf-8");
+    writeFileSync(join(repoDir, "apps", "sibling", "secret.ts"), "export const secret = false;\n", "utf-8");
+    git(repoDir, ["add", "."]);
+    git(repoDir, ["commit", "-m", "add review paths"]);
+    writeFileSync(join(repoDir, "apps", "pane", "tracked.ts"), "export const pane = true;\n", "utf-8");
+    writeFileSync(join(repoDir, "apps", "sibling", "secret.ts"), "export const secret = true;\n", "utf-8");
+
+    for (const diffType of ["uncommitted", "unstaged", "last-commit", "all"] as const) {
+      const result = await runGitDiff(runtime, diffType, "main", repoDir, { pathspec: ":(top)apps/pane" });
+      expect(result.patch).toContain("apps/pane/tracked.ts");
+      expect(result.patch).not.toContain("apps/sibling/secret.ts");
+    }
+  });
+
+  test("file-content resolves a scoped pane path", async () => {
+    const repoDir = initRepo();
+    const runtime = makeRuntime(repoDir);
+    mkdirSync(join(repoDir, "apps", "pane"), { recursive: true });
+    mkdirSync(join(repoDir, "apps", "sibling"), { recursive: true });
+    writeFileSync(join(repoDir, "apps", "pane", "visible.ts"), "export const visible = true;\n", "utf-8");
+    writeFileSync(join(repoDir, "apps", "sibling", "secret.ts"), "export const secret = true;\n", "utf-8");
+
+    const visible = await getFileContentsForDiff(
+      runtime,
+      "uncommitted",
+      "main",
+      "apps/pane/visible.ts",
+      undefined,
+      repoDir,
+    );
+    expect(visible.newContent).toContain("visible");
+  });
+
   test("uncommitted diff includes untracked files with C-quoted (unicode) names", async () => {
     // git ls-files C-quotes unusual paths ("caf\303\251.txt"); without
     // unquoting, the --no-index diff can't access the literal quoted name

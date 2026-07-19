@@ -6,12 +6,29 @@
 import { execFile } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import {
+  getDefaultBranch,
+  getSinceBaseSections,
+  type GitCommandResult,
+  type ReviewGitRuntime,
+  type SinceBaseSections,
+} from "../../packages/shared/review-core";
+import type { WorkspaceStatusPayload } from "../../packages/core/workspace-status-types";
+import {
+  filterWorkspaceStatusForDirectory,
+  getWorkspaceStatusForDirectory,
+  parseGitNumstat,
+} from "../../packages/shared/workspace-status";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { readFile, readdir, realpath, stat } from "node:fs/promises";
+import { readFile, readdir, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { Readable } from "node:stream";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
+import { startFileBrowserWatchStream } from "./file-browser-watch";
+import { startReviewServer, type ReviewServerResult } from "../../packages/server/review";
+import { prepareLocalReviewDiff } from "../../packages/server/vcs";
+import { loadConfig } from "../../packages/shared/config";
 const execFileAsync = promisify(execFile);
 const port = parsePort(process.env.PLANNOTATOR_HERDR_PORT ?? "19432");
 const host = process.env.PLANNOTATOR_HERDR_HOST ?? "0.0.0.0";
@@ -77,6 +94,7 @@ export class LiveSnapshotPublisher<T> {
 // The packaged Ex-Plannotator editor owns every visual decision, including its
 // responsive/mobile behavior. This service supplies data only.
 const editorHtml = readFileSync(join(import.meta.dir, "..", "ex-pi-extension", "ex-plannotator.html"), "utf8");
+const reviewHtml = readFileSync(join(import.meta.dir, "..", "review", "dist", "index.html"), "utf8");
 
 type HerdrReviewSnapshot = {
   /** Monotonic host snapshot version. The browser ignores stale SSE frames. */
@@ -166,6 +184,13 @@ type PendingInstructionDelivery = {
   sessionId: string;
   content: string;
 };
+type ActiveGitChangesReview = {
+  paneId: string;
+  sessionId: string;
+  cwd: string;
+  settled: boolean;
+  server: ReviewServerResult;
+};
 
 type ScoutRequest = {
   requestId: string;
@@ -195,6 +220,14 @@ const pendingFeedbackDeliveries = new Map<string, PendingFeedbackDelivery>();
 // Browser-originated user instructions are held only until the matching local
 // Pi extension claims them. They are not annotation feedback and never persist.
 const pendingInstructionDeliveries = new Map<string, PendingInstructionDelivery>();
+// Full review feedback is preformatted Markdown from the existing review UI.
+// It deliberately reuses the same session-scoped instruction claim transport
+// rather than trying to translate comments back into document annotations.
+const activeGitChangesReviews = new Map<string, ActiveGitChangesReview>();
+// A pane can receive a click from multiple browser tabs (or a retried HTTP
+// request) before the first diff has finished preparing. This map coalesces
+// that asynchronous launch into exactly one isolated review server.
+const pendingGitChangesReviewLaunches = new Map<string, PendingGitChangesReviewLaunch<ActiveGitChangesReview>>();
 // A Scout is a real, independent Pi pane. This map is deliberately transient:
 // Herdr remains liveness authority and a host restart never replays a prompt.
 export const managedScouts = new Map<string, ManagedScout>();
@@ -260,12 +293,13 @@ function webRequest(request: IncomingMessage): Request {
     if (Array.isArray(value)) value.forEach((item) => headers.append(key, item));
     else headers.set(key, value);
   }
-  return new Request(`http://localhost${request.url ?? "/"}`, {
-    method: request.method,
-    headers,
-    body: Readable.toWeb(request) as unknown as BodyInit,
-    duplex: "half",
-  } as RequestInit);
+  const method = request.method ?? "GET";
+  const init: RequestInit & { duplex?: "half" } = { method, headers };
+  if (method !== "GET" && method !== "HEAD") {
+    init.body = Readable.toWeb(request) as unknown as BodyInit;
+    init.duplex = "half";
+  }
+  return new Request(`http://localhost${request.url ?? "/"}`, init);
 }
 
 async function uploadImage(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -612,14 +646,16 @@ async function queueInstruction(request: IncomingMessage, response: ServerRespon
     return;
   }
   const { snapshot } = await reviewSnapshot();
-  const prepared = instructionDelivery(await requestJson(request), snapshot.messages);
+  const body = await requestJson(request);
+  const prepared = instructionDelivery(body, snapshot.messages);
   if (!prepared) {
     writeJson(response, 400, { error: "A message and one live Pi pane are required" });
     return;
   }
+  const requestedSessionId = text(body?.sessionId);
   const registration = panelSessions.get(prepared.paneId);
-  if (!registration) {
-    writeJson(response, 409, { error: "The selected Pi pane has not published a live session" });
+  if (!registration || (requestedSessionId && registration.sessionId !== requestedSessionId)) {
+    writeJson(response, 409, { error: "The selected Pi pane session is no longer current" });
     return;
   }
   const delivery: PendingInstructionDelivery = {
@@ -831,6 +867,27 @@ function canCreateProcessPanel(request: IncomingMessage): boolean {
   return canWriteFeedback(request);
 }
 
+/**
+ * Only the pane owner's session may replace an existing registration. Older
+ * subagent processes inherit HERDR_PANE_ID, so use the advertised Ex review
+ * command as a compatibility ownership proof until every process has the
+ * explicit `isSubagent` flag.
+ */
+export function acceptsPanelSessionUpdate(
+  current: PanelSessionEnrichment | undefined,
+  incoming: PanelSessionEnrichment,
+  isSubagent: boolean,
+): boolean {
+  if (isSubagent) return false;
+  if (!current || current.sessionId === incoming.sessionId) return true;
+  const currentIsPaneOwner = current.commands.some((command) => command.name === "ex-plannotator-last");
+  const incomingIsPaneOwner = incoming.commands.some((command) => command.name === "ex-plannotator-last");
+  // Compatibility for already-running old extensions: a short, command-poor
+  // registration cannot displace an established pane owner. A new full owner
+  // session can still take over after the old process exits or restarts.
+  return incomingIsPaneOwner || !currentIsPaneOwner;
+}
+
 async function savePanelSession(request: IncomingMessage, response: ServerResponse): Promise<void> {
   if (!isLoopback(request)) {
     writeJson(response, 403, { error: "Pi session enrichment is loopback-only" });
@@ -845,6 +902,7 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
   // hides their live messages; they simply have no command picker until Pi
   // reloads the updated extension.
   const commands = body?.commands === undefined ? [] : Array.isArray(body.commands) ? body.commands : null;
+  const isSubagent = body?.isSubagent === true;
   if (!paneId || !sessionId || !messages || !commands || messages.length > HERDR_LIVE_MESSAGE_LIMIT || commands.length > 200) {
     writeJson(response, 400, { error: `paneId, sessionId, and at most ${HERDR_LIVE_MESSAGE_LIMIT} messages are required` });
     return;
@@ -881,7 +939,14 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
     writeJson(response, 404, { error: "The Pi panel is no longer live" });
     return;
   }
-  panelSessions.set(paneId, { paneId, sessionId, messages: normalizedMessages, commands: normalizedCommands });
+  const incoming: PanelSessionEnrichment = { paneId, sessionId, messages: normalizedMessages, commands: normalizedCommands };
+  if (!acceptsPanelSessionUpdate(panelSessions.get(paneId), incoming, isSubagent)) {
+    // A nested Pi child inherited this pane's HERDR_PANE_ID. It is not the
+    // browser-facing session owner and must not cause repeated session resets.
+    writeJson(response, 204, null);
+    return;
+  }
+  panelSessions.set(paneId, incoming);
   // Publish the new structured response against the same host snapshot used by
   // /api/plan and all connected browsers; do not wait for the next poll.
   await refreshLiveState();
@@ -910,6 +975,116 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
   writeJson(response, 200, { ok: true });
 }
 
+function stopGitChangesReview(review: ActiveGitChangesReview): void {
+  review.server.stop();
+  if (activeGitChangesReviews.get(review.paneId) === review) {
+    activeGitChangesReviews.delete(review.paneId);
+  }
+}
+
+type GitChangesReviewIdentity = {
+  paneId: string;
+  sessionId: string;
+  cwd: string;
+};
+
+export type PendingGitChangesReviewLaunch<T extends GitChangesReviewIdentity> = {
+  sessionId: string;
+  cwd: string;
+  cancelled: boolean;
+  promise: Promise<T>;
+};
+
+export class GitChangesReviewLaunchSuperseded extends Error {
+  constructor() {
+    super("The full-review launch was superseded by a newer pane session or workspace");
+  }
+}
+
+/** Cancel a stale launch without waiting for its Git preparation to finish. */
+export function cancelPendingGitChangesReviewLaunch<T extends GitChangesReviewIdentity>(
+  pending: Map<string, PendingGitChangesReviewLaunch<T>>,
+  paneId: string,
+  sessionId?: string,
+): void {
+  const launch = pending.get(paneId);
+  if (!launch || (sessionId !== undefined && launch.sessionId !== sessionId)) return;
+  launch.cancelled = true;
+  if (pending.get(paneId) === launch) pending.delete(paneId);
+}
+
+/**
+ * Atomically reuse a matching review or reserve its full asynchronous launch.
+ * The reservation is stored before the launch promise reaches its first await,
+ * so concurrent browser requests cannot each create their own review server.
+ */
+export async function reuseOrLaunchGitChangesReview<T extends GitChangesReviewIdentity>(
+  active: Map<string, T>,
+  pending: Map<string, PendingGitChangesReviewLaunch<T>>,
+  paneId: string,
+  sessionId: string,
+  cwd: string,
+  launch: () => Promise<T>,
+  disposeSuperseded?: (review: T) => void,
+): Promise<{ review: T; reused: boolean }> {
+  const current = active.get(paneId);
+  if (current?.sessionId === sessionId && current.cwd === cwd) {
+    return { review: current, reused: true };
+  }
+
+  const inFlight = pending.get(paneId);
+  if (inFlight?.sessionId === sessionId && inFlight.cwd === cwd && !inFlight.cancelled) {
+    try {
+      const review = await inFlight.promise;
+      if (inFlight.cancelled) {
+        throw new GitChangesReviewLaunchSuperseded();
+      }
+      return { review, reused: true };
+    } catch (error) {
+      if (inFlight.cancelled) {
+        throw new GitChangesReviewLaunchSuperseded();
+      }
+      throw error;
+    }
+  }
+  // A replacement session/workspace must never inherit or wait on a stale
+  // launch. Let its request create a new reservation while the old launch
+  // cleans itself up when it eventually resolves.
+  if (inFlight) cancelPendingGitChangesReviewLaunch(pending, paneId);
+
+  // Register first, then begin the asynchronous work in a microtask. Besides
+  // coalescing concurrent callers, this turns a synchronously-throwing launch
+  // into a rejected promise that is cleaned up by the finally below.
+  const entry = {
+    sessionId,
+    cwd,
+    cancelled: false,
+  } as PendingGitChangesReviewLaunch<T>;
+  entry.promise = Promise.resolve().then(launch);
+  pending.set(paneId, entry);
+  try {
+    let review: T;
+    try {
+      review = await entry.promise;
+    } catch (error) {
+      // A replacement launch has already taken over; surface the state change
+      // rather than leaking an unrelated startup failure to that new session.
+      if (entry.cancelled || pending.get(paneId) !== entry) {
+        throw new GitChangesReviewLaunchSuperseded();
+      }
+      throw error;
+    }
+    if (entry.cancelled || pending.get(paneId) !== entry) {
+      disposeSuperseded?.(review);
+      throw new GitChangesReviewLaunchSuperseded();
+    }
+    active.set(paneId, review);
+    return { review, reused: false };
+  } finally {
+    if (pending.get(paneId) === entry) pending.delete(paneId);
+  }
+}
+
 export function releasePanelSession(
   enrichments: Map<string, PanelSessionEnrichment>,
   paneId: string,
@@ -923,6 +1098,9 @@ export function releasePanelSession(
   for (const [deliveryId, delivery] of pendingInstructionDeliveries) {
     if (delivery.paneId === paneId && delivery.sessionId === sessionId) pendingInstructionDeliveries.delete(deliveryId);
   }
+  const review = activeGitChangesReviews.get(paneId);
+  if (review?.sessionId === sessionId) stopGitChangesReview(review);
+  cancelPendingGitChangesReviewLaunch(pendingGitChangesReviewLaunches, paneId, sessionId);
   return true;
 }
 
@@ -1161,6 +1339,16 @@ async function readLiveState(): Promise<HerdrLiveState> {
   for (const [workspaceKey, scout] of managedScouts) {
     if (!livePaneIds.has(scout.paneId)) managedScouts.delete(workspaceKey);
   }
+  for (const review of activeGitChangesReviews.values()) {
+    if (!livePaneIds.has(review.paneId) || panelSessions.get(review.paneId)?.sessionId !== review.sessionId) {
+      stopGitChangesReview(review);
+    }
+  }
+  for (const [paneId, launch] of pendingGitChangesReviewLaunches) {
+    if (!livePaneIds.has(paneId) || panelSessions.get(paneId)?.sessionId !== launch.sessionId) {
+      cancelPendingGitChangesReviewLaunch(pendingGitChangesReviewLaunches, paneId, launch.sessionId);
+    }
+  }
   for (const [deliveryId, delivery] of pendingFeedbackDeliveries) {
     if (!livePaneIds.has(delivery.paneId) || panelSessions.get(delivery.paneId)?.sessionId !== delivery.sessionId) {
       pendingFeedbackDeliveries.delete(deliveryId);
@@ -1197,23 +1385,8 @@ const FILE_BROWSER_EXCLUDED_NAMES = new Set([
   ".webpack", ".expo", "_site", "public", ".jekyll-cache", "out", ".docusaurus", "storybook-static",
 ]);
 
-type WorkspaceStatus = {
-  available: boolean;
-  rootPath: string;
-  repoRoot?: string;
-  files: Record<string, {
-    path: string;
-    repoRelativePath: string;
-    oldPath?: string;
-    status: "modified" | "added" | "deleted" | "renamed" | "copied" | "untracked" | "conflicted" | "typechange";
-    additions: number;
-    deletions: number;
-    staged: boolean;
-    unstaged: boolean;
-  }>;
-  totals: { files: number; additions: number; deletions: number };
-  error?: string;
-};
+type WorkspaceFileStatus = WorkspaceStatusPayload["files"][string]["status"];
+type WorkspaceStatus = WorkspaceStatusPayload;
 type FileBrowserWalkState = { files: Set<string>; truncated: boolean };
 type VaultNode = { name: string; path: string; type: "file" | "folder"; children?: VaultNode[] };
 
@@ -1286,52 +1459,144 @@ function unavailableWorkspaceStatus(rootPath: string, error: string): WorkspaceS
   return { available: false, rootPath, files: {}, totals: { files: 0, additions: 0, deletions: 0 }, error };
 }
 
-function gitStatus(x: string, y: string): WorkspaceStatus["files"][string]["status"] {
-  if (x === "?" || y === "?") return "untracked";
-  if (x === "U" || y === "U" || (x === "A" && y === "A") || (x === "D" && y === "D")) return "conflicted";
-  if (x === "R" || y === "R") return "renamed";
-  if (x === "C" || y === "C") return "copied";
-  if (x === "A" || y === "A") return "added";
-  if (x === "D" || y === "D") return "deleted";
-  if (x === "T" || y === "T") return "typechange";
-  return "modified";
+function gitStatusFromDiff(status: string): WorkspaceFileStatus {
+  switch (status[0]) {
+    case "A": return "added";
+    case "D": return "deleted";
+    case "R": return "renamed";
+    case "C": return "copied";
+    case "T": return "typechange";
+    default: return "modified";
+  }
 }
 
-async function workspaceStatus(rootPath: string): Promise<WorkspaceStatus> {
+function pathIsInWorkspace(rootPath: string, repoRoot: string, repoRelativePath: string): boolean {
+  const path = resolve(repoRoot, repoRelativePath);
+  const pathFromRoot = relative(rootPath, path).replace(/\\/g, "/");
+  return !!pathFromRoot && !pathFromRoot.startsWith("../") && !isAbsolute(pathFromRoot) && includeWorkspaceChange(pathFromRoot);
+}
+
+function parseNameStatus(output: string): Array<{ status: WorkspaceFileStatus; repoRelativePath: string; oldRepoRelativePath?: string }> {
+  const fields = output.split("\0").filter(Boolean);
+  const changes: Array<{ status: WorkspaceFileStatus; repoRelativePath: string; oldRepoRelativePath?: string }> = [];
+  for (let index = 0; index < fields.length; index++) {
+    const status = fields[index] ?? "";
+    const repoRelativePath = fields[index + 1];
+    if (!status || !repoRelativePath) continue;
+    index += 1;
+    const renameOrCopy = status.startsWith("R") || status.startsWith("C");
+    const oldRepoRelativePath = renameOrCopy ? repoRelativePath : undefined;
+    const newRepoRelativePath = renameOrCopy ? fields[++index] : repoRelativePath;
+    if (!newRepoRelativePath) continue;
+    changes.push({
+      status: gitStatusFromDiff(status),
+      repoRelativePath: newRepoRelativePath,
+      oldRepoRelativePath,
+    });
+  }
+  return changes;
+}
+
+async function runHerdrGit(
+  args: string[],
+  options?: { cwd?: string; timeoutMs?: number },
+): Promise<GitCommandResult> {
   try {
-    const { stdout: repoOutput } = await execFileAsync("git", ["--no-optional-locks", "-C", rootPath, "rev-parse", "--show-toplevel"], { timeout: 10_000 });
-    const repoRoot = await realpath(repoOutput.trim());
-    const rootPathspec = relative(repoRoot, rootPath).replace(/\\/g, "/") || ".";
-    const [statusResult, diffResult] = await Promise.all([
-      execFileAsync("git", ["--no-optional-locks", "-C", repoRoot, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", rootPathspec], { timeout: 10_000 }),
-      execFileAsync("git", ["--no-optional-locks", "-C", repoRoot, "diff", "--numstat", "-z", "HEAD", "--", rootPathspec], { timeout: 10_000 }),
-    ]);
-    const counts = new Map<string, { additions: number; deletions: number }>();
-    for (const record of diffResult.stdout.split("\0")) {
-      const [additionsRaw, deletionsRaw, repoRelativePath] = record.split("\t");
-      if (!repoRelativePath) continue;
-      counts.set(repoRelativePath, { additions: additionsRaw === "-" ? 0 : Number(additionsRaw) || 0, deletions: deletionsRaw === "-" ? 0 : Number(deletionsRaw) || 0 });
+    const result = await execFileAsync("git", ["-c", "core.quotePath=false", ...args], {
+      cwd: options?.cwd,
+      timeout: options?.timeoutMs ?? 10_000,
+      maxBuffer: 20 * 1024 * 1024,
+    });
+    return { stdout: result.stdout, stderr: result.stderr, exitCode: 0 };
+  } catch (error: unknown) {
+    const failure = error as { stdout?: string; stderr?: string; code?: number | string };
+    return {
+      stdout: failure.stdout ?? "",
+      stderr: failure.stderr ?? (error instanceof Error ? error.message : "git failed"),
+      exitCode: typeof failure.code === "number" ? failure.code : 1,
+    };
+  }
+}
+
+const herdrGitRuntime: ReviewGitRuntime = {
+  runGit: runHerdrGit,
+  async readTextFile(path: string): Promise<string | null> {
+    try {
+      return await readFile(path, "utf8");
+    } catch {
+      return null;
     }
-    const files: WorkspaceStatus["files"] = {};
-    for (const record of statusResult.stdout.split("\0")) {
-      if (record.length < 4) continue;
-      const repoRelativePath = record.slice(3);
-      const path = resolve(repoRoot, repoRelativePath);
-      const relativePath = relative(rootPath, path).replace(/\\/g, "/");
-      if (!relativePath || relativePath.startsWith("../") || !includeWorkspaceChange(relativePath)) continue;
-      const countsForFile = counts.get(repoRelativePath) ?? { additions: 0, deletions: 0 };
-      files[path] = {
-        path,
-        repoRelativePath,
-        status: gitStatus(record[0] ?? " ", record[1] ?? " "),
-        additions: countsForFile.additions,
-        deletions: countsForFile.deletions,
-        staged: record[0] !== " " && record[0] !== "?",
-        unstaged: record[1] !== " " && record[1] !== "?",
+  },
+};
+
+export async function workspaceStatus(rootPath: string): Promise<WorkspaceStatus> {
+  try {
+    const repoResult = await runHerdrGit(["--no-optional-locks", "rev-parse", "--show-toplevel"], { cwd: rootPath });
+    if (repoResult.exitCode !== 0 || !repoResult.stdout.trim()) throw new Error("not a git repository");
+    const repoRoot = await realpath(repoResult.stdout.trim());
+    const workspace = filterWorkspaceStatusForDirectory(
+      await getWorkspaceStatusForDirectory(rootPath),
+      rootPath,
+      includeWorkspaceChange,
+    );
+    if (!workspace.available) return workspace;
+    const defaultBranch = await getDefaultBranch(herdrGitRuntime, repoRoot);
+    const baseResolves = (await herdrGitRuntime.runGit(
+      ["rev-parse", "--verify", "--quiet", "--end-of-options", `${defaultBranch}^{commit}`],
+      { cwd: repoRoot },
+    )).exitCode === 0;
+    const sinceBase = baseResolves
+      ? await getSinceBaseSections(herdrGitRuntime, defaultBranch, repoRoot)
+      : null;
+    const mergeBase = sinceBase?.mergeBase || "HEAD";
+    const rootPathspec = relative(repoRoot, rootPath).replace(/\\/g, "/") || ".";
+    const [committedResult, totalCounts] = await Promise.all([
+      runHerdrGit(
+        ["--no-optional-locks", "diff", "--name-status", "-z", "--end-of-options", `${mergeBase}..HEAD`, "--", rootPathspec],
+        { cwd: repoRoot },
+      ),
+      runHerdrGit(
+        ["--no-optional-locks", "diff", "--numstat", "-z", "--end-of-options", mergeBase, "--", rootPathspec],
+        { cwd: repoRoot },
+      ),
+    ]);
+    if (committedResult.exitCode !== 0 || totalCounts.exitCode !== 0) throw new Error("git diff failed");
+    const counts = parseGitNumstat(totalCounts.stdout);
+
+    const files = { ...workspace.files };
+    for (const change of parseNameStatus(committedResult.stdout)) {
+      if (files[resolve(repoRoot, change.repoRelativePath)] || !pathIsInWorkspace(rootPath, repoRoot, change.repoRelativePath)) continue;
+      const countsForFile = counts.get(change.repoRelativePath) ?? { additions: 0, deletions: 0 };
+      const oldCounts = change.oldRepoRelativePath
+        ? counts.get(change.oldRepoRelativePath) ?? { additions: 0, deletions: 0 }
+        : { additions: 0, deletions: 0 };
+      files[resolve(repoRoot, change.repoRelativePath)] = {
+        path: resolve(repoRoot, change.repoRelativePath),
+        repoRelativePath: change.repoRelativePath,
+        oldPath: change.oldRepoRelativePath ? resolve(repoRoot, change.oldRepoRelativePath) : undefined,
+        status: change.status,
+        additions: countsForFile.additions + oldCounts.additions,
+        deletions: countsForFile.deletions + oldCounts.deletions,
+        staged: false,
+        unstaged: false,
       };
     }
+    // Since-base counts are the composite merge-base → working-tree diff. Keep
+    // untracked line counts from workspace-status; Git's tracked diff excludes
+    // them by design.
+    for (const [path, change] of Object.entries(files)) {
+      if (change.status === "untracked") continue;
+      const count = counts.get(change.repoRelativePath);
+      if (count) files[path] = { ...change, ...count };
+    }
+    const filteredSinceBase: SinceBaseSections | undefined = sinceBase && {
+      ...sinceBase,
+      files: Object.fromEntries(
+        Object.entries(sinceBase.files).filter(([repoRelativePath]) => pathIsInWorkspace(rootPath, repoRoot, repoRelativePath)),
+      ),
+    };
     const values = Object.values(files);
-    return { available: true, rootPath, repoRoot, files, totals: {
+    return { available: true, rootPath, repoRoot, ...(filteredSinceBase ? { sinceBase: filteredSinceBase } : {}), files, totals: {
       files: values.length,
       additions: values.reduce((sum, file) => sum + file.additions, 0),
       deletions: values.reduce((sum, file) => sum + file.deletions, 0),
@@ -1363,6 +1628,182 @@ async function liveWorkspaceDirectory(
     }
   }
   return null;
+}
+
+export async function serveWorkspaceFilesStream(
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: URL,
+  panels?: HerdrPanel[],
+): Promise<void> {
+  const livePanels = panels ?? await discoverPanels();
+  const rawDirPaths = url.searchParams.getAll("dirPath");
+  if (rawDirPaths.length === 0) {
+    writeJson(response, 400, { error: "Missing dirPath parameter" });
+    return;
+  }
+
+  const subscriptions: Array<{ dirPath: string; clientDirPath: string }> = [];
+  for (const rawDirPath of rawDirPaths) {
+    const workspace = await liveWorkspaceDirectory(rawDirPath, livePanels, { exactRoot: true });
+    if (!workspace) {
+      writeJson(response, 403, { error: "Directory is not a currently live Herdr Pi workspace" });
+      return;
+    }
+    if (!subscriptions.some(({ dirPath }) => dirPath === workspace.root)) {
+      subscriptions.push({ dirPath: workspace.root, clientDirPath: rawDirPath });
+    }
+  }
+  startFileBrowserWatchStream(request, response, subscriptions);
+}
+
+function livePanePathspec(root: string, cwd: string): string | null {
+  const relativePath = relative(root, cwd).replace(/\\/g, "/");
+  if (relativePath === "") return null;
+  if (relativePath.startsWith("..") || isAbsolute(relativePath)) return null;
+  return `:(top)${relativePath}`;
+}
+
+/** Launch an isolated full-review server for one captured, live Pi pane. */
+async function openGitChangesReview(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (!canWriteFeedback(request)) {
+    writeJson(response, 403, { error: "Opening a full review requires a loopback browser or PLANNOTATOR_HERDR_WRITE_TOKEN." });
+    return;
+  }
+  const body = await requestJson(request);
+  const paneId = text(body?.paneId);
+  if (!paneId) {
+    writeJson(response, 400, { error: "A live Pi pane is required" });
+    return;
+  }
+
+  const panels = await discoverPanels();
+  const pane = panels.find((candidate) => candidate.id === paneId);
+  if (!pane) {
+    writeJson(response, 404, { error: "The selected Pi pane is no longer live" });
+    return;
+  }
+  const workspace = await liveWorkspaceDirectory(pane.cwd, panels, { exactRoot: true });
+  if (!workspace) {
+    writeJson(response, 403, { error: "Directory is not a currently live Herdr Pi workspace" });
+    return;
+  }
+  const registration = panelSessions.get(paneId);
+  if (!registration) {
+    writeJson(response, 409, { error: "The selected Pi pane has not published a live session" });
+    return;
+  }
+  const requestedSessionId = registration.sessionId;
+  while (true) {
+    const existing = activeGitChangesReviews.get(paneId);
+    if (existing?.settled) stopGitChangesReview(existing);
+    const liveExisting = activeGitChangesReviews.get(paneId);
+    if (liveExisting && (liveExisting.sessionId !== requestedSessionId || liveExisting.cwd !== workspace.root)) {
+      stopGitChangesReview(liveExisting);
+    }
+
+    let launched: { review: ActiveGitChangesReview; reused: boolean };
+    try {
+      launched = await reuseOrLaunchGitChangesReview(
+        activeGitChangesReviews,
+        pendingGitChangesReviewLaunches,
+        paneId,
+        requestedSessionId,
+        workspace.root,
+        async () => {
+        const repoResult = await runHerdrGit(["--no-optional-locks", "rev-parse", "--show-toplevel"], { cwd: workspace.root });
+        if (repoResult.exitCode !== 0 || !repoResult.stdout.trim()) {
+          throw new Error("The current pane folder is not a Git repository");
+        }
+        const repoRoot = await realpath(repoResult.stdout.trim());
+        const pathspec = livePanePathspec(repoRoot, workspace.root);
+        const config = loadConfig();
+        const prepared = await prepareLocalReviewDiff({
+          cwd: workspace.root,
+          // Prefer the same composite Git Changes view when the VCS offers it;
+          // prepareLocalReviewDiff falls back to its first valid mode otherwise.
+          configuredDiffType: "since-base",
+          hideWhitespace: config.diffOptions?.hideWhitespace ?? false,
+          ...(pathspec ? { pathspec } : {}),
+        });
+        const captured = { paneId, sessionId: requestedSessionId };
+        // A Tailnet client cannot reach a WSL loopback listener. Bind the isolated
+        // review on the Herdr service interface, but never assume that the process's
+        // `localhost` is the reviewer's browser.
+        const server = await startReviewServer({
+          rawPatch: prepared.rawPatch,
+          gitRef: prepared.gitRef,
+          // Herdr is often opened from another Tailnet device. Keep a random port,
+          // but bind it on the same interface as the host service so the browser
+          // which clicked the UI can reach it.
+          port: 0,
+          hostname: host,
+          error: prepared.error,
+          htmlContent: reviewHtml,
+          origin: "pi",
+          diffType: prepared.diffType,
+          ...(pathspec ? { pathspec, reviewRoot: repoRoot } : {}),
+          ...(pathspec ? { agentReviewScope: `This review is restricted to the live Herdr pane directory: ${workspace.root}. Do not inspect or report files outside that directory.` } : {}),
+          gitContext: prepared.gitContext,
+          initialBase: prepared.base,
+          agentCwd: workspace.root,
+          sharingEnabled: false,
+          onDecision: async (decision) => {
+            if (decision.exit) return;
+            const current = panelSessions.get(captured.paneId);
+            if (current?.sessionId !== captured.sessionId) {
+              throw new Error("The Pi pane session changed since this review was opened. Reopen the review from the current pane.");
+            }
+            const content = decision.approved ? "LGTM - no changes requested." : decision.feedback.trim();
+            if (!content) return;
+            const delivery: PendingInstructionDelivery = {
+              deliveryId: randomUUID(),
+              paneId: captured.paneId,
+              sessionId: captured.sessionId,
+              content,
+            };
+            pendingInstructionDeliveries.set(delivery.deliveryId, delivery);
+          },
+        });
+        const review: ActiveGitChangesReview = { ...captured, cwd: workspace.root, settled: false, server };
+        // Give the review tab time to receive its submission response before the
+        // isolated listener closes, matching the standalone review command.
+        void server.waitForDecision().finally(() => {
+          review.settled = true;
+          setTimeout(() => stopGitChangesReview(review), 1_500);
+        });
+          return review;
+        },
+        stopGitChangesReview,
+      );
+    } catch (error) {
+      if (error instanceof GitChangesReviewLaunchSuperseded) {
+        writeJson(response, 409, { error: "The selected Pi pane session changed while the full review was opening" });
+        return;
+      }
+      throw error;
+    }
+    const { review, reused } = launched;
+
+    if (review.sessionId === requestedSessionId && review.cwd === workspace.root) {
+      // A request captured its session before preparing the patch. Do not hand
+      // that review to a replacement session that arrived while it waited.
+      if (panelSessions.get(paneId)?.sessionId !== requestedSessionId) {
+        if (activeGitChangesReviews.get(paneId) === review) stopGitChangesReview(review);
+        writeJson(response, 409, { error: "The selected Pi pane session changed while the full review was opening" });
+        return;
+      }
+      // Opening a browser from this WSL service would target Windows' default
+      // browser, not necessarily the browser that initiated this request. Return
+      // only the ephemeral port; the UI opens it against its current host.
+      writeJson(response, reused ? 200 : 201, { ok: true, port: review.server.port, hostname: review.server.hostname, reused });
+      return;
+    }
+
+    // The only in-flight launch belonged to a session that was replaced while
+    // this request waited. Retire it, then reserve a review for this session.
+    if (activeGitChangesReviews.get(paneId) === review) stopGitChangesReview(review);
+  }
 }
 
 async function serveWorkspaceFiles(response: ServerResponse, url: URL): Promise<void> {
@@ -1531,6 +1972,10 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
     void serveUnavailableDocExists(request, response);
     return;
   }
+  if (request.method === "GET" && url.pathname === "/api/reference/files/stream") {
+    void serveWorkspaceFilesStream(request, response, url).catch(() => writeJson(response, 500, { error: "Failed to watch live Herdr workspace files" }));
+    return;
+  }
   if (request.method === "GET" && url.pathname === "/api/reference/files") {
     void serveWorkspaceFiles(response, url).catch(() => writeJson(response, 500, { error: "Failed to list live Herdr workspace files" }));
     return;
@@ -1598,6 +2043,10 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
   }
   if (request.method === "POST" && url.pathname === "/api/instruction") {
     void queueInstruction(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/git-changes/review") {
+    void openGitChangesReview(request, response).catch((error: unknown) => writeJson(response, 500, { error: error instanceof Error ? error.message : "Could not open full review" }));
     return;
   }
   if (request.method === "POST" && url.pathname === "/api/scout") {

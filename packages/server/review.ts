@@ -12,7 +12,7 @@
 import { isRemoteSession, getServerHostname, getServerPort } from "./remote";
 import type { Origin } from "@plannotator/shared/agents";
 import { type DiffType, type GitContext, runVcsDiff, getVcsFileContentsForDiff, getVcsDiffFingerprint, canStageFiles, stageFile, unstageFile, resolveVcsCwd, validateFilePath, getVcsContext, detectRemoteDefaultCompareTarget, gitRuntime } from "./vcs";
-import { basename } from "node:path";
+import { basename, isAbsolute, resolve as resolvePath } from "node:path";
 import { existsSync } from "node:fs";
 import {
   isSameCwdCommitSwitch,
@@ -98,6 +98,7 @@ import { AI_QUERY_ENDPOINT, createAIRuntime } from "./ai-runtime";
 import type { AIEndpoints } from "@plannotator/ai";
 import { isWSL } from "./browser";
 import { handleOpenInApps, handleOpenIn } from "./open-in";
+import { isWithinDirectory } from "@plannotator/shared/html-assets-node";
 import type { LocalWorkspaceReview, WorkspaceDiffType } from "./review-workspace";
 import { handleCodeNavResolve, extractChangedFiles } from "./code-nav";
 import { discoverCuratedSkills, resolveRequestedReviewProfile, listAllSkills, enableReviewSkill } from "./review-skill-loader";
@@ -127,10 +128,20 @@ export interface ReviewServerOptions {
   error?: string;
   /** HTML content to serve for the UI */
   htmlContent: string;
+  /** Optional listener port; hosts pass 0 for an isolated ephemeral port. */
+  port?: number;
+  /** Optional listener interface. A remote host can expose an isolated review on its own interface. */
+  hostname?: string;
   /** Origin identifier for UI customization */
   origin?: Origin;
   /** Current diff type being displayed */
   diffType?: DiffType | WorkspaceDiffType;
+  /** Restrict every local Git diff to a host-authorized pane path. */
+  pathspec?: string;
+  /** Repository root for a scoped pathspec; keeps repo-relative patch paths resolvable. */
+  reviewRoot?: string;
+  /** Extra local-review context for agents, e.g. a live pane scope. */
+  agentReviewScope?: string;
   /** Git context with branch info and available diff options */
   gitContext?: GitContext;
   /** Local parent directory containing multiple child VCS repositories. */
@@ -165,11 +176,48 @@ export interface ReviewServerOptions {
   worktreePool?: import("@plannotator/shared/worktree-pool").WorktreePool;
   /** Cleanup callback invoked when server stops (e.g., remove temp worktree) */
   onCleanup?: () => void | Promise<void>;
+  /**
+   * Optional host callback after a reviewer submits feedback or exits. Hosts
+   * that mount a session inside an existing transport use this to deliver the
+   * decision through their own session-scoped bridge.
+   */
+  onDecision?: (decision: {
+    approved: boolean;
+    feedback: string;
+    annotations: unknown[];
+    agentSwitch?: string;
+    exit?: boolean;
+  }) => void | Promise<void>;
+}
+
+export interface ReviewRequestContext {
+  /** Keep a long-lived response (SSE/AI stream) alive in the host transport. */
+  disableIdleTimeout?: () => void;
+}
+
+/**
+ * Stateful review route handler for an already-owned HTTP listener.
+ * Hosts mount `fetch` at their preferred origin/path and call `dispose` when
+ * that host session ends; standalone review uses the same interface below.
+ */
+export interface ReviewSession {
+  fetch: (request: Request, context?: ReviewRequestContext) => Promise<Response>;
+  setServerUrl: (url: string) => void;
+  waitForDecision: () => Promise<{
+    approved: boolean;
+    feedback: string;
+    annotations: unknown[];
+    agentSwitch?: string;
+    exit?: boolean;
+  }>;
+  dispose: () => void;
 }
 
 export interface ReviewServerResult {
   /** The port the server is running on */
   port: number;
+  /** Interface the standalone listener is bound to. */
+  hostname: string;
   /** The full URL to access the server */
   url: string;
   /** Whether running in remote mode */
@@ -199,10 +247,12 @@ const RETRY_DELAY_MS = 500;
  * - API routes (/api/diff, /api/feedback)
  * - Port conflict retries
  */
-export async function startReviewServer(
+export async function createReviewSession(
   options: ReviewServerOptions
-): Promise<ReviewServerResult> {
-  const { htmlContent, origin, gitContext, sharingEnabled = true, shareBaseUrl, onReady } = options;
+): Promise<ReviewSession> {
+  const { htmlContent, origin, gitContext, sharingEnabled = true, shareBaseUrl } = options;
+  const reviewPathspec = options.pathspec;
+  const agentReviewScope = options.agentReviewScope;
 
   let prMetadata = options.prMetadata;
   const isPRMode = !!prMetadata;
@@ -354,6 +404,7 @@ export async function startReviewServer(
       if (!hasLocalAccess) return null;
       return await getVcsDiffFingerprint(currentDiffType as DiffType, currentBase, gitContext?.cwd, {
         hideWhitespace: currentHideWhitespace,
+        pathspec: reviewPathspec,
       });
     } catch {
       return null;
@@ -508,7 +559,7 @@ export async function startReviewServer(
                 currentDiffType as DiffType,
                 remote,
                 gitContext.cwd,
-                { hideWhitespace: currentHideWhitespace },
+                { hideWhitespace: currentHideWhitespace, pathspec: reviewPathspec },
               );
               if (!baseEverSwitched) {
                 currentBase = remote;
@@ -559,7 +610,7 @@ export async function startReviewServer(
   ): Promise<SinceBaseSections | undefined> => {
     if (!isSinceBaseActive(diffType)) return undefined;
     const cwd = resolveVcsCwd(diffType as DiffType, gitContext?.cwd);
-    return (await getSinceBaseSections(gitRuntime, base, cwd)) ?? undefined;
+    return (await getSinceBaseSections(gitRuntime, base, cwd, { pathspec: reviewPathspec })) ?? undefined;
   };
 
   // --- Commit metadata sidecar -----------------------------------------------
@@ -597,10 +648,26 @@ export async function startReviewServer(
   // uses, which would open a file from the wrong tree. Returns [] until the
   // checkout is ready so resolveOpenInTarget rejects (the button is gated off
   // then anyway); non-PR resolves to the working tree as usual.
+  const isWithinReviewPathspec = (filePath: string): boolean => {
+    if (!reviewPathspec) return true;
+    const prefix = reviewPathspec.match(/^:\(top\)(.+)$/)?.[1]?.replace(/\/+$/, "");
+    if (!prefix || !options.reviewRoot || isAbsolute(filePath) || filePath.includes("..")) return false;
+    if (filePath !== prefix && !filePath.startsWith(`${prefix}/`)) return false;
+    return isWithinDirectory(
+      resolvePath(options.reviewRoot, filePath),
+      resolvePath(options.reviewRoot, prefix),
+    );
+  };
   const resolveOpenInRoot = (): string | string[] => {
     if (workspace) return workspace.root;
     if (options.worktreePool && prMetadata) return resolvePRLocalCwd() ?? [];
-    return options.agentCwd ?? resolveVcsCwd(currentDiffType as DiffType, gitContext?.cwd) ?? process.cwd();
+    // Patch paths are repo-root-relative. Scope validation below still limits
+    // them to the pane, while this root keeps opening `apps/pane/file.ts`
+    // from incorrectly resolving as `apps/pane/apps/pane/file.ts`.
+    return (reviewPathspec ? options.reviewRoot : undefined)
+      ?? options.agentCwd
+      ?? resolveVcsCwd(currentDiffType as DiffType, gitContext?.cwd)
+      ?? process.cwd();
   };
   // Async sibling of resolveAgentCwd: waits for the current PR's checkout
   // warmup instead of falling back while it is still being created.
@@ -652,13 +719,14 @@ export async function startReviewServer(
       (options.worktreePool && prMetadata
         ? resolvePRLocalCwd(prMetadata) !== undefined
         : !!options.agentCwd);
-    return buildAgentReviewUserMessage(
+    const context = buildAgentReviewUserMessage(
       patch,
       diffType,
       { defaultBranch: base, hasLocalAccess, prDiffScope: currentPRDiffScope },
       prMetadata,
       true,
     );
+    return agentReviewScope ? `${context}\n\n${agentReviewScope}` : context;
   };
   const semanticDiffScratchCwd = getSemanticDiffScratchCwd();
   const resolveSemanticDiffCwd = (): string => {
@@ -965,6 +1033,7 @@ export async function startReviewServer(
             workspace: workspacePrompt,
           }, isCustomReview)
         : buildAgentReviewUserMessage(launchPatch, launchDiffType as DiffType, userMessageOptions, launchMetadata, isCustomReview);
+      const scopedUserMessage = agentReviewScope ? `${userMessage}\n\n${agentReviewScope}` : userMessage;
       const jobLabel = workspacePrompt ? "Workspace Review" : "Code Review";
 
       if (provider === "codex") {
@@ -972,7 +1041,7 @@ export async function startReviewServer(
         const reasoningEffort = typeof config?.reasoningEffort === "string" && config.reasoningEffort ? config.reasoningEffort : undefined;
         const fastMode = config?.fastMode === true;
         const outputPath = generateOutputPath();
-        const prompt = composeCodexReviewPrompt(userMessage, reviewProfile);
+        const prompt = composeCodexReviewPrompt(scopedUserMessage, reviewProfile);
         const command = await buildCodexCommand({ cwd, outputPath, prompt, model, reasoningEffort, fastMode });
         return { command, outputPath, prompt, cwd, label: jobLabel, model, reasoningEffort, fastMode: fastMode || undefined, prUrl: launchPrUrl, diffScope: launchDiffScope, diffContext, reviewProfileId: reviewProfile.id, reviewProfileLabel: reviewProfile.label };
       }
@@ -980,7 +1049,7 @@ export async function startReviewServer(
       if (provider === "claude") {
         const model = typeof config?.model === "string" && config.model ? config.model : undefined;
         const effort = typeof config?.effort === "string" && config.effort ? config.effort : undefined;
-        const prompt = composeClaudeReviewPrompt(userMessage, reviewProfile);
+        const prompt = composeClaudeReviewPrompt(scopedUserMessage, reviewProfile);
         const { command, stdinPrompt } = buildClaudeCommand(prompt, model, effort);
         return { command, stdinPrompt, prompt, cwd, label: jobLabel, captureStdout: true, model, effort, prUrl: launchPrUrl, diffScope: launchDiffScope, diffContext, reviewProfileId: reviewProfile.id, reviewProfileLabel: reviewProfile.label };
       }
@@ -1001,7 +1070,7 @@ export async function startReviewServer(
         // Per-job nonce embedded in the marker contract; recovered from job.prompt
         // at parse time so echoed/quoted bare tags can't be mistaken for the payload.
         const nonce = makeMarkerNonce();
-        const prompt = composeMarkerReviewPrompt(reviewProfile, userMessage, nonce);
+        const prompt = composeMarkerReviewPrompt(reviewProfile, scopedUserMessage, nonce);
         const { command } = buildMarkerCommand(markerEngine, prompt, model, cwd, { thinking });
         return { command, prompt, cwd, label: jobLabel, captureStdout: true, model, thinking, prUrl: launchPrUrl, diffScope: launchDiffScope, diffContext, reviewProfileId: reviewProfile.id, reviewProfileLabel: reviewProfile.label };
       }
@@ -1201,8 +1270,6 @@ export async function startReviewServer(
   // AI provider setup (graceful — capabilities report unavailable if no provider is registered)
   const aiRuntime = await createAIRuntime({ getCwd: resolveAgentCwd });
 
-  const isRemote = isRemoteSession();
-  const configuredPort = getServerPort();
   const wslFlag = await isWSL();
   const gitUser = detectGitUser();
 
@@ -1278,21 +1345,21 @@ export async function startReviewServer(
   }>((resolve) => {
     resolveDecision = resolve;
   });
+  let decisionSubmitted = false;
+  let decisionResolved = false;
+  const publishDecision = (decision: {
+    approved: boolean;
+    feedback: string;
+    annotations: unknown[];
+    agentSwitch?: string;
+    exit?: boolean;
+  }): void => {
+    if (decisionResolved) return;
+    decisionResolved = true;
+    resolveDecision(decision);
+  };
 
-  // Start server with retry logic
-  let server: ReturnType<typeof Bun.serve> | null = null;
-
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      server = Bun.serve({
-        hostname: getServerHostname(),
-        port: configuredPort,
-        // Bun's default 10s idleTimeout kills requests that legitimately park:
-        // PR-mode endpoints await the background checkout warmup (a clone that
-        // can take minutes) and AI SSE streams can stall between bytes.
-        idleTimeout: 0,
-
-        async fetch(req, server) {
+  const fetch = async (req: Request, context: ReviewRequestContext = {}): Promise<Response> => {
           const url = new URL(req.url);
 
           // API: Get tour result
@@ -1455,7 +1522,10 @@ export async function startReviewServer(
           // and process.cwd()) — not the client `base`, which is wrong when
           // review runs from a subdirectory — then containment-checks it.
           if (url.pathname === "/api/open-in" && req.method === "POST") {
-            return handleOpenIn(req, { resolveRoot: resolveOpenInRoot });
+            return handleOpenIn(req, {
+              resolveRoot: resolveOpenInRoot,
+              isAllowedPath: isWithinReviewPathspec,
+            });
           }
 
           // API: cheap staleness probe — has the underlying VCS state changed
@@ -1661,6 +1731,7 @@ export async function startReviewServer(
               // Run the new diff
               const result = await runVcsDiff(newDiffType as DiffType, base, defaultCwd, {
                 hideWhitespace: effectiveHideWhitespace,
+                pathspec: reviewPathspec,
               });
 
               // A newer switch started while we computed — abandon before
@@ -2093,6 +2164,9 @@ export async function startReviewServer(
 
             // Local review: read file contents from local git
             if (hasLocalAccess) {
+              if (!isWithinReviewPathspec(filePath) || (oldPath && !isWithinReviewPathspec(oldPath))) {
+                return Response.json({ error: "Path is outside the review scope" }, { status: 403 });
+              }
               const requestedBase = url.searchParams.get("base") ?? undefined;
               const base = resolveReviewBase(requestedBase);
               const defaultCwd = gitContext?.cwd;
@@ -2130,11 +2204,21 @@ export async function startReviewServer(
                 { status: 400 },
               );
             }
+            try {
+              const body = (await req.clone().json()) as { filePath?: unknown };
+              if (typeof body.filePath !== "string" || !isWithinReviewPathspec(body.filePath)) {
+                return Response.json({ error: "Path is outside the review scope" }, { status: 403 });
+              }
+            } catch {
+              return Response.json({ error: "Invalid request body" }, { status: 400 });
+            }
             // PR mode: the checkout must actually exist — ripgrep over a
             // fallback directory returns confidently-wrong results.
             const navCwd = options.worktreePool && prMetadata
               ? await ensurePRLocalCwd()
-              : await resolveAgentCwdReady();
+              : reviewPathspec
+                ? options.reviewRoot
+                : await resolveAgentCwdReady();
             if (!navCwd) {
               return Response.json({ error: "Local checkout unavailable" }, { status: 400 });
             }
@@ -2155,10 +2239,15 @@ export async function startReviewServer(
             try { validateFilePath(filePath); } catch {
               return Response.json({ error: "Invalid path" }, { status: 400 });
             }
+            if (!isWithinReviewPathspec(filePath)) {
+              return Response.json({ error: "Path is outside the review scope" }, { status: 403 });
+            }
             try {
               const navCwd = options.worktreePool && prMetadata
                 ? await ensurePRLocalCwd()
-                : await resolveAgentCwdReady();
+                : reviewPathspec
+                  ? options.reviewRoot
+                  : await resolveAgentCwdReady();
               if (!navCwd) {
                 return Response.json({ error: "Local checkout unavailable" }, { status: 400 });
               }
@@ -2192,6 +2281,9 @@ export async function startReviewServer(
                 }
               }
 
+              if (!isWithinReviewPathspec(body.filePath)) {
+                return Response.json({ error: "Path is outside the review scope" }, { status: 403 });
+              }
               const stageCwd = resolveVcsCwd(currentDiffType as DiffType, gitContext?.cwd);
               if (isPRMode || !(await canStageFiles(currentDiffType as DiffType, stageCwd))) {
                 return Response.json(
@@ -2316,7 +2408,7 @@ export async function startReviewServer(
               );
             }
 
-            server.timeout(req, 0);
+            context.disableIdleTimeout?.();
 
             const encoder = new TextEncoder();
             const activeRef = prRef;
@@ -2360,25 +2452,39 @@ export async function startReviewServer(
 
           // API: External annotations (SSE-based, for any external tool)
           const externalResponse = await externalAnnotations.handle(req, url, {
-            disableIdleTimeout: () => server.timeout(req, 0),
+            disableIdleTimeout: () => context.disableIdleTimeout?.(),
           });
           if (externalResponse) return externalResponse;
 
           // API: Agent jobs (background review agents)
           const agentResponse = await agentJobs.handle(req, url, {
-            disableIdleTimeout: () => server.timeout(req, 0),
+            disableIdleTimeout: () => context.disableIdleTimeout?.(),
           });
           if (agentResponse) return agentResponse;
 
           // API: Exit review session without feedback
           if (url.pathname === "/api/exit" && req.method === "POST") {
+            if (decisionSubmitted) {
+              return Response.json({ error: "This review has already been submitted" }, { status: 409 });
+            }
+            const decision = { approved: false, feedback: "", annotations: [], exit: true };
+            decisionSubmitted = true;
+            try {
+              await options.onDecision?.(decision);
+            } catch (error) {
+              decisionSubmitted = false;
+              return Response.json({ error: error instanceof Error ? error.message : "Could not exit review" }, { status: 409 });
+            }
             deleteDraft(draftKey, readDraftGenerationFromUrl(req));
-            resolveDecision({ approved: false, feedback: "", annotations: [], exit: true });
+            publishDecision(decision);
             return Response.json({ ok: true });
           }
 
           // API: Submit review feedback
           if (url.pathname === "/api/feedback" && req.method === "POST") {
+            if (decisionSubmitted) {
+              return Response.json({ error: "This review has already been submitted" }, { status: 409 });
+            }
             try {
               const body = (await req.json()) as {
                 approved?: boolean;
@@ -2387,14 +2493,27 @@ export async function startReviewServer(
                 agentSwitch?: string;
                 draftGeneration?: number;
               };
+              // Reserve delivery before awaiting the host bridge so two
+              // concurrent POSTs cannot enqueue duplicate Pi instructions.
+              if (decisionSubmitted) {
+                return Response.json({ error: "This review has already been submitted" }, { status: 409 });
+              }
+              decisionSubmitted = true;
 
-              deleteDraft(draftKey, readDraftGenerationFromBody(body));
-              resolveDecision({
+              const decision = {
                 approved: body.approved ?? false,
                 feedback: body.feedback || "",
                 annotations: body.annotations || [],
                 agentSwitch: body.agentSwitch,
-              });
+              };
+              try {
+                await options.onDecision?.(decision);
+              } catch (error) {
+                decisionSubmitted = false;
+                return Response.json({ error: error instanceof Error ? error.message : "Could not deliver feedback" }, { status: 409 });
+              }
+              deleteDraft(draftKey, readDraftGenerationFromBody(body));
+              publishDecision(decision);
 
               return Response.json({ ok: true });
             } catch (err) {
@@ -2506,7 +2625,7 @@ export async function startReviewServer(
                 }
               }
               if (url.pathname === AI_QUERY_ENDPOINT) {
-                server.timeout(req, 0);
+                context.disableIdleTimeout?.();
               }
               return handler(req);
             }
@@ -2520,8 +2639,54 @@ export async function startReviewServer(
           return new Response(htmlContent, {
             headers: { "Content-Type": "text/html" },
           });
-        },
+  };
 
+  return {
+    fetch,
+    setServerUrl: (url: string) => { serverUrl = url; },
+    waitForDecision: () => decisionPromise,
+    dispose: () => {
+      publishDecision({ approved: false, feedback: "", annotations: [], exit: true });
+      agentJobs.killAll();
+      aiRuntime.dispose();
+      // Invoke cleanup callback (e.g., remove temp worktree)
+      if (options.onCleanup) {
+        try {
+          const result = options.onCleanup();
+          if (result instanceof Promise) result.catch(() => {});
+        } catch { /* best effort */ }
+      }
+    },
+  };
+}
+
+/**
+ * Start a standalone review server. Hosts that already own an HTTP listener use
+ * createReviewSession() and mount its fetch handler instead.
+ */
+export async function startReviewServer(
+  options: ReviewServerOptions,
+): Promise<ReviewServerResult> {
+  const session = await createReviewSession(options);
+  const isRemote = isRemoteSession();
+  const configuredPort = options.port ?? getServerPort();
+  const hostname = options.hostname ?? getServerHostname();
+  let server: ReturnType<typeof Bun.serve> | null = null;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      server = Bun.serve({
+        hostname,
+        port: configuredPort,
+        // Bun's default 10s idleTimeout kills requests that legitimately park:
+        // PR-mode endpoints await the background checkout warmup (a clone that
+        // can take minutes) and AI SSE streams can stall between bytes.
+        idleTimeout: 0,
+        fetch(req, bunServer) {
+          return session.fetch(req, {
+            disableIdleTimeout: () => bunServer.timeout(req, 0),
+          });
+        },
         error(err) {
           console.error("[plannotator] Server error:", err);
           return new Response(
@@ -2530,57 +2695,44 @@ export async function startReviewServer(
           );
         },
       });
-
-      break; // Success, exit retry loop
+      break;
     } catch (err: unknown) {
-      const isAddressInUse =
-        err instanceof Error && err.message.includes("EADDRINUSE");
-
+      const isAddressInUse = err instanceof Error && err.message.includes("EADDRINUSE");
       if (isAddressInUse && attempt < MAX_RETRIES) {
         await Bun.sleep(RETRY_DELAY_MS);
         continue;
       }
-
+      session.dispose();
       if (isAddressInUse) {
         const hint = isRemote ? " (set PLANNOTATOR_PORT to use different port)" : "";
         throw new Error(`Port ${configuredPort} in use after ${MAX_RETRIES} retries${hint}`);
       }
-
       throw err;
     }
   }
 
   if (!server) {
+    session.dispose();
     throw new Error("Failed to start server");
   }
 
   const port = server.port!;
-  serverUrl = `http://localhost:${port}`;
-  const exitHandler = () => agentJobs.killAll();
+  const serverUrl = `http://localhost:${port}`;
+  session.setServerUrl(serverUrl);
+  const exitHandler = () => session.dispose();
   process.once("exit", exitHandler);
-
-  // Notify caller that server is ready
-  if (onReady) {
-    onReady(serverUrl, isRemote, port);
-  }
+  options.onReady?.(serverUrl, isRemote, port);
 
   return {
     port,
+    hostname,
     url: serverUrl,
     isRemote,
-    waitForDecision: () => decisionPromise,
+    waitForDecision: session.waitForDecision,
     stop: () => {
       process.removeListener("exit", exitHandler);
-      agentJobs.killAll();
-      aiRuntime.dispose();
+      session.dispose();
       server.stop();
-      // Invoke cleanup callback (e.g., remove temp worktree)
-      if (options.onCleanup) {
-        try {
-          const result = options.onCleanup();
-          if (result instanceof Promise) result.catch(() => {});
-        } catch { /* best effort */ }
-      }
     },
   };
 }

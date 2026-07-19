@@ -113,6 +113,8 @@ export interface PrepareLocalReviewDiffOptions {
   requestedBase?: string;
   configuredDiffType: DiffType;
   hideWhitespace?: boolean;
+  /** Repo-root-relative Git pathspec used to restrict a live-pane review. */
+  pathspec?: string;
 }
 
 export interface PreparedLocalReviewDiff {
@@ -437,6 +439,7 @@ export function createVcsApi(providers: readonly VcsProvider[]): VcsApi {
       const base = resolveInitialBase(gitContext, diffType, options.requestedBase, ownsRequestedDiffType);
       const result = await provider.runDiff(diffType, base, gitContext.cwd ?? options.cwd, {
         hideWhitespace: options.hideWhitespace,
+        pathspec: options.pathspec,
       });
 
       return {

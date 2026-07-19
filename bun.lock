@@ -57,6 +57,13 @@
         "vite-plugin-singlefile": "^2.0.3",
       },
     },
+    "apps/herdr-process-service": {
+      "name": "@plannotator/herdr-process-service",
+      "version": "0.0.0",
+      "dependencies": {
+        "chokidar": "^5.0.0",
+      },
+    },
     "apps/hook": {
       "name": "@plannotator/hooks",
       "version": "0.0.1",
@@ -843,6 +850,8 @@
     "@plannotator/core": ["@plannotator/core@workspace:packages/core"],
 
     "@plannotator/editor": ["@plannotator/editor@workspace:packages/editor"],
+
+    "@plannotator/herdr-process-service": ["@plannotator/herdr-process-service@workspace:apps/herdr-process-service"],
 
     "@plannotator/hooks": ["@plannotator/hooks@workspace:apps/hook"],
 

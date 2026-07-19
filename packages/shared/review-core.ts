@@ -125,6 +125,12 @@ export interface ReviewGitRuntime {
 
 export interface GitDiffOptions {
   hideWhitespace?: boolean;
+  /**
+   * Restrict a review launched from a live pane subdirectory to that pane.
+   * Git normally interprets diffs from any subdirectory as repo-wide, so this
+   * is a repo-root-relative pathspec rather than a process working directory.
+   */
+  pathspec?: string;
 }
 
 export function parseRemoteBookmark(target: string): { name: string; remote: string } | null {
@@ -599,12 +605,12 @@ async function getUntrackedFileDiffs(
 ): Promise<{ diff: string; paths: string[] }> {
   // git ls-files scopes to the CWD subtree and returns CWD-relative paths,
   // unlike git diff HEAD which always covers the full repo with root-relative
-  // paths.  Resolve the repo root so untracked files from the entire repo are
-  // included and their paths match the tracked-diff output.
+  // paths. Resolve the repo root so returned paths match the tracked patch.
   const rootCwd = await resolveRepoToplevel(runtime, cwd);
+  const pathspec = options?.pathspec;
 
   const lsResult = await runtime.runGit(
-    ["ls-files", "--others", "--exclude-standard"],
+    ["ls-files", "--others", "--exclude-standard", ...(pathspec ? ["--", pathspec] : [])],
     { cwd: rootCwd },
   );
   if (lsResult.exitCode !== 0) return { diff: "", paths: [] };
@@ -786,6 +792,13 @@ export async function runGitDiff(
   }
 
   const wFlag = options?.hideWhitespace ? ["-w"] : [];
+  const diffPathspec = options?.pathspec ? ["--", options.pathspec] : [];
+  // `--end-of-options` protects revision arguments even when a pathspec
+  // follows. The later `--` then starts the pathspec list.
+  const refAndPathspec = (ref: string): string[] =>
+    options?.pathspec
+      ? ["--end-of-options", ref, "--", options.pathspec]
+      : ["--end-of-options", ref];
 
   try {
     // `commit:<sha>` — one historical commit vs its first parent (git-show
@@ -810,8 +823,7 @@ export async function runGitDiff(
         ...wFlag,
         "--src-prefix=a/",
         "--dst-prefix=b/",
-        "--end-of-options",
-        `${baseRef}..${sha}`,
+        ...refAndPathspec(`${baseRef}..${sha}`),
       ];
       patch = assertGitSuccess(await runtime.runGit(commitDiffArgs, { cwd }), commitDiffArgs).stdout;
       label = subject ? `Commit ${shortSha} — ${subject}` : `Commit ${shortSha}`;
@@ -845,8 +857,7 @@ export async function runGitDiff(
             ...wFlag,
             "--src-prefix=a/",
             "--dst-prefix=b/",
-            "--end-of-options",
-            mergeBase,
+            ...refAndPathspec(mergeBase),
           ];
           trackedPatch = assertGitSuccess(
             await runtime.runGit(sinceBaseDiffArgs, { cwd }),
@@ -864,9 +875,9 @@ export async function runGitDiff(
           "diff",
           "--no-ext-diff",
           ...wFlag,
-          "HEAD",
           "--src-prefix=a/",
           "--dst-prefix=b/",
+          ...refAndPathspec("HEAD"),
         ];
         const hasHead =
           (await runtime.runGit(["rev-parse", "--verify", "HEAD"], { cwd }))
@@ -891,6 +902,7 @@ export async function runGitDiff(
           "--staged",
           "--src-prefix=a/",
           "--dst-prefix=b/",
+          ...diffPathspec,
         ];
         const stagedDiff = assertGitSuccess(
           await runtime.runGit(stagedDiffArgs, { cwd }),
@@ -908,6 +920,7 @@ export async function runGitDiff(
           ...wFlag,
           "--src-prefix=a/",
           "--dst-prefix=b/",
+          ...diffPathspec,
         ];
         const trackedDiff = assertGitSuccess(
           await runtime.runGit(trackedDiffArgs, { cwd }),
@@ -926,8 +939,8 @@ export async function runGitDiff(
         );
         const args =
           hasParent.exitCode === 0
-            ? ["diff", "--no-ext-diff", ...wFlag, "HEAD~1..HEAD", "--src-prefix=a/", "--dst-prefix=b/"]
-            : ["diff", "--no-ext-diff", ...wFlag, "--root", "HEAD", "--src-prefix=a/", "--dst-prefix=b/"];
+            ? ["diff", "--no-ext-diff", ...wFlag, "--src-prefix=a/", "--dst-prefix=b/", ...refAndPathspec("HEAD~1..HEAD")]
+            : ["diff", "--no-ext-diff", ...wFlag, "--root", "--src-prefix=a/", "--dst-prefix=b/", ...refAndPathspec("HEAD")];
         const lastCommitDiff = assertGitSuccess(
           await runtime.runGit(args, { cwd }),
           args,
@@ -948,8 +961,7 @@ export async function runGitDiff(
           ...wFlag,
           "--src-prefix=a/",
           "--dst-prefix=b/",
-          "--end-of-options",
-          `${defaultBranch}..HEAD`,
+          ...refAndPathspec(`${defaultBranch}..HEAD`),
         ];
         const branchDiff = assertGitSuccess(
           await runtime.runGit(branchDiffArgs, { cwd }),
@@ -973,8 +985,7 @@ export async function runGitDiff(
           ...wFlag,
           "--src-prefix=a/",
           "--dst-prefix=b/",
-          "--end-of-options",
-          `${mergeBase}..HEAD`,
+          ...refAndPathspec(`${mergeBase}..HEAD`),
         ];
         const mergeBaseDiff = assertGitSuccess(
           await runtime.runGit(mergeBaseDiffArgs, { cwd }),
@@ -994,8 +1005,7 @@ export async function runGitDiff(
           ...wFlag,
           "--src-prefix=a/",
           "--dst-prefix=b/",
-          "--end-of-options",
-          `${emptyTree}..HEAD`,
+          ...refAndPathspec(`${emptyTree}..HEAD`),
         ];
         const allDiff = assertGitSuccess(
           await runtime.runGit(allDiffArgs, { cwd }),
@@ -1102,6 +1112,11 @@ export async function getGitDiffFingerprint(
   }
 
   const wFlag = options?.hideWhitespace ? ["-w"] : [];
+  const pathspec = options?.pathspec;
+  const diffArgsForRef = (ref: string): string[] =>
+    pathspec
+      ? ["--end-of-options", ref, "--", pathspec]
+      : ["--end-of-options", ref];
 
   try {
     // --no-optional-locks: fingerprint probes run in the background (polled
@@ -1154,6 +1169,7 @@ export async function getGitDiffFingerprint(
         "status",
         "--porcelain",
         collapsed ? "-unormal" : "-uall",
+        ...(pathspec ? ["--", pathspec] : []),
       ]);
       if (status.exitCode !== 0) return false;
       if (!collapsed && status.stdout.length > UNTRACKED_STATUS_OUTPUT_CAP) {
@@ -1197,22 +1213,22 @@ export async function getGitDiffFingerprint(
           const mb = await runReadOnlyGit(["merge-base", "--end-of-options", defaultBranch, "HEAD"]);
           const mergeBase = mb.exitCode === 0 ? mb.stdout.trim() : "HEAD";
           parts.push(mergeBase);
-          if (!(await hashDiffOutput(["--end-of-options", mergeBase]))) return null;
+          if (!(await hashDiffOutput(diffArgsForRef(mergeBase)))) return null;
         }
         if (!(await hashUntracked())) return null;
         break;
       }
       case "uncommitted": {
-        if (headSha !== "no-head" && !(await hashDiffOutput(["HEAD"]))) return null;
+        if (headSha !== "no-head" && !(await hashDiffOutput(diffArgsForRef("HEAD")))) return null;
         if (!(await hashUntracked())) return null;
         break;
       }
       case "staged": {
-        if (!(await hashDiffOutput(["--staged"]))) return null;
+        if (!(await hashDiffOutput(["--staged", ...(pathspec ? ["--", pathspec] : [])]))) return null;
         break;
       }
       case "unstaged": {
-        if (!(await hashDiffOutput([]))) return null;
+        if (!(await hashDiffOutput(pathspec ? ["--", pathspec] : []))) return null;
         if (!(await hashUntracked())) return null;
         break;
       }
@@ -1401,14 +1417,16 @@ export async function getSinceBaseSections(
   runtime: ReviewGitRuntime,
   defaultBranch: string,
   cwd?: string,
+  options?: Pick<GitDiffOptions, "pathspec">,
 ): Promise<SinceBaseSections | null> {
   try {
     // --no-optional-locks: never take the index lock for a read-only sidecar
     // (the agent may be running git concurrently). -uall lists untracked
     // files individually so entries match the patch's per-file paths instead
     // of collapsing whole untracked directories.
+    const pathspec = options?.pathspec;
     const status = await runtime.runGit(
-      ["--no-optional-locks", "status", "--porcelain", "-uall"],
+      ["--no-optional-locks", "status", "--porcelain", "-uall", ...(pathspec ? ["--", pathspec] : [])],
       { cwd },
     );
     if (status.exitCode !== 0) return null;
@@ -1462,8 +1480,9 @@ export async function getSinceBaseSections(
           "diff",
           "--no-ext-diff",
           "--name-only",
-          "--end-of-options",
-          `${mergeBase}..HEAD`,
+          ...(pathspec
+            ? ["--end-of-options", `${mergeBase}..HEAD`, "--", pathspec]
+            : ["--end-of-options", `${mergeBase}..HEAD`]),
         ],
         { cwd },
       );
