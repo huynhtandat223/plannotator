@@ -3956,9 +3956,16 @@ const App: React.FC = () => {
     resetAISession();
   }, [applyConfigChange, resetAISession]);
 
-  const exAIIdentity = liveMessageReview && selectedLiveMessage?.paneId && selectedLiveMessage.piSessionId && !selectedLiveMessage.isExAICompanion
-    ? { paneId: selectedLiveMessage.paneId, sessionId: selectedLiveMessage.piSessionId }
-    : null;
+  // Memoize on primitives so the object identity stays stable across renders.
+  // useExAIChat's refresh callback and its effect key off this reference; a fresh
+  // object literal every render caused an infinite refresh->setState->re-render
+  // loop that hammered GET /api/ex-ai-companion (~88 req/s).
+  const exAIPaneId = liveMessageReview && !selectedLiveMessage?.isExAICompanion ? (selectedLiveMessage?.paneId ?? null) : null;
+  const exAISessionId = liveMessageReview && !selectedLiveMessage?.isExAICompanion ? (selectedLiveMessage?.piSessionId ?? null) : null;
+  const exAIIdentity = useMemo(
+    () => (exAIPaneId && exAISessionId ? { paneId: exAIPaneId, sessionId: exAISessionId } : null),
+    [exAIPaneId, exAISessionId],
+  );
   const exAIChat = useExAIChat(exAIIdentity);
   const exAIEligible = exAIIdentity !== null;
   const openExAIChat = useCallback(() => {
@@ -5576,8 +5583,8 @@ const App: React.FC = () => {
         />
 
         <Toaster
-          position="top-right"
-          offset={64}
+          position="bottom-right"
+          offset={16}
           toastOptions={{
             style: {
               '--normal-bg': 'var(--card)',

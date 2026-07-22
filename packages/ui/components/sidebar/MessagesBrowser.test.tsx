@@ -3,7 +3,7 @@ import React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { MessagesBrowser } from './MessagesBrowser';
-import { resetStorageBackend, setStorageBackend } from '../../utils/storage';
+import { resetStorageBackend, setStorageBackend, setMessagePickerCount } from '../../utils/storage';
 
 const hasDom = typeof document !== 'undefined';
 let root: Root | null = null;
@@ -80,6 +80,62 @@ test.skipIf(!hasDom)('collapses to the default count and expands via the toggle'
   });
   expect(host.textContent).toContain('Response 6');
   expect(host.textContent).toContain('Show fewer');
+});
+
+test.skipIf(!hasDom)('clusters pane-grouped rows under herd/workspace section headers', async () => {
+  useMemoryStorage();
+  host = document.createElement('div');
+  document.body.append(host);
+  root = createRoot(host);
+  await act(async () => {
+    root!.render(<MessagesBrowser
+      messages={[
+        { messageId: 'a1', text: 'alpha resp', paneId: 'p1', paneLabel: 'alpha-herd', workspaceId: 'ws-a' },
+        { messageId: 'b1', text: 'beta resp', paneId: 'p2', paneLabel: 'beta-herd', workspaceId: 'ws-b' },
+        { messageId: 'a2', text: 'alpha resp 2', paneId: 'p3', paneLabel: 'alpha-herd', workspaceId: 'ws-a' },
+      ]}
+      selectedMessageId="a1"
+      onSelect={() => {}}
+    />);
+  });
+
+  // Two distinct herds → two section headers, first-seen order preserved.
+  const headers = Array.from(host.querySelectorAll('div')).filter((el) =>
+    el.children.length === 0 && /herd$/.test((el.textContent ?? '').trim()),
+  );
+  const headerText = headers.map((el) => (el.textContent ?? '').trim());
+  expect(headerText).toContain('alpha-herd');
+  expect(headerText).toContain('beta-herd');
+  // The repeated workspace name is a section header now, not inline per row.
+  expect(headerText.filter((t) => t === 'alpha-herd')).toHaveLength(1);
+});
+
+test.skipIf(!hasDom)('caps the visible count per herd, not across the whole list', async () => {
+  useMemoryStorage();
+  setMessagePickerCount('1');
+  host = document.createElement('div');
+  document.body.append(host);
+  root = createRoot(host);
+  await act(async () => {
+    root!.render(<MessagesBrowser
+      messages={[
+        { messageId: 'a1', text: 'alpha latest', paneId: 'p1', paneLabel: 'alpha-herd', workspaceId: 'ws-a' },
+        { messageId: 'a2', text: 'alpha older', paneId: 'p1', paneLabel: 'alpha-herd', workspaceId: 'ws-a' },
+        { messageId: 'b1', text: 'beta latest', paneId: 'p2', paneLabel: 'beta-herd', workspaceId: 'ws-b' },
+        { messageId: 'b2', text: 'beta older', paneId: 'p2', paneLabel: 'beta-herd', workspaceId: 'ws-b' },
+      ]}
+      selectedMessageId="a1"
+      onSelect={() => {}}
+    />);
+  });
+
+  // Show 1 → one latest response per herd (both herds keep their first row).
+  expect(host.textContent).toContain('alpha latest');
+  expect(host.textContent).toContain('beta latest');
+  expect(host.textContent).not.toContain('alpha older');
+  expect(host.textContent).not.toContain('beta older');
+  // 2 shown rows + 1 "Show older" toggle.
+  expect(host.querySelectorAll('button')).toHaveLength(3);
 });
 
 test.skipIf(!hasDom)('renders an accessible empty response state', async () => {
