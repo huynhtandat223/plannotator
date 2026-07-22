@@ -78,10 +78,6 @@ export const DocBadges: React.FC<DocBadgesProps> = ({
 
   return (
     <div className={outerClass}>
-      {/* Open-in-app normally renders inline (to the right) within the source /
-          linked-doc rows below. This standalone fallback only fires when there
-          is no file row to attach to. Hidden in the sticky row and for URLs. */}
-      {!isRow && canOpenInApp && !sourceInfo && !linkedDocInfo && openInButton}
       {/* Row layout (sticky lane) omits repo/branch to keep the bar compact —
           they'd otherwise push the container wide enough to visually extend
           under the action buttons. Plan-diff badge still renders below. */}
@@ -104,8 +100,15 @@ export const DocBadges: React.FC<DocBadgesProps> = ({
               <span className="truncate">{repoInfo.branch}</span>
             </span>
           )}
+          {/* Markdown/text annotate sessions have no separate source badge, so
+              keep the open-in control attached to the repository context. */}
+          {canOpenInApp && !sourceInfo && openInButton}
         </div>
       )}
+
+      {/* Non-repository files still need an open-in entry when there is no
+          source or linked-document row to attach it to. */}
+      {!isRow && canOpenInApp && !repoInfo && !sourceInfo && !linkedDocInfo && openInButton}
 
       {sourceInfo && !linkedDocInfo && !isRow && (
         <div className="flex items-center gap-1">

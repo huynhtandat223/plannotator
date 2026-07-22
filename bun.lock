@@ -107,7 +107,7 @@
     },
     "apps/opencode-plugin": {
       "name": "@plannotator/opencode",
-      "version": "0.22.0",
+      "version": "0.24.1",
       "dependencies": {
         "@opencode-ai/plugin": "^1.1.10",
       },
@@ -129,7 +129,7 @@
     },
     "apps/pi-extension": {
       "name": "@plannotator/pi-extension",
-      "version": "0.22.0",
+      "version": "0.24.1",
       "dependencies": {
         "@joplin/turndown-plugin-gfm": "^1.0.64",
         "@pierre/diffs": "1.2.8",
@@ -254,6 +254,7 @@
         "@plannotator/ui": "workspace:*",
         "highlight.js": "^11.11.1",
         "lucide-react": "^1.14.0",
+        "marked": "^17.0.6",
         "motion": "^12.38.0",
         "react": "^19.2.3",
         "react-dom": "^19.2.3",
@@ -267,7 +268,7 @@
     },
     "packages/server": {
       "name": "@plannotator/server",
-      "version": "0.22.0",
+      "version": "0.24.1",
       "dependencies": {
         "@pierre/diffs": "1.2.8",
         "@plannotator/ai": "workspace:*",

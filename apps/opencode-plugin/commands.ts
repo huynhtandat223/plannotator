@@ -22,7 +22,7 @@ import {
   getReviewDeniedSuffix,
   getAnnotateFileFeedbackPrompt,
 } from "@plannotator/shared/prompts";
-import { resolveMarkdownFile, resolveUserPath, hasMarkdownFiles } from "@plannotator/shared/resolve-file";
+import { resolveMarkdownFile, resolveUserPath, hasMarkdownFiles, ANNOTATABLE_DOC_REGEX, MAX_ANNOTATABLE_FILE_BYTES } from "@plannotator/shared/resolve-file";
 import { FILE_BROWSER_EXCLUDED } from "@plannotator/shared/reference-common";
 import { htmlToMarkdown } from "@plannotator/shared/html-to-markdown";
 import { parseAnnotateArgs } from "@plannotator/shared/annotate-args";
@@ -63,6 +63,7 @@ export async function handleReviewCommand(
   let rawPatch: string;
   let gitRef: string;
   let diffError: string | undefined;
+  let initialFingerprint: string | undefined;
   let userDiffType: DiffType | WorkspaceDiffType | undefined;
   let gitContext: Awaited<ReturnType<typeof prepareLocalReviewDiff>>["gitContext"] | undefined;
   let prMetadata: Awaited<ReturnType<typeof fetchPR>>["metadata"] | undefined;
@@ -115,6 +116,7 @@ export async function handleReviewCommand(
         rawPatch = diffResult.rawPatch;
         gitRef = diffResult.gitRef;
         diffError = diffResult.error;
+        initialFingerprint = diffResult.fingerprint;
       } catch (err) {
         client.app.log({ level: "error", message: err instanceof Error ? err.message : "Failed to prepare local review diff" });
         return;
@@ -125,7 +127,7 @@ export async function handleReviewCommand(
         hideWhitespace: config.diffOptions?.hideWhitespace ?? false,
       });
       if (workspace.repos.length === 0) {
-        client.app.log({ level: "error", message: "Not in a VCS repo and no nested Git/JJ repositories were found." });
+        client.app.log({ level: "error", message: "Not in a VCS repo and no nested Git/JJ/GitButler repositories were found." });
         return;
       }
       rawPatch = workspace.rawPatch;
@@ -143,6 +145,7 @@ export async function handleReviewCommand(
     origin: "opencode",
     diffType: isPRMode ? undefined : userDiffType,
     gitContext,
+    initialFingerprint,
     prMetadata,
     workspace,
     agentCwd,
@@ -172,7 +175,7 @@ export async function handleReviewCommand(
       const shouldSwitchAgent = result.agentSwitch && result.agentSwitch !== "disabled";
       const targetAgent = result.agentSwitch || "build";
 
-      // Append the triage-first suffix when the reviewer sent annotations to
+      // Append the verification-only suffix when the reviewer sent annotations to
       // act on (PR mode included). Platform PR actions post a status message
       // with no annotations — those go through verbatim, no suffix.
       const message = result.approved
@@ -253,8 +256,8 @@ export async function handleAnnotateCommand(
     }
 
     if (isFolder) {
-      if (!hasMarkdownFiles(resolvedArg, FILE_BROWSER_EXCLUDED, /\.(mdx?|txt|html?)$/i)) {
-        client.app.log({ level: "error", message: `No markdown, text, or HTML files found in ${resolvedArg}` });
+      if (!hasMarkdownFiles(resolvedArg, FILE_BROWSER_EXCLUDED, ANNOTATABLE_DOC_REGEX)) {
+        client.app.log({ level: "error", message: `No annotatable files (markdown, plain-text, config, or HTML) found in ${resolvedArg}` });
         return;
       }
       folderPath = resolvedArg;
@@ -303,6 +306,10 @@ export async function handleAnnotateCommand(
       }
 
       absolutePath = resolved.path;
+      if (Bun.file(absolutePath).size > MAX_ANNOTATABLE_FILE_BYTES) {
+        client.app.log({ level: "error", message: `File too large to annotate (max 2MB): ${absolutePath}` });
+        return;
+      }
       client.app.log({ level: "info", message: `Resolved: ${absolutePath}` });
       markdown = await Bun.file(absolutePath).text();
     }

@@ -8,7 +8,7 @@
  *    - Reads hook event from stdin, extracts plan content
  *    - Serves UI, returns approve/deny decision to stdout
  *
- * 2. Code Review (`plannotator review`, `plannotator review --git`):
+ * 2. Code Review (`plannotator review`, `plannotator review --git`, `plannotator review --gitbutler`):
  *    - Triggered by /review slash command
  *    - Runs git diff, opens review UI
  *    - Outputs feedback to stdout (captured by slash command)
@@ -96,7 +96,7 @@ import { urlToMarkdown, isConvertedSource } from "@plannotator/shared/url-to-mar
 import { createWorktreePool, type WorktreePool, type PoolEntry } from "@plannotator/shared/worktree-pool";
 import { parsePRUrl, checkPRAuth, fetchPR, getCliName, getCliInstallUrl, getMRLabel, getMRNumberLabel, getDisplayRepo } from "@plannotator/server/pr";
 import { writeRemoteShareLink } from "@plannotator/server/share-url";
-import { resolveMarkdownFile, resolveUserPath, hasMarkdownFiles } from "@plannotator/shared/resolve-file";
+import { resolveMarkdownFile, resolveUserPath, hasMarkdownFiles, ANNOTATABLE_DOC_REGEX, ANNOTATABLE_EXTENSIONS_HINT, MAX_ANNOTATABLE_FILE_BYTES } from "@plannotator/shared/resolve-file";
 import { FILE_BROWSER_EXCLUDED } from "@plannotator/shared/reference-common";
 import { statSync, rmSync, realpathSync, existsSync } from "fs";
 import { parseRemoteUrl } from "@plannotator/shared/repo";
@@ -115,6 +115,10 @@ import { detectProjectName } from "@plannotator/server/project";
 import { hostnameOrFallback } from "@plannotator/shared/project";
 import { readImprovementHook } from "@plannotator/shared/improvement-hooks";
 import { composeImproveContext } from "@plannotator/shared/pfm-reminder";
+import {
+  waitForPlanReviewCloseDelay,
+  waitForPlanReviewDecision,
+} from "@plannotator/shared/plan-review-lifecycle";
 import { AGENT_CONFIG, type Origin } from "@plannotator/shared/agents";
 import {
   findDroidSessionLogsByAncestorWalk,
@@ -538,6 +542,7 @@ if (args[0] === "sessions") {
   let rawPatch: string;
   let gitRef: string;
   let diffError: string | undefined;
+  let initialFingerprint: string | undefined;
   let gitContext: Awaited<ReturnType<typeof prepareLocalReviewDiff>>["gitContext"] | undefined;
   let prMetadata: Awaited<ReturnType<typeof fetchPR>>["metadata"] | undefined;
   let prPatchIncomplete = false;
@@ -806,13 +811,14 @@ if (args[0] === "sessions") {
       rawPatch = diffResult.rawPatch;
       gitRef = diffResult.gitRef;
       diffError = diffResult.error;
+      initialFingerprint = diffResult.fingerprint;
     } else {
       workspace = await buildLocalWorkspaceReview(process.cwd(), {
         configuredDiffType: resolveDefaultDiffType(config),
         hideWhitespace: config.diffOptions?.hideWhitespace ?? false,
       });
       if (workspace.repos.length === 0) {
-        console.error("Not in a VCS repo and no nested Git/JJ repositories were found.");
+        console.error("Not in a VCS repo and no nested Git/JJ/GitButler repositories were found.");
         process.exit(1);
       }
       rawPatch = workspace.rawPatch;
@@ -833,6 +839,7 @@ if (args[0] === "sessions") {
     origin: detectedOrigin,
     diffType: workspace ? (initialDiffType ?? workspace.diffType) : gitContext ? (initialDiffType ?? "unstaged") : undefined,
     gitContext,
+    initialFingerprint,
     prMetadata,
     prPatchIncomplete,
     workspace,
@@ -877,10 +884,10 @@ if (args[0] === "sessions") {
     console.log(getReviewApprovedPrompt(detectedOrigin));
   } else {
     console.log(result.feedback);
-    // Append the triage-first suffix whenever the reviewer sent annotations to
+    // Append the verification-only suffix whenever the reviewer sent annotations to
     // act on — in PR mode too. Platform PR actions (approve/comment posted to
     // the host) come back with an empty annotation set and a status message;
-    // those must NOT get the "triage and don't change code" instruction.
+    // those must NOT get the "verify findings and don't change code" instruction.
     if (result.annotations.length > 0) {
       console.log(getReviewDeniedSuffix(detectedOrigin));
     }
@@ -947,9 +954,9 @@ if (args[0] === "sessions") {
 
     if (folderCandidate !== null) {
       const resolvedArg = resolveUserPath(folderCandidate, projectRoot);
-      // Folder annotation mode (markdown/plain text + HTML files)
-      if (!hasMarkdownFiles(resolvedArg, FILE_BROWSER_EXCLUDED, /\.(mdx?|txt|html?)$/i)) {
-        console.error(`No markdown, text, or HTML files found in ${resolvedArg}`);
+      // Folder annotation mode (markdown/plain text/config + HTML files)
+      if (!hasMarkdownFiles(resolvedArg, FILE_BROWSER_EXCLUDED, ANNOTATABLE_DOC_REGEX)) {
+        console.error(`No annotatable files (markdown, plain-text, config, or HTML) found in ${resolvedArg}`);
         process.exit(1);
       }
       folderPath = resolvedArg;
@@ -1003,7 +1010,7 @@ if (args[0] === "sessions") {
             const ext = path.extname(resolvedPath).toLowerCase();
             console.error(
               `File type not supported: ${ext}\n` +
-              `Only .md, .mdx, .txt, .html, .htm files are supported.\n` +
+              `Supported types: ${ANNOTATABLE_EXTENSIONS_HINT}\n` +
               `For code review, use: plannotator review [file]`
             );
           } else {
@@ -1013,6 +1020,10 @@ if (args[0] === "sessions") {
         }
 
         absolutePath = resolved.path;
+        if (Bun.file(absolutePath).size > MAX_ANNOTATABLE_FILE_BYTES) {
+          console.error(`File too large to annotate (max 2MB): ${absolutePath}`);
+          process.exit(1);
+        }
         markdown = await Bun.file(absolutePath).text();
         console.error(`Resolved: ${absolutePath}`);
       }
@@ -1359,26 +1370,20 @@ if (args[0] === "sessions") {
     label: `plan-${planProject}`,
   });
 
-  const result = timeoutSeconds === null
-    ? await server.waitForDecision()
-    : await new Promise<Awaited<ReturnType<typeof server.waitForDecision>>>((resolve) => {
-        const timeoutId = setTimeout(
-          () =>
-            resolve({
-              approved: false,
-              feedback: `[Plannotator] No response within ${timeoutSeconds} seconds. Port released automatically. Please call submit_plan again.`,
-            }),
-          timeoutSeconds * 1000,
-        );
-
-        server.waitForDecision().then((decision) => {
-          clearTimeout(timeoutId);
-          resolve(decision);
-        });
-      });
-
-  await Bun.sleep(1500);
-  server.stop();
+  let result: Awaited<ReturnType<typeof server.waitForDecision>>;
+  try {
+    result = await waitForPlanReviewDecision({
+      waitForDecision: server.waitForDecision,
+      timeoutMs: timeoutSeconds === null ? null : timeoutSeconds * 1000,
+      timeoutResult: {
+        approved: false,
+        feedback: `[Plannotator] No response within ${timeoutSeconds} seconds. Port released automatically. Please call submit_plan again.`,
+      },
+    });
+    await waitForPlanReviewCloseDelay(1500);
+  } finally {
+    await server.stop();
+  }
 
   console.log(JSON.stringify({
     approved: result.approved,
@@ -1408,6 +1413,7 @@ if (args[0] === "sessions") {
   let rawPatch: string;
   let gitRef: string;
   let diffError: string | undefined;
+  let initialFingerprint: string | undefined;
   let userDiffType: DiffType | WorkspaceDiffType | undefined;
   let gitContext: Awaited<ReturnType<typeof prepareLocalReviewDiff>>["gitContext"] | undefined;
   let prMetadata: Awaited<ReturnType<typeof fetchPR>>["metadata"] | undefined;
@@ -1462,13 +1468,14 @@ if (args[0] === "sessions") {
       rawPatch = diffResult.rawPatch;
       gitRef = diffResult.gitRef;
       diffError = diffResult.error;
+      initialFingerprint = diffResult.fingerprint;
     } else {
       workspace = await buildLocalWorkspaceReview(cwd, {
         configuredDiffType: resolveDefaultDiffType(config),
         hideWhitespace: config.diffOptions?.hideWhitespace ?? false,
       });
       if (workspace.repos.length === 0) {
-        console.error("Not in a VCS repo and no nested Git/JJ repositories were found.");
+        console.error("Not in a VCS repo and no nested Git/JJ/GitButler repositories were found.");
         process.exit(1);
       }
       rawPatch = workspace.rawPatch;
@@ -1490,6 +1497,7 @@ if (args[0] === "sessions") {
     origin: "opencode",
     diffType: isPRMode ? undefined : userDiffType,
     gitContext,
+    initialFingerprint,
     prMetadata,
     prPatchIncomplete,
     workspace,
