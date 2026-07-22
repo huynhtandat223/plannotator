@@ -108,6 +108,10 @@ interface HerdGroup {
   entries: IndexedMessage[];
 }
 
+function sessionKey(message: PickerMessage): string {
+  return message.piSessionId ?? message.paneId ?? "ungrouped";
+}
+
 /** Cluster rows by their live herd/workspace, preserving first-seen order so the
  * section list matches the order panes appear in the source snapshot. */
 function groupByHerd(entries: IndexedMessage[]): HerdGroup[] {
@@ -210,15 +214,20 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
     );
   };
 
-  // Grouped: the count caps responses PER herd (so "Show 1" leaves one latest
-  // response per pane, not one row for the whole list). Flat: the count caps the
-  // single global list as before. `index` stays global so `#N` numbering and the
-  // ★ default marker are stable regardless of per-herd trimming.
+  // Grouped: herd/workspace remains a presentation boundary, while the count
+  // applies independently to each Pi session. Flat callers keep one global list.
+  // `index` stays global so `#N` numbering and the ★ marker remain stable.
   const indexedAll: IndexedMessage[] = messages.map((msg, index) => ({ msg, index }));
   let hiddenCount = 0;
   const herdGroups = groupedByPane
     ? groupByHerd(indexedAll).map((group) => {
-        const entries = expanded ? group.entries : group.entries.slice(0, visibleCount);
+        const seenBySession = new Map<string, number>();
+        const entries = expanded ? group.entries : group.entries.filter(({ msg }) => {
+          const key = sessionKey(msg);
+          const seen = seenBySession.get(key) ?? 0;
+          seenBySession.set(key, seen + 1);
+          return seen < visibleCount;
+        });
         hiddenCount += group.entries.length - entries.length;
         return { ...group, entries };
       })

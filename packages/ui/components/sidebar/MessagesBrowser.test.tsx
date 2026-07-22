@@ -110,7 +110,7 @@ test.skipIf(!hasDom)('clusters pane-grouped rows under herd/workspace section he
   expect(headerText.filter((t) => t === 'alpha-herd')).toHaveLength(1);
 });
 
-test.skipIf(!hasDom)('caps the visible count per herd, not across the whole list', async () => {
+test.skipIf(!hasDom)('caps the visible count independently for sessions in the same workspace', async () => {
   useMemoryStorage();
   setMessagePickerCount('1');
   host = document.createElement('div');
@@ -119,23 +119,88 @@ test.skipIf(!hasDom)('caps the visible count per herd, not across the whole list
   await act(async () => {
     root!.render(<MessagesBrowser
       messages={[
-        { messageId: 'a1', text: 'alpha latest', paneId: 'p1', paneLabel: 'alpha-herd', workspaceId: 'ws-a' },
-        { messageId: 'a2', text: 'alpha older', paneId: 'p1', paneLabel: 'alpha-herd', workspaceId: 'ws-a' },
-        { messageId: 'b1', text: 'beta latest', paneId: 'p2', paneLabel: 'beta-herd', workspaceId: 'ws-b' },
-        { messageId: 'b2', text: 'beta older', paneId: 'p2', paneLabel: 'beta-herd', workspaceId: 'ws-b' },
+        { messageId: 'a1', text: 'session alpha latest', paneId: 'p1', piSessionId: 'session-a', paneLabel: 'shared-herd', workspaceId: 'ws-a' },
+        { messageId: 'a2', text: 'session alpha older', paneId: 'p1', piSessionId: 'session-a', paneLabel: 'shared-herd', workspaceId: 'ws-a' },
+        { messageId: 'b1', text: 'session beta latest', paneId: 'p2', piSessionId: 'session-b', paneLabel: 'shared-herd', workspaceId: 'ws-a' },
+        { messageId: 'b2', text: 'session beta older', paneId: 'p2', piSessionId: 'session-b', paneLabel: 'shared-herd', workspaceId: 'ws-a' },
       ]}
       selectedMessageId="a1"
       onSelect={() => {}}
     />);
   });
 
-  // Show 1 → one latest response per herd (both herds keep their first row).
-  expect(host.textContent).toContain('alpha latest');
-  expect(host.textContent).toContain('beta latest');
-  expect(host.textContent).not.toContain('alpha older');
-  expect(host.textContent).not.toContain('beta older');
-  // 2 shown rows + 1 "Show older" toggle.
-  expect(host.querySelectorAll('button')).toHaveLength(3);
+  expect(host.textContent).toContain('session alpha latest');
+  expect(host.textContent).toContain('session beta latest');
+  expect(host.textContent).not.toContain('session alpha older');
+  expect(host.textContent).not.toContain('session beta older');
+  expect(host.textContent).toContain('Show 2 older');
+});
+
+test.skipIf(!hasDom)('falls back to pane identity and expands all hidden session responses', async () => {
+  useMemoryStorage();
+  setMessagePickerCount('1');
+  host = document.createElement('div');
+  document.body.append(host);
+  root = createRoot(host);
+  await act(async () => {
+    root!.render(<MessagesBrowser
+      messages={[
+        { messageId: 'a1', text: 'pane alpha latest', paneId: 'p1', paneLabel: 'shared-herd', workspaceId: 'ws-a' },
+        { messageId: 'a2', text: 'pane alpha older', paneId: 'p1', paneLabel: 'shared-herd', workspaceId: 'ws-a' },
+        { messageId: 'b1', text: 'pane beta latest', paneId: 'p2', paneLabel: 'shared-herd', workspaceId: 'ws-a' },
+        { messageId: 'b2', text: 'pane beta older', paneId: 'p2', paneLabel: 'shared-herd', workspaceId: 'ws-a' },
+      ]}
+      selectedMessageId="a1"
+      onSelect={() => {}}
+    />);
+  });
+
+  expect(host.textContent).toContain('pane alpha latest');
+  expect(host.textContent).toContain('pane beta latest');
+  expect(host.textContent).not.toContain('pane alpha older');
+  expect(host.textContent).not.toContain('pane beta older');
+  const toggle = Array.from(host.querySelectorAll('button')).find((button) =>
+    (button.textContent ?? '').includes('Show 2 older'),
+  );
+  expect(toggle).toBeTruthy();
+
+  await act(async () => {
+    toggle!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  expect(host.textContent).toContain('pane alpha older');
+  expect(host.textContent).toContain('pane beta older');
+  const showFewer = Array.from(host.querySelectorAll('button')).find((button) =>
+    (button.textContent ?? '').includes('Show fewer'),
+  );
+  expect(showFewer).toBeTruthy();
+
+  await act(async () => {
+    showFewer!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  expect(host.textContent).not.toContain('pane alpha older');
+  expect(host.textContent).not.toContain('pane beta older');
+});
+
+test.skipIf(!hasDom)('keeps the global count for non-live message lists', async () => {
+  useMemoryStorage();
+  setMessagePickerCount('1');
+  host = document.createElement('div');
+  document.body.append(host);
+  root = createRoot(host);
+  await act(async () => {
+    root!.render(<MessagesBrowser
+      messages={[
+        { messageId: 'm1', text: 'flat latest' },
+        { messageId: 'm2', text: 'flat older' },
+      ]}
+      selectedMessageId="m1"
+      onSelect={() => {}}
+    />);
+  });
+
+  expect(host.textContent).toContain('flat latest');
+  expect(host.textContent).not.toContain('flat older');
+  expect(host.textContent).toContain('Show 1 older');
 });
 
 test.skipIf(!hasDom)('renders an accessible empty response state', async () => {
