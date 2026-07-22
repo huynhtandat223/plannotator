@@ -208,28 +208,109 @@ const compactModelName = (model: PickerMessage['model']): string | undefined => 
   return name.replace(/^.*\//, '').replace(/^(?:GPT-|Claude |Gemini )/i, '');
 };
 
-const livePaneMetadata = (message: PickerMessage | undefined): string[] => {
-  if (!message) return [];
-  const metadata: string[] = [];
+type LivePaneContext = {
+  tokens: number | null;
+  contextWindow: number;
+  percent: number | null;
+  label: string;
+};
+
+type LivePaneMeta = {
+  model?: string;
+  gitBranch?: string;
+  context?: LivePaneContext;
+  used?: string;
+  compacted?: string;
+  activity?: string;
+  isEmpty: boolean;
+};
+
+const livePaneMetadata = (message: PickerMessage | undefined): LivePaneMeta => {
+  if (!message) return { isEmpty: true };
+  const meta: LivePaneMeta = { isEmpty: false };
   const model = compactModelName(message.model);
-  if (model) metadata.push(model);
-  if (message.gitBranch) metadata.push(message.gitBranch);
+  if (model) meta.model = model;
+  if (message.gitBranch) meta.gitBranch = message.gitBranch;
   const usage = message.contextUsage as HerdrContextUsage | undefined;
   if (usage) {
-    const context = usage.tokens === null
-      ? `ctx ? / ${formatTokenCount(usage.contextWindow)}`
-      : `ctx ${formatTokenCount(usage.tokens)} / ${formatTokenCount(usage.contextWindow)}${usage.percent === null ? '' : ` (${usage.percent.toFixed(1)}%)`}`;
-    metadata.push(context);
+    meta.context = {
+      tokens: usage.tokens,
+      contextWindow: usage.contextWindow,
+      percent: usage.percent,
+      label: usage.tokens === null
+        ? `? / ${formatTokenCount(usage.contextWindow)}`
+        : `${formatTokenCount(usage.tokens)} / ${formatTokenCount(usage.contextWindow)}`,
+    };
   }
-  if (typeof message.totalUsedTokens === 'number') metadata.push(`used ${formatTokenCount(message.totalUsedTokens)}`);
-  if (typeof message.latestCompactionTokens === 'number') metadata.push(`compacted ${formatTokenCount(message.latestCompactionTokens)}`);
+  if (typeof message.totalUsedTokens === 'number') meta.used = formatTokenCount(message.totalUsedTokens);
+  if (typeof message.latestCompactionTokens === 'number') meta.compacted = formatTokenCount(message.latestCompactionTokens);
   if (message.activity) {
-    const label = message.activity.kind === 'subagent'
+    meta.activity = message.activity.kind === 'subagent'
       ? `subagent${message.activity.count === 1 ? '' : ` ×${message.activity.count}`}`
       : `${message.activity.name ?? 'tool'}${message.activity.count === 1 ? '' : ` ×${message.activity.count}`}`;
-    metadata.push(label);
   }
-  return metadata;
+  meta.isEmpty = !meta.model && !meta.gitBranch && !meta.context && !meta.used && !meta.compacted && !meta.activity;
+  return meta;
+};
+
+// Context-usage progress bar: promotes the key number, warns near full.
+const LivePaneContextBar = ({ context }: { context: LivePaneContext }) => {
+  const pct = context.percent === null
+    ? (context.tokens === null || context.contextWindow === 0
+        ? null
+        : Math.min(100, (context.tokens / context.contextWindow) * 100))
+    : context.percent;
+  const clamped = pct === null ? 0 : Math.max(0, Math.min(100, pct));
+  const level = clamped >= 90 ? 'critical' : clamped >= 75 ? 'warn' : 'ok';
+  const barColor = level === 'critical' ? 'bg-destructive' : level === 'warn' ? 'bg-warning' : 'bg-primary';
+  const pctColor = level === 'critical' ? 'text-destructive' : level === 'warn' ? 'text-warning-foreground' : 'text-foreground';
+  return (
+    <span className="inline-flex items-center gap-1.5" title={`Context: ${context.label}${pct === null ? '' : ` (${pct.toFixed(1)}%)`}`}>
+      <span className="text-[10px] uppercase tracking-wide text-muted-foreground/70">ctx</span>
+      <span
+        className="relative h-1.5 w-14 overflow-hidden rounded-full bg-muted/50"
+        role="progressbar"
+        aria-valuenow={Math.round(clamped)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label="Context usage"
+      >
+        <span className={`absolute inset-y-0 left-0 rounded-full ${barColor}`} style={{ width: `${clamped}%` }} />
+      </span>
+      <span className={`font-medium tabular-nums ${pctColor}`}>
+        {pct === null ? context.label : `${pct.toFixed(0)}%`}
+      </span>
+    </span>
+  );
+};
+
+// Structured status-bar renderer: muted labels, promoted numbers, context bar.
+const LivePaneMetaBar = ({ meta }: { meta: LivePaneMeta }) => {
+  if (meta.isEmpty) return null;
+  return (
+    <span className="font-normal text-muted-foreground flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+      {meta.model && <span className="text-foreground">{meta.model}</span>}
+      {meta.gitBranch && (
+        <span className="inline-flex items-center gap-1 text-muted-foreground/70">
+          <span aria-hidden="true">⎇</span>{meta.gitBranch}
+        </span>
+      )}
+      {meta.context && <LivePaneContextBar context={meta.context} />}
+      {meta.used && (
+        <span className="inline-flex items-center gap-1">
+          <span className="text-muted-foreground/70">used</span>
+          <span className="font-medium tabular-nums text-foreground/90">{meta.used}</span>
+        </span>
+      )}
+      {meta.compacted && (
+        <span className="inline-flex items-center gap-1">
+          <span className="text-muted-foreground/70">compacted</span>
+          <span className="font-medium tabular-nums text-foreground/90">{meta.compacted}</span>
+        </span>
+      )}
+      {meta.activity && <span className="text-muted-foreground/70">{meta.activity}</span>}
+    </span>
+  );
 };
 
 const countLinkedDocSessionAnnotations = (session: LinkedDocSessionState): number => {
@@ -4649,8 +4730,8 @@ const App: React.FC = () => {
                 {liveWorkspaceMode ? (
                   <span>Live Pi responses are read-only.</span>
                 ) : liveMessageReview ? (
-                  paneMetadata.length > 0
-                    ? <span className="font-normal text-muted-foreground break-words">{paneMetadata.join(' · ')}</span>
+                  !paneMetadata.isEmpty
+                    ? <LivePaneMetaBar meta={paneMetadata} />
                     : null
                 ) : (
                   <>Ready to review {planReview ? 'responses and Plan Files.' : 'responses.'}</>

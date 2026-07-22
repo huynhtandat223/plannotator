@@ -121,6 +121,35 @@ pre code.hljs .hljs-code {
 /* Plan Diff Styles also moved to packages/ui/theme.css (imported above). */
 
 /* ========================================
+   Fork overrides (herdr) — applied via CSS so upstream components stay
+   untouched and merges stay clean. Keyed on stable data-* hooks.
+   ======================================== */
+
+/* #4 Empty-state contrast: upstream AnnotationPanel renders the empty state at
+   text-muted-foreground/60 (11–12px) and /40, which fails WCAG 4.5:1 on the
+   dark surface. Force full-strength muted color and a >=12px size without
+   editing AnnotationPanel.tsx. Scoped to the empty-state container (py-16). */
+[data-annotation-panel="true"] .py-16 > p {
+  color: var(--muted-foreground) !important;
+  opacity: 1 !important;
+  font-size: 0.75rem !important; /* >= 12px */
+  line-height: 1.4;
+}
+[data-annotation-panel="true"] .py-16 > p + p {
+  opacity: 0.85 !important; /* keep the hint slightly secondary but readable */
+}
+
+/* #5 Touch targets: the shared toolbar icon buttons render at ~28px (Button
+   size="xs" is h-7). Below the desktop breakpoint, raise header controls to the
+   >=32px minimum recommended for touch, without changing the component. */
+@media (max-width: 900px) {
+  [data-app-header="true"] button {
+    min-height: 32px;
+    min-width: 32px;
+  }
+}
+
+/* ========================================
    Sidebar
    ======================================== */
 

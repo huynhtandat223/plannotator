@@ -107,16 +107,30 @@ interface AppHeaderProps {
   octarineConfigured: boolean;
 }
 
-const HeaderIconButton: React.FC<{ onClick?: () => void; title: string; children: React.ReactNode }> = ({ onClick, title, children }) => (
-  <button
-    type="button"
-    onClick={onClick}
-    aria-label={title}
-    title={title}
-    className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+/** Lightweight hover/focus tooltip usable by any header control. Non-interactive,
+ *  visible on group hover or keyboard focus-within, so it satisfies the same
+ *  affordance for mouse and keyboard users. */
+const HeaderTooltip: React.FC<{ label: string }> = ({ label }) => (
+  <span
+    role="tooltip"
+    className="pointer-events-none absolute top-full left-1/2 z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-1 text-[11px] font-medium text-popover-foreground opacity-0 shadow-lg transition-opacity duration-100 group-hover:opacity-100 group-focus-within:opacity-100"
   >
-    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>{children}</svg>
-  </button>
+    {label}
+  </span>
+);
+
+const HeaderIconButton: React.FC<{ onClick?: () => void; title: string; children: React.ReactNode }> = ({ onClick, title, children }) => (
+  <span className="group relative inline-flex">
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={title}
+      className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+    >
+      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>{children}</svg>
+    </button>
+    <HeaderTooltip label={title} />
+  </span>
 );
 
 export const AppHeader = React.memo<AppHeaderProps>(({
@@ -372,14 +386,16 @@ export const AppHeader = React.memo<AppHeaderProps>(({
 
         {/* Annotations panel toggle */}
         {!goalSetupMode && !readOnly && (
+          <span className="group relative inline-flex">
           <button
             onClick={onAnnotationPanelToggle}
-            className={`relative p-1.5 rounded-md text-xs font-medium transition-all ${
+            aria-label={isPanelOpen ? 'Hide annotations' : 'Show annotations'}
+            aria-pressed={isPanelOpen}
+            className={`relative flex h-8 w-8 items-center justify-center rounded-md text-xs font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
               isPanelOpen
                 ? 'bg-primary/15 text-primary'
                 : 'text-muted-foreground hover:text-foreground hover:bg-muted'
             }`}
-            title={isPanelOpen ? 'Hide annotations' : 'Show annotations'}
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
@@ -390,16 +406,19 @@ export const AppHeader = React.memo<AppHeaderProps>(({
               </span>
             )}
           </button>
+          <HeaderTooltip label={isPanelOpen ? 'Hide annotations' : 'Show annotations'} />
+          </span>
         )}
         {!goalSetupMode && aiAvailable && (
+          <span className="group relative inline-flex">
           <button
             onClick={onAIChatToggle}
-            className={`relative p-1.5 rounded-md text-xs font-medium transition-all ${
+            aria-pressed={isAIChatOpen}
+            className={`relative flex h-8 w-8 items-center justify-center rounded-md text-xs font-medium transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
               isAIChatOpen
                 ? 'bg-primary/15 text-primary'
                 : 'text-muted-foreground hover:text-foreground hover:bg-muted'
             }`}
-            title={isAIChatOpen ? 'Hide AI chat' : 'Show AI chat'}
             aria-label={isAIChatOpen ? 'Hide AI chat' : 'Show AI chat'}
           >
             <SparklesIcon className="w-4 h-4" />
@@ -407,6 +426,8 @@ export const AppHeader = React.memo<AppHeaderProps>(({
               <span className="absolute top-0 right-0 w-1.5 h-1.5 rounded-full bg-primary" />
             )}
           </button>
+          <HeaderTooltip label={isAIChatOpen ? 'Hide AI chat' : 'Show AI chat'} />
+          </span>
         )}
 
         {/* Settings dialog (controlled, button hidden — opened from PlanHeaderMenu) */}
