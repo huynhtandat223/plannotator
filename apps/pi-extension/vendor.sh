@@ -8,7 +8,7 @@ rm -rf generated
 mkdir -p generated generated/ai/providers
 
 # Modules that MOVED to @plannotator/core — vendor the real impl from core.
-for f in feedback-templates project favicon code-file external-annotation agent-jobs agent-terminal source-save open-in-apps; do
+for f in feedback-templates project favicon code-file annotatable external-annotation agent-jobs agent-terminal source-save open-in-apps; do
   src="../../packages/core/$f.ts"
   printf '// @generated — DO NOT EDIT. Source: packages/core/%s.ts\n' "$f" | cat - "$src" > "generated/$f.ts"
 done
@@ -29,7 +29,7 @@ for f in config-types storage-types workspace-status-types; do
 done
 
 # Everything else in the original flat list stays sourced from packages/shared.
-for f in prompts review-core diff-paths cli-pagination jj-core vcs-core review-args draft pr-types pr-context-live pr-provider pr-stack pr-github pr-gitlab checklist integrations-common repo reference-common resolve-file annotate-reference-roots-node worktree worktree-pool html-to-markdown html-diff html-assets html-assets-node url-to-markdown tour annotate-args at-reference review-workspace-node review-workspace pfm-reminder improvement-hooks code-nav data-dir semantic-diff-types semantic-diff source-save-node review-profiles guide commit-avatars commit-history; do
+for f in prompts review-core diff-paths cli-pagination jj-core gitbutler-core vcs-core review-args draft pr-types pr-context-live pr-artifact-document pr-provider pr-stack pr-github pr-gitlab checklist integrations-common repo reference-common resolve-file annotate-reference-roots-node worktree worktree-pool html-to-markdown html-diff html-assets html-assets-node url-to-markdown tour annotate-args at-reference review-workspace-node review-workspace pfm-reminder improvement-hooks code-nav data-dir semantic-diff-types semantic-diff single-flight source-save-node review-profiles guide commit-avatars commit-history port-range; do
   src="../../packages/shared/$f.ts"
   printf '// @generated — DO NOT EDIT. Source: packages/shared/%s.ts\n' "$f" | cat - "$src" > "generated/$f.ts"
 done
@@ -73,6 +73,7 @@ for f in guide-review; do
     | sed 's|from "\.\./pr"|from "./pr-provider.js"|' \
     | sed 's|from "\.\./agent-review-message"|from "./agent-review-message.js"|' \
     | sed 's|from "\.\./marker-review"|from "./marker-review.js"|' \
+    | sed 's|from "\.\./config"|from "./config.js"|' \
     | sed 's|from "@plannotator/shared/guide"|from "./guide.js"|' \
     | sed 's|from "@plannotator/shared/data-dir"|from "./data-dir"|' \
     > "generated/$f.ts"

@@ -24,7 +24,11 @@ import {
 	resolveMarkdownFile,
 	resolveUserPath,
 	isWithinProjectRoot,
+	getFileBrowserMaxFiles,
 	warmFileListCache,
+	ANNOTATABLE_DOC_REGEX,
+	MAX_ANNOTATABLE_FILE_BYTES,
+	isAnnotatableTextPath,
 } from "@plannotator/shared/resolve-file";
 import { htmlToMarkdown } from "@plannotator/shared/html-to-markdown";
 import { disabledSourceSave, type SourceFileSnapshot, type SourceSaveCapability } from "@plannotator/shared/source-save";
@@ -215,10 +219,17 @@ export async function handleDoc(req: Request, options: HandleDocOptions = {}): P
 	// HTML renders raw by default; `?convert=1` (set by the frontend when the session's
 	// --markdown preference is on) forces Turndown conversion instead.
 	const convert = url.searchParams.get("convert") === "1";
+	// `?doc=1` (set by the file browser) forces annotatable plain-text rendering
+	// for extensions that overlap CODE_FILE_REGEX (.yaml, .json, .toml, .ini,
+	// .xml). Without it, those paths keep the syntax-highlighted code-file
+	// popout response, so code-file links inside documents are unaffected.
+	const forceDoc = url.searchParams.get("doc") === "1";
+	const wantsDocRender = (path: string) =>
+		ANNOTATABLE_DOC_REGEX.test(path) && (forceDoc || !isCodeFilePath(path));
 	if (
 		resolvedBase &&
 		!isAbsoluteUserPath(requestedPath) &&
-		/\.(mdx?|txt|html?)$/i.test(requestedPath)
+		wantsDocRender(requestedPath)
 	) {
 		const fromBase = resolveUserPath(requestedPath, resolvedBase);
 		if (!isWithinAllowedRoots(fromBase, allowedRoots)) {
@@ -227,6 +238,9 @@ export async function handleDoc(req: Request, options: HandleDocOptions = {}): P
 		try {
 			const file = Bun.file(fromBase);
 			if (await file.exists()) {
+				if (file.size > MAX_ANNOTATABLE_FILE_BYTES) {
+					return Response.json({ error: "File too large (max 2MB)" }, { status: 413 });
+				}
 				const snapshot = readSourceFileSnapshot(fromBase);
 				const raw = snapshot.text;
 				const isHtml = /\.html?$/i.test(requestedPath);
@@ -268,7 +282,10 @@ export async function handleDoc(req: Request, options: HandleDocOptions = {}): P
 
 	// Code files: try literal resolve first; on miss, fall back to the smart
 	// resolver which walks the project for case-insensitive / suffix matches.
-	if (isCodeFilePath(requestedPath)) {
+	// Skipped when the client asked for doc rendering (`?doc=1`) on an
+	// annotatable plain-text path — those fall through to the markdown
+	// resolution below and render like .txt.
+	if (isCodeFilePath(requestedPath) && !(forceDoc && isAnnotatableTextPath(requestedPath))) {
 		const parsed = parseCodePath(requestedPath);
 		const cleanPath = parsed.filePath;
 		const literalPath = resolveUserPath(cleanPath, resolvedBase || projectRoot);
@@ -307,7 +324,7 @@ export async function handleDoc(req: Request, options: HandleDocOptions = {}): P
 
 		try {
 			const file = Bun.file(resolvedCode);
-			if (file.size > 2 * 1024 * 1024) {
+			if (file.size > MAX_ANNOTATABLE_FILE_BYTES) {
 				return Response.json({ error: "File too large (max 2MB)" }, { status: 413 });
 			}
 			const contents = await file.text();
@@ -358,6 +375,9 @@ export async function handleDoc(req: Request, options: HandleDocOptions = {}): P
 	}
 
 	try {
+		if (Bun.file(result.path).size > MAX_ANNOTATABLE_FILE_BYTES) {
+			return Response.json({ error: "File too large (max 2MB)" }, { status: 413 });
+		}
 		const snapshot = readSourceFileSnapshot(result.path);
 		return docJson({ markdown: snapshot.text, filepath: result.path, renderAs: "markdown" }, options, snapshot);
 	} catch {
@@ -542,16 +562,10 @@ export async function handleObsidianDoc(req: Request): Promise<Response> {
 
 // --- File Browser ---
 
-const FILE_BROWSER_EXTENSIONS = /\.(mdx?|txt|html?)$/i;
-const DEFAULT_FILE_BROWSER_MAX_FILES = 5_000;
+const FILE_BROWSER_EXTENSIONS = ANNOTATABLE_DOC_REGEX;
 
 function includeWorkspaceFile(relativePath: string, _change: WorkspaceFileChange): boolean {
 	return FILE_BROWSER_EXTENSIONS.test(relativePath) && !isFileBrowserExcludedPath(relativePath);
-}
-
-function getFileBrowserMaxFiles(): number {
-	const value = Number.parseInt(process.env.PLANNOTATOR_FILE_BROWSER_MAX_FILES ?? "", 10);
-	return Number.isFinite(value) && value > 0 ? value : DEFAULT_FILE_BROWSER_MAX_FILES;
 }
 
 type FileBrowserWalkState = {

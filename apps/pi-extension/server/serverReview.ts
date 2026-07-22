@@ -4,8 +4,9 @@ import { createServer } from "node:http";
 import os from "node:os";
 import { basename, isAbsolute, resolve as resolvePath } from "node:path";
 
+import { SingleFlight } from "../generated/single-flight.js";
 import { contentHash, deleteDraft } from "../generated/draft.js";
-import { loadConfig, saveConfig, detectGitUser, getServerConfig, resolveSharingEnabled } from "../generated/config.js";
+import { loadConfig, saveConfig, detectGitUser, getServerConfig, resolveSharingEnabled, resolveCursorSandbox } from "../generated/config.js";
 
 export type {
 	DiffOption,
@@ -30,6 +31,11 @@ import {
 	serializePRContextSSEEvent,
 } from "../generated/pr-context-live.js";
 import {
+	fetchPRArtifactContent,
+	fetchPRArtifactDocument,
+	PRArtifactDocumentError,
+} from "../generated/pr-artifact-document.js";
+import {
 	type DiffType,
 	type GitContext,
 	type RemoteDefaultInfo,
@@ -44,6 +50,10 @@ import {
 	resolveBaseBranch,
 	validateFilePath,
 } from "../generated/review-core.js";
+import {
+	getGitButlerContextRevision,
+	getGitButlerPatchFingerprint,
+} from "../generated/gitbutler-core.js";
 import {
 	getCommitDiffInfo,
 	listCommitHistory,
@@ -66,7 +76,7 @@ import { createCommitAvatarResolver } from "../generated/commit-avatars.js";
 
 import { createEditorAnnotationHandler } from "./annotations.js";
 import { createAgentJobHandler, whichCmd as commandExists } from "./agent-jobs.js";
-import { type AgentJobInfo, REVIEW_OUTPUT_FAILED, markJobReviewFailed } from "../generated/agent-jobs.js";
+import { type AgentJobInfo, REVIEW_OUTPUT_FAILED, getAgentJobAnnotationContext, markJobReviewFailed } from "../generated/agent-jobs.js";
 import { createExternalAnnotationHandler } from "./external-annotations.js";
 import {
 	handleDraftRequest,
@@ -76,7 +86,7 @@ import {
 	readDraftGenerationFromUrl,
 	handleUploadRequest,
 } from "./handlers.js";
-import { html, json, parseBody, requestUrl } from "./helpers.js";
+import { handleApiNotFound, html, json, parseBody, requestUrl, send } from "./helpers.js";
 import { createPiAIRuntime, handlePiAIRequest } from "./ai-runtime.js";
 
 import { isRemoteSession, listenOnPort } from "./network.js";
@@ -117,6 +127,7 @@ import {
 	composeMarkerReviewPrompt,
 	buildMarkerCommand,
 	parseMarkerStreamOutput,
+	reduceMarkerStream,
 	transformMarkerFindings,
 	makeMarkerNonce,
 	extractMarkerNonce,
@@ -159,6 +170,7 @@ import {
 	runVcsDiff,
 	stageFile,
 	unstageFile,
+	vcsOwnsDiffType,
 } from "./vcs.js";
 
 const piCodeNavRuntime: CodeNavRuntime = {
@@ -258,6 +270,8 @@ export async function startReviewServer(options: {
 	 * the patch that's already on screen.
 	 */
 	initialBase?: string;
+	/** Freshness token captured atomically with the initial provider patch. */
+	initialFingerprint?: string;
 	error?: string;
 	sharingEnabled?: boolean;
 	shareBaseUrl?: string;
@@ -290,6 +304,7 @@ export async function startReviewServer(options: {
 	const isWorkspaceMode = !!workspace;
 	const hasLocalAccess = !!options.gitContext;
 	const sessionVcsType = options.gitContext?.vcsType;
+	let clientGitContext = options.gitContext;
 	const isRemote = isRemoteSession();
 	const wslFlag = detectWSL();
 	let prRef = prMeta ? prRefFromMetadata(prMeta) : null;
@@ -389,6 +404,8 @@ export async function startReviewServer(options: {
 	const detectedCompareTarget = (): string =>
 		options.gitContext?.defaultBranch || options.gitContext?.compareTarget?.fallback || "main";
 	let currentBase = options.initialBase || detectedCompareTarget();
+	const isGitButlerCommittedView = (diffType: string = currentDiffType as string): boolean =>
+		diffType.startsWith("gitbutler:stack:") || diffType.startsWith("gitbutler:branch:");
 	let baseEverSwitched = false;
 	// True once the user picks a base from the picker (explicitBase on the
 	// switch body). Disables the bare-local-name → origin/* canonicalization:
@@ -396,7 +413,11 @@ export async function startReviewServer(options: {
 	// explicit local pick must be honored even when the two point at
 	// different commits.
 	let baseExplicitlyChosen = false;
-	const resolveReviewBase = (requestedBase?: string): string => {
+	const resolveReviewBase = (
+		requestedBase?: string,
+		explicitlyChosen = baseExplicitlyChosen,
+		activeBase = currentBase,
+	): string => {
 		const resolved = resolveBaseBranch(requestedBase, detectedCompareTarget());
 		// Canonicalize a bare local default name ("main") to its tracking ref
 		// ("origin/main") — the startup upgrade races the first /api/diff, so a
@@ -407,7 +428,7 @@ export async function startReviewServer(options: {
 		// every echo after it) is honored verbatim.
 		const remoteBranch = remoteDefaultInfo?.branch;
 		if (
-			!baseExplicitlyChosen &&
+			!explicitlyChosen &&
 			remoteBranch &&
 			remoteBranch.startsWith("origin/") &&
 			resolved === remoteBranch.replace(/^origin\//, "")
@@ -421,8 +442,8 @@ export async function startReviewServer(options: {
 		// that window the rule above is blind, and a diff-type/whitespace switch
 		// echoing "main" would commit the session back onto the stale local
 		// branch (and set baseEverSwitched, permanently blocking the upgrade).
-		if (!baseExplicitlyChosen && currentBase === `origin/${resolved}`) {
-			return currentBase;
+		if (!explicitlyChosen && activeBase === `origin/${resolved}`) {
+			return activeBase;
 		}
 		return resolved;
 	};
@@ -432,7 +453,11 @@ export async function startReviewServer(options: {
 	// compares so the client can show a "diff out of date — refresh" notice when
 	// files change mid-review. Best-effort: null = "cannot fingerprint" and is
 	// reported fresh, never stale.
-	let currentFingerprint: string | null = null;
+	let currentFingerprint = options.initialFingerprint ?? getGitButlerPatchFingerprint(
+			currentDiffType as DiffType,
+			currentPatch,
+			clientGitContext,
+		);
 	const computeDiffFingerprint = async (): Promise<string | null> => {
 		try {
 			if (workspace) return await workspace.getFingerprint();
@@ -470,13 +495,29 @@ export async function startReviewServer(options: {
 	// order — only the LATEST capture may write the baseline, otherwise a stale
 	// fingerprint would make /api/diff/fresh report stale forever.
 	let fingerprintGeneration = 0;
-	const captureDiffFingerprint = (): void => {
+	let pendingFingerprintCapture: Promise<string | null> | null = null;
+	const fileContentFingerprintProbes = new SingleFlight<string | null>();
+	const captureDiffFingerprint = (knownFingerprint?: string): void => {
+		fileContentFingerprintProbes.clear();
 		const generation = ++fingerprintGeneration;
-		void computeDiffFingerprint().then((fingerprint) => {
-			if (generation === fingerprintGeneration) currentFingerprint = fingerprint;
+		if (knownFingerprint !== undefined) {
+			currentFingerprint = knownFingerprint;
+			pendingFingerprintCapture = null;
+			return;
+		}
+		// Never leave the previous snapshot's baseline attached while the new
+		// capture is pending. Expansion waits for this promise when necessary.
+		currentFingerprint = null;
+		const capture = computeDiffFingerprint();
+		pendingFingerprintCapture = capture;
+		void capture.then((fingerprint) => {
+			if (generation === fingerprintGeneration) {
+				currentFingerprint = fingerprint;
+				pendingFingerprintCapture = null;
+			}
 		});
 	};
-	captureDiffFingerprint();
+	if (currentFingerprint === null) captureDiffFingerprint();
 
 	// --- Base staleness vs the remote (mirrors Bun review.ts) -----------------
 	// `origin/<default>` is GitHub's state as of the last fetch. The startup
@@ -493,20 +534,24 @@ export async function startReviewServer(options: {
 	// Only base-relative diff types (since-base / branch / merge-base) care
 	// about the base being behind the remote; the banner must not show under
 	// uncommitted/staged/etc.
-	const baseRelevantDiffType = (): boolean => {
-		const t = parseWorktreeDiffType(currentDiffType as string)?.subType ?? currentDiffType;
+	const baseRelevantDiffType = (diffType: string = currentDiffType as string): boolean => {
+		const t = parseWorktreeDiffType(diffType)?.subType ?? diffType;
 		return t === "since-base" || t === "branch" || t === "merge-base";
 	};
 
-	// Local-only recompute from the cached remote tip — no network.
-	async function recomputeBaseBehindRemote(): Promise<void> {
+	// Local-only computation from the cached remote tip — no network. Parameters
+	// let switch handlers evaluate a staged snapshot before committing it.
+	async function computeBaseBehindRemote(
+		base: string = currentBase,
+		diffType: string = currentDiffType as string,
+		explicitlyChosen = baseExplicitlyChosen,
+	): Promise<boolean> {
 		// Capture once: a concurrent refreshRemoteBaseInfo can null
 		// remoteDefaultInfo (transient ls-remote failure) during the rev-parse
 		// await below — reading the global after it would throw.
 		const remoteInfo = remoteDefaultInfo;
-		if (!remoteBaseCheckApplies() || !baseRelevantDiffType() || !remoteInfo?.remoteHeadSha) {
-			baseBehindRemote = false;
-			return;
+		if (!remoteBaseCheckApplies() || !baseRelevantDiffType(diffType) || !remoteInfo?.remoteHeadSha) {
+			return false;
 		}
 		// Match the remote default branch as either its local name ("main") or
 		// the tracking ref ("origin/main"), and compare by RESOLVED SHA — this is
@@ -521,20 +566,23 @@ export async function startReviewServer(options: {
 		const remoteBranch = remoteInfo.branch;
 		const localName = remoteBranch.replace(/^origin\//, "");
 		const matchesDefault =
-			currentBase === remoteBranch ||
-			(currentBase === localName && !baseExplicitlyChosen);
+			base === remoteBranch ||
+			(base === localName && !explicitlyChosen);
 		if (!matchesDefault) {
-			baseBehindRemote = false;
-			return;
+			return false;
 		}
 		// --verify: without it, `rev-parse --end-of-options <ref>` echoes the flag
 		// as a literal first output line, so .trim() never equals the SHA and the
 		// banner was stuck true on every repo with a remote.
 		const local = await reviewRuntime.runGit(
-			["--no-optional-locks", "rev-parse", "--verify", "--end-of-options", currentBase],
+			["--no-optional-locks", "rev-parse", "--verify", "--end-of-options", base],
 			{ cwd: options.gitContext?.cwd },
 		);
-		baseBehindRemote = local.exitCode === 0 && local.stdout.trim() !== remoteInfo.remoteHeadSha;
+		return local.exitCode === 0 && local.stdout.trim() !== remoteInfo.remoteHeadSha;
+	}
+
+	async function recomputeBaseBehindRemote(): Promise<void> {
+		baseBehindRemote = await computeBaseBehindRemote();
 	}
 
 	async function refreshRemoteBaseInfo(): Promise<void> {
@@ -697,6 +745,12 @@ export async function startReviewServer(options: {
 		return workspace.getPromptContext();
 	}
 
+	// GitButler's picker topology can change while the visible patch stays
+	// byte-identical. Include its compact context revision in the snapshot id so
+	// a refresh in one tab cannot make another tab's stale picker look current.
+	// Other VCS snapshot ids remain byte-for-byte unchanged. Mirrors Bun.
+	let currentContextRevision = getGitButlerContextRevision(clientGitContext) ?? "";
+
 	// Ask AI "changes under review" context for the CURRENT view, built by the
 	// SAME machine the review jobs use (contextOnly=true). Returned in the diff
 	// payloads so the chat latches it onto user messages; recomputed wherever the
@@ -713,7 +767,7 @@ export async function startReviewServer(options: {
 	// itself stays a pure content hash — drafts survive content-identical
 	// mode round-trips.
 	function currentSnapshotId(): string {
-		return `${draftKey}:${currentDiffType}${isPRMode ? `:${currentPRDiffScope}` : ""}`;
+		return `${draftKey}:${currentDiffType}${isPRMode ? `:${currentPRDiffScope}` : ""}${currentContextRevision ? `:${currentContextRevision}` : ""}`;
 	}
 
 	function buildCurrentAiReviewContext(
@@ -745,7 +799,7 @@ export async function startReviewServer(options: {
 	const tour = createTourSession();
 	const guide = createGuideSession();
 	const semanticDiffScratchCwd = getSemanticDiffScratchCwd();
-	function resolveSemanticDiffCwd(): string {
+	function resolveSemanticDiffCwd(diffType: DiffType = currentDiffType as DiffType): string {
 		if (workspace) return workspace.root;
 		if (options.worktreePool && prMeta) {
 			const poolPath = options.worktreePool.resolve(prMeta.url);
@@ -753,7 +807,7 @@ export async function startReviewServer(options: {
 		}
 		if (options.agentCwd) return options.agentCwd;
 		if (options.gitContext) {
-			const vcsCwd = resolveVcsCwd(currentDiffType as DiffType, options.gitContext.cwd);
+			const vcsCwd = resolveVcsCwd(diffType, options.gitContext.cwd);
 			if (vcsCwd) return vcsCwd;
 			if (options.gitContext.cwd) return options.gitContext.cwd;
 		}
@@ -782,8 +836,9 @@ export async function startReviewServer(options: {
 		return next;
 	}
 
-	async function getSemanticDiffAdvert() {
-		const availability = await getSemanticDiffAvailabilityForCwd(resolveSemanticDiffCwd());
+	async function getSemanticDiffAdvert(diffType: DiffType = currentDiffType as DiffType) {
+		if (isGitButlerCommittedView(diffType)) return { available: false };
+		const availability = await getSemanticDiffAvailabilityForCwd(resolveSemanticDiffCwd(diffType));
 		return {
 			available: availability.available,
 			...(availability.semVersion ? { semVersion: availability.semVersion } : {}),
@@ -792,6 +847,13 @@ export async function startReviewServer(options: {
 	}
 
 	async function getSemanticDiff(url: URL): Promise<SemanticDiffResponse> {
+		if (isGitButlerCommittedView()) {
+			return {
+				status: "unavailable",
+				reason: "gitbutler-committed-view",
+				message: "Semantic diff is unavailable for committed GitButler views because the live workspace may contain other layers.",
+			};
+		}
 		const cwd = resolveSemanticDiffCwd();
 		const fileExts = semanticDiffFileExtsFromSearchParams(url.searchParams);
 		const cacheKey = semanticDiffCacheKey({ rawPatch: currentPatch, cwd, fileExts });
@@ -818,32 +880,43 @@ export async function startReviewServer(options: {
 		getCwd: resolveAgentCwd,
 
 		async buildCommand(provider, config) {
+			// Snapshot every mutable review selector before any await. A concurrent
+			// switch must not retarget the prompt, attribution, or line anchors.
+			const launchPrMeta = prMeta;
+			const launchPatch = currentPatch;
+			const launchDiffType = currentDiffType;
+			const launchBase = currentBase;
+			const launchScope = currentPRDiffScope;
+			const launchGitRef = currentGitRef;
+			const launchSnapshotId = currentSnapshotId();
+			const launchWorkspacePrompt = getWorkspacePromptContext();
+			const launchLayerPatchIncomplete = layerPatchIncomplete;
 			// Fail fast in PR-pool mode when this PR's checkout doesn't exist
 			// (e.g. a pr-switch whose worktree creation failed): falling back
 			// would run the agent against the wrong revision or directory.
-			if (options.worktreePool && prMeta && !options.worktreePool.resolve(prMeta.url)) {
+			if (options.worktreePool && launchPrMeta && !options.worktreePool.resolve(launchPrMeta.url)) {
 				throw new Error(
 					"Local PR checkout unavailable — the agent can't run against the PR files. Retry shortly (the checkout may still be recovering).",
 				);
 			}
 			const cwd = resolveAgentCwd();
-			const workspacePrompt = getWorkspacePromptContext();
+			const workspacePrompt = launchWorkspacePrompt;
 			const hasAgentLocalAccess = !!workspacePrompt || !!options.worktreePool || !!options.agentCwd || !!options.gitContext;
 			const userMessageOptions = {
-				defaultBranch: currentBase,
+				defaultBranch: launchBase,
 				hasLocalAccess: hasAgentLocalAccess,
-				prDiffScope: currentPRDiffScope,
+				prDiffScope: launchScope,
 				...(workspacePrompt && { workspace: workspacePrompt }),
 			};
 
 			// Snapshot the diff context at launch (see review.ts buildCommand
 			// for the rationale — keeps downstream "Copy All" honest across
 			// subsequent context switches).
-			const worktreeParts = String(currentDiffType).startsWith("worktree:")
-				? parseWorktreeDiffType(currentDiffType as DiffType)
+			const worktreeParts = String(launchDiffType).startsWith("worktree:")
+				? parseWorktreeDiffType(launchDiffType as DiffType)
 				: null;
-			const launchPrUrl = prMeta?.url;
-			const launchDiffScope = isPRMode ? currentPRDiffScope : undefined;
+			const launchPrUrl = launchPrMeta?.url;
+			const launchDiffScope = isPRMode ? launchScope : undefined;
 
 			const requestedProfileId =
 				typeof config?.reviewProfileId === "string" ? config.reviewProfileId : undefined;
@@ -854,22 +927,26 @@ export async function startReviewServer(options: {
 			const reviewProfile = resolveRequestedReviewProfile(requestedProfileId);
 
 			const diffContext: AgentJobInfo["diffContext"] | undefined = workspacePrompt
-				? { mode: String(currentDiffType), worktreePath: null }
-				: prMeta
+				? { mode: String(launchDiffType), worktreePath: null }
+				: launchPrMeta
 				? undefined
 				: {
-						mode: (worktreeParts?.subType ?? currentDiffType) as string,
-						base: currentBase,
+						mode: (worktreeParts?.subType ?? launchDiffType) as string,
+						base: launchBase,
 						worktreePath: worktreeParts?.path ?? null,
+						...(String(launchDiffType).startsWith("gitbutler:") && {
+							label: launchGitRef,
+							snapshotId: launchSnapshotId,
+						}),
 					};
 
 			if (provider === "tour") {
 				const built = await tour.buildCommand({
 					cwd,
-					patch: currentPatch,
-					diffType: currentDiffType as DiffType,
+					patch: launchPatch,
+					diffType: launchDiffType as DiffType,
 					options: userMessageOptions,
-					prMetadata: prMeta,
+					prMetadata: launchPrMeta,
 					config,
 				});
 				return built ? { ...built, prUrl: launchPrUrl, diffScope: launchDiffScope, diffContext, reviewProfileId: reviewProfile.id, reviewProfileLabel: reviewProfile.label } : built;
@@ -883,13 +960,7 @@ export async function startReviewServer(options: {
 				// describe the same launch, not whatever the reviewer has since
 				// switched to (mirrors review.ts buildCommand's top-of-function
 				// snapshot).
-				const launchPatch = currentPatch;
-				const launchDiffType = currentDiffType;
-				const launchPrMeta = prMeta;
-				// Snapshotted WITH the patch it describes — see the Bun server's
-				// launchLayerPatchIncomplete comment (mirrors review.ts).
-				const launchLayerPatchIncomplete = layerPatchIncomplete;
-				const launchPRDiffScope = currentPRDiffScope;
+				const launchPRDiffScope = launchScope;
 
 				// The changed-file list is derived from the same launch-time patch
 				// snapshot as the rest of this branch — it's what the model plans
@@ -1026,10 +1097,10 @@ export async function startReviewServer(options: {
 			const userMessage = workspacePrompt
 				? buildAgentReviewUserMessageForTarget({
 						kind: "workspace",
-						patch: currentPatch,
+						patch: launchPatch,
 						workspace: workspacePrompt,
 					}, isCustomReview)
-				: buildAgentReviewUserMessage(currentPatch, currentDiffType as DiffType, userMessageOptions, prMeta, isCustomReview);
+				: buildAgentReviewUserMessage(launchPatch, launchDiffType as DiffType, userMessageOptions, launchPrMeta, isCustomReview);
 			const scopedUserMessage = agentReviewScope ? `${userMessage}\n\n${agentReviewScope}` : userMessage;
 			const jobLabel = workspacePrompt ? "Workspace Review" : "Code Review";
 
@@ -1068,7 +1139,7 @@ export async function startReviewServer(options: {
 				// at parse time so echoed/quoted bare tags can't be mistaken for the payload.
 				const nonce = makeMarkerNonce();
 				const prompt = composeMarkerReviewPrompt(reviewProfile, scopedUserMessage, nonce);
-				const { command } = buildMarkerCommand(markerEngine, prompt, model, cwd, { thinking });
+				const { command } = buildMarkerCommand(markerEngine, prompt, model, cwd, { thinking, cursorSandbox: resolveCursorSandbox(loadConfig()) });
 				return { command, prompt, cwd, label: jobLabel, captureStdout: true, model, thinking, prUrl: launchPrUrl, diffScope: launchDiffScope, diffContext, reviewProfileId: reviewProfile.id, reviewProfileLabel: reviewProfile.label };
 			}
 
@@ -1101,6 +1172,7 @@ export async function startReviewServer(options: {
 					...a,
 					...jobPrContext,
 					...(jobDiffScope && { diffScope: jobDiffScope }),
+					...getAgentJobAnnotationContext(job.diffContext),
 					...(profileLabel && { reviewProfileLabel: profileLabel }),
 				}));
 				const result = externalAnnotations.addAnnotations({ annotations });
@@ -1182,7 +1254,14 @@ export async function startReviewServer(options: {
 				const output = nonce && meta.stdout ? parseMarkerStreamOutput(meta.stdout, markerEngine, nonce) : null;
 				if (!output) {
 					job.status = "failed";
-					job.error = `${markerEngine.author} review output missing or unparseable (no valid marker JSON).`;
+					const providerError = meta.stdout
+						? reduceMarkerStream(meta.stdout, markerEngine).providerError
+						: null;
+					job.error = providerError
+						?? `${markerEngine.author} review output missing or unparseable (no valid marker JSON).`;
+					if (providerError) {
+						console.error(`[${markerEngine.id}-review] Provider error for job ${job.id}: ${providerError}`);
+					}
 					return;
 				}
 
@@ -1242,7 +1321,7 @@ export async function startReviewServer(options: {
 				// current patch only if the snapshot is missing (defensive; should
 				// not happen in practice — see agent-jobs.ts's changedFilesSnapshot).
 				const changedFiles = meta.changedFilesSnapshot ?? listPatchFiles(currentPatch).map((f) => f.path);
-				const { summary } = await guide.onJobComplete({ job, meta, changedFiles });
+				const { summary, error } = await guide.onJobComplete({ job, meta, changedFiles });
 				if (summary) {
 					job.summary = summary;
 				} else {
@@ -1250,7 +1329,7 @@ export async function startReviewServer(options: {
 					// malformed, or fully-invalidated output must not look like a
 					// successful card that 404s on /api/guide/:id.
 					job.status = "failed";
-					job.error = GUIDE_EMPTY_OUTPUT_ERROR;
+					job.error = error ?? GUIDE_EMPTY_OUTPUT_ERROR;
 				}
 				return;
 			}
@@ -1417,6 +1496,7 @@ export async function startReviewServer(options: {
 			const servedHideWhitespace = currentHideWhitespace;
 			const servedPRDiffScope = currentPRDiffScope;
 			const servedSnapshotId = currentSnapshotId();
+			const servedGitContext = clientGitContext;
 			const sections = await buildSectionsSidecar(servedBase, servedDiffType as string);
 			const commitInfo = await buildCommitInfoSidecar(servedDiffType as string);
 			json(res, {
@@ -1432,7 +1512,7 @@ export async function startReviewServer(options: {
 				base: hasLocalAccess ? servedBase : undefined,
 				hideWhitespace: servedHideWhitespace,
 				...(workspace && { diffOptions: workspace.diffOptions }),
-				gitContext: hasLocalAccess ? options.gitContext : undefined,
+				gitContext: hasLocalAccess ? servedGitContext : undefined,
 				sharingEnabled,
 				shareBaseUrl,
 				pasteApiUrl,
@@ -1462,7 +1542,7 @@ export async function startReviewServer(options: {
 				...(commitInfo && { commitInfo }),
 				...(baseBehindRemote && { baseBehindRemote: true }),
 				...(servedError && { error: servedError }),
-				semanticDiff: await getSemanticDiffAdvert(),
+				semanticDiff: await getSemanticDiffAdvert(servedDiffType as DiffType),
 				serverConfig: getServerConfig(gitUser),
 			});
 		} else if (url.pathname === "/api/fetch-base" && req.method === "POST") {
@@ -1589,7 +1669,7 @@ export async function startReviewServer(options: {
 			try {
 				const body = await parseBody(req);
 				const newType = body.diffType as DiffType | WorkspaceDiffType;
-				if (!newType) {
+				if (typeof newType !== "string" || !newType) {
 					json(res, { error: "Missing diffType" }, 400);
 					return;
 				}
@@ -1630,37 +1710,40 @@ export async function startReviewServer(options: {
 					});
 					return;
 				}
+				if (sessionVcsType && !vcsOwnsDiffType(sessionVcsType, newType as string)) {
+					json(res, { error: `Diff type is not available in this ${sessionVcsType} session` }, 400);
+					return;
+				}
 				// An explicit pick from the base picker is honored verbatim —
 				// the local/remote groups are distinct choices, so "main" must
 				// not be canonicalized to "origin/main" when the user chose the
 				// local ref on purpose. Sticky: later echoes of that choice
 				// (diff-type switches, refreshes) must not re-canonicalize it.
-				if (body.explicitBase === true && typeof body.base === "string" && body.base) {
-					baseExplicitlyChosen = true;
-				}
+				const nextBaseExplicitlyChosen = baseExplicitlyChosen ||
+					(body.explicitBase === true && typeof body.base === "string" && !!body.base);
 				const base = resolveReviewBase(
 					typeof body.base === "string" ? body.base : undefined,
+					nextBaseExplicitlyChosen,
+					currentBase,
 				);
 				const defaultCwd = options.gitContext?.cwd;
 				const result = await runVcsDiff(newType as DiffType, base, defaultCwd, {
 					hideWhitespace: effectiveHideWhitespace,
 					pathspec: reviewPathspec,
 				});
+				const resultContext = sessionVcsType === "gitbutler" && result.gitContext?.vcsType === "gitbutler"
+					? result.gitContext
+					: undefined;
+				const resultBase = resultContext?.defaultBranch ?? base;
 				// A newer switch superseded us — don't touch shared state.
 				if (switchEpoch !== diffSwitchEpoch) {
 					json(res, { superseded: true });
 					return;
 				}
+				// Stage every field locally. No shared review state is written until
+				// the final epoch guard, so a newer invalid request cannot strand a
+				// patch/fingerprint beside the prior GitButler context revision.
 				const previousDiffType = currentDiffType;
-				currentHideWhitespace = effectiveHideWhitespace;
-				currentPatch = result.patch;
-				currentGitRef = result.label;
-				currentDiffType = newType;
-				currentBase = base;
-				baseEverSwitched = true;
-				currentError = result.error;
-				draftKey = contentHash(currentPatch);
-				captureDiffFingerprint();
 
 				// Recompute gitContext for the effective cwd so the client's
 				// sidebar reflects the worktree we're now reviewing.
@@ -1668,11 +1751,15 @@ export async function startReviewServer(options: {
 				// Skipped for same-cwd commit:<sha> switches (the commit-rail hot
 				// path — mirrors Bun review.ts): the recompute dominated click
 				// latency and a historical commit's diff can't change any of it.
-				let updatedContext: GitContext | undefined;
-				if (options.gitContext && !isSameCwdCommitSwitch(previousDiffType as string, newType as string)) {
+				let updatedContext = resultContext;
+				let updatedContextRevision = resultContext
+					? getGitButlerContextRevision(resultContext) ?? ""
+					: undefined;
+				if (!updatedContext && options.gitContext && !isSameCwdCommitSwitch(previousDiffType as string, newType as string)) {
 					try {
 						const effectiveCwd = resolveVcsCwd(newType as DiffType, options.gitContext.cwd);
 						updatedContext = await getVcsContext(effectiveCwd, sessionVcsType);
+						updatedContextRevision = getGitButlerContextRevision(updatedContext) ?? "";
 					} catch {
 						/* best-effort */
 					}
@@ -1684,20 +1771,42 @@ export async function startReviewServer(options: {
 				// freshly-recomputed baseBehindRemote — otherwise the banner lags a
 				// poll cycle switching INTO a base-relative mode, or lingers stale
 				// switching AWAY from one. Local rev-parse only; cheap.
-				await recomputeBaseBehindRemote().catch(() => {});
-				const sections = await buildSectionsSidecar();
-				const commitInfo = await buildCommitInfoSidecar();
-				const switchSemanticDiff = await getSemanticDiffAdvert();
+				const nextBase = updatedContext && sessionVcsType === "gitbutler"
+					? updatedContext.defaultBranch
+					: resultBase;
+				const nextBaseBehindRemote = await computeBaseBehindRemote(
+					nextBase,
+					newType as string,
+					nextBaseExplicitlyChosen,
+				).catch(() => false);
+				const sections = await buildSectionsSidecar(nextBase, newType as string);
+				const commitInfo = await buildCommitInfoSidecar(newType as string);
+				const switchSemanticDiff = await getSemanticDiffAdvert(newType as DiffType);
 				// Final guard: a newer switch during trailing awaits wins.
 				if (switchEpoch !== diffSwitchEpoch) {
 					json(res, { superseded: true });
 					return;
 				}
+				currentHideWhitespace = effectiveHideWhitespace;
+				currentPatch = result.patch;
+				currentGitRef = result.label;
+				currentDiffType = newType;
+				currentBase = nextBase;
+				baseEverSwitched = true;
+				baseExplicitlyChosen = nextBaseExplicitlyChosen;
+				baseBehindRemote = nextBaseBehindRemote;
+				currentError = result.error;
+				draftKey = contentHash(currentPatch);
+				if (updatedContext && sessionVcsType === "gitbutler") {
+					clientGitContext = updatedContext;
+					currentContextRevision = updatedContextRevision ?? "";
+				}
+				captureDiffFingerprint(result.fingerprint);
 				json(res, {
 					rawPatch: currentPatch,
 					// Snapshot args: robust against a future await sneaking in
 					// between the epoch check and this response.
-					aiReviewContext: buildCurrentAiReviewContext(result.patch, base),
+					aiReviewContext: buildCurrentAiReviewContext(result.patch, currentBase),
 					gitRef: currentGitRef,
 					snapshotId: currentSnapshotId(),
 					diffType: currentDiffType,
@@ -1977,6 +2086,71 @@ export async function startReviewServer(options: {
 					500,
 				);
 			}
+		} else if (url.pathname === "/api/pr-artifact-document" && req.method === "GET") {
+			if (!isPRMode || !prRef || !prMeta) {
+				json(res, { error: "Not in PR mode" }, 400);
+				return;
+			}
+			const artifactUrl = url.searchParams.get("url");
+			if (!artifactUrl) {
+				json(res, { error: "Missing artifact URL" }, 400);
+				return;
+			}
+			try {
+				const context = await prContextLive.getContext(prMeta.url, prRef);
+				const document = await fetchPRArtifactDocument(
+					prCommandRuntime,
+					prMeta,
+					context,
+					artifactUrl,
+				);
+				send(res, document.content, 200, {
+					"Content-Type": "text/plain; charset=utf-8",
+					"Cache-Control": "private, max-age=300",
+					"Content-Security-Policy": "sandbox; default-src 'none'",
+					"X-Content-Type-Options": "nosniff",
+				});
+			} catch (error) {
+				const status = error instanceof PRArtifactDocumentError ? error.status : 500;
+				const message = error instanceof Error ? error.message : "Failed to fetch artifact document";
+				json(res, { error: message }, status);
+			}
+		} else if (url.pathname === "/api/pr-artifact-content" && req.method === "GET") {
+			if (!isPRMode || !prRef || !prMeta) {
+				json(res, { error: "Not in PR mode" }, 400);
+				return;
+			}
+			const artifactUrl = url.searchParams.get("url");
+			if (!artifactUrl) {
+				json(res, { error: "Missing artifact URL" }, 400);
+				return;
+			}
+			try {
+				const context = await prContextLive.getContext(prMeta.url, prRef);
+				const content = await fetchPRArtifactContent(
+					prCommandRuntime,
+					prMeta,
+					context,
+					artifactUrl,
+					{
+						sourceUrl: url.searchParams.get("source") ?? undefined,
+						range: typeof req.headers.range === "string" ? req.headers.range : undefined,
+					},
+				);
+				send(res, Buffer.from(content.content), content.status, {
+					"Content-Type": content.contentType,
+					"Cache-Control": "private, max-age=300",
+					"Content-Security-Policy": "sandbox",
+					"X-Content-Type-Options": "nosniff",
+					"Content-Length": String(content.content.byteLength),
+					...(content.contentRange ? { "Content-Range": content.contentRange } : {}),
+					...(content.acceptRanges ? { "Accept-Ranges": content.acceptRanges } : {}),
+				});
+			} catch (error) {
+				const status = error instanceof PRArtifactDocumentError ? error.status : 500;
+				const message = error instanceof Error ? error.message : "Failed to fetch artifact content";
+				json(res, { error: message }, status);
+			}
 		} else if (url.pathname === "/api/pr-action" && req.method === "POST") {
 			if (!isPRMode || !prMeta || !prRef) {
 				json(res, { error: "Not in PR mode" }, 400);
@@ -2071,6 +2245,44 @@ export async function startReviewServer(options: {
 				}
 			}
 
+			// Bind expansion to the patch snapshot held by this tab. GitButler
+			// topology and other VCS state can move without a route change; serving
+			// newly-resolved contents beside an old patch would corrupt context.
+			const requestedSnapshot = url.searchParams.get("snapshot");
+			if (requestedSnapshot) {
+				if (requestedSnapshot !== currentSnapshotId()) {
+					json(res, { error: "Diff snapshot is stale; refresh before expanding context" }, 409);
+					return;
+				}
+				const baselineGeneration = fingerprintGeneration;
+				let baseline = currentFingerprint;
+				const pendingCapture = pendingFingerprintCapture;
+				if (baseline == null && pendingCapture) {
+					baseline = await pendingCapture;
+				}
+				if (
+					requestedSnapshot !== currentSnapshotId() ||
+					baselineGeneration !== fingerprintGeneration
+				) {
+					json(res, { error: "Diff snapshot is stale; refresh before expanding context" }, 409);
+					return;
+				}
+				if (baseline != null) {
+					const probe = await fileContentFingerprintProbes.run(
+						`${requestedSnapshot}:${baselineGeneration}`,
+						computeDiffFingerprint,
+					);
+					if (
+						requestedSnapshot !== currentSnapshotId() ||
+						currentFingerprint !== baseline ||
+						(probe != null && probe !== baseline)
+					) {
+						json(res, { error: "Diff snapshot is stale; refresh before expanding context" }, 409);
+						return;
+					}
+				}
+			}
+
 			if (workspace) {
 				try {
 					const result = await workspace.getFileContents(filePath, oldPath);
@@ -2160,6 +2372,10 @@ export async function startReviewServer(options: {
 
 			json(res, { error: "No file access available" }, 400);
 		} else if (url.pathname === "/api/code-nav/resolve" && req.method === "POST") {
+			if (isGitButlerCommittedView()) {
+				json(res, { error: "Code navigation is unavailable for committed GitButler views" }, 400);
+				return;
+			}
 			const hasCodeNavAccess = !!workspace || !!options.gitContext || !!options.agentCwd || !!options.worktreePool;
 			if (!hasCodeNavAccess) {
 				json(res, { error: "Code navigation requires local access" }, 400);
@@ -2188,6 +2404,10 @@ export async function startReviewServer(options: {
 				json(res, { error: err instanceof Error ? err.message : "Code navigation failed" }, 500);
 			}
 		} else if (url.pathname === "/api/code-nav/file" && req.method === "GET") {
+			if (isGitButlerCommittedView()) {
+				json(res, { error: "Code navigation is unavailable for committed GitButler views" }, 400);
+				return;
+			}
 			const hasCodeNavAccess = !!workspace || !!options.gitContext || !!options.agentCwd || !!options.worktreePool;
 			if (!hasCodeNavAccess) {
 				json(res, { error: "Code navigation requires local access" }, 400);
@@ -2317,7 +2537,11 @@ export async function startReviewServer(options: {
 					return;
 				}
 				const stageCwd = resolveVcsCwd(currentDiffType as DiffType, options.gitContext?.cwd);
-				if (isPRMode || !(await canStageFiles(currentDiffType as DiffType, stageCwd))) {
+				if (
+					isPRMode ||
+					(sessionVcsType && !vcsOwnsDiffType(sessionVcsType, currentDiffType as string)) ||
+					!(await canStageFiles(currentDiffType as DiffType, stageCwd))
+				) {
 					json(res, { error: "Staging not available" }, 400);
 					return;
 				}
@@ -2342,6 +2566,10 @@ export async function startReviewServer(options: {
 			}
 			json(res, { available: true, apps: getAvailableOpenInApps() });
 		} else if (url.pathname === "/api/open-in" && req.method === "POST") {
+			if (isGitButlerCommittedView()) {
+				json(res, { error: "Open in app is unavailable for committed GitButler views" }, 400);
+				return;
+			}
 			if (isRemote) {
 				json(res, { ok: false, error: "Open in app is unavailable in remote sessions" }, 400);
 				return;
@@ -2379,8 +2607,20 @@ export async function startReviewServer(options: {
 			}
 		} else if (url.pathname === "/api/draft") {
 			await handleDraftRequest(req, res, draftKey);
-		} else if (url.pathname === "/favicon.svg") {
+		} else if (url.pathname === "/favicon.png") {
 			handleFavicon(res);
+		} else if (
+			isGitButlerCommittedView() &&
+			url.pathname === "/api/editor-annotations" &&
+			req.method === "GET"
+		) {
+			json(res, { annotations: [] });
+		} else if (
+			isGitButlerCommittedView() &&
+			url.pathname === "/api/editor-annotation" &&
+			req.method === "POST"
+		) {
+			json(res, { error: "Editor annotations are unavailable for committed GitButler views" }, 400);
 		} else if (await editorAnnotations.handle(req, res, url)) {
 			return;
 		} else if (url.pathname === "/api/pr-context/stream" && req.method === "GET") {
@@ -2434,9 +2674,8 @@ export async function startReviewServer(options: {
 				}
 			}
 			if (await handlePiAIRequest(req, res, url, aiRuntime)) return;
-			// Unmatched /api/ai/* paths fall through to the app shell, same as
-			// the original dispatch chain.
-			html(res, options.htmlContent);
+			handleApiNotFound(res, url.pathname);
+			return;
 		} else if (url.pathname === "/api/exit" && req.method === "POST") {
 			if (decisionSubmitted) {
 				json(res, { error: "This review has already been submitted" }, 409);
@@ -2482,6 +2721,8 @@ export async function startReviewServer(options: {
 				const message = err instanceof Error ? err.message : "Failed to process feedback";
 				json(res, { error: message }, 500);
 			}
+		} else if (url.pathname.startsWith("/api/")) {
+			handleApiNotFound(res, url.pathname);
 		} else {
 			html(res, options.htmlContent);
 		}

@@ -27,7 +27,7 @@ import {
 	handleSaveNotesRequest,
 	handleUploadRequest,
 } from "./handlers.js";
-import { html, json, parseBody, requestUrl } from "./helpers.js";
+import { handleApiNotFound, html, json, parseBody, requestUrl } from "./helpers.js";
 import { createPiAIRuntime, handlePiAIRequest } from "./ai-runtime.js";
 
 import { isRemoteSession, listenOnPort } from "./network.js";
@@ -180,8 +180,6 @@ export async function startAnnotateServer(options: {
 	/** Project name for keying per-file version history (powers the annotate version diff). */
 	project?: string;
 }): Promise<AnnotateServerResult> {
-	// Side-channel pre-warm so /api/doc/exists POSTs land on warm cache.
-	void warmFileListCache(process.cwd(), "code");
 	const gitUser = detectGitUser();
 	const sharingEnabled =
 		options.sharingEnabled ?? resolveSharingEnabled(loadConfig());
@@ -611,7 +609,7 @@ export async function startAnnotateServer(options: {
 		} else if (url.pathname === "/api/reference/files/stream" && req.method === "GET") {
 			handleFileBrowserStreamRequest(req, res, url);
 			return;
-		} else if (url.pathname === "/favicon.svg") {
+		} else if (url.pathname === "/favicon.png") {
 			handleFavicon(res);
 		} else if (url.pathname === "/api/exit" && req.method === "POST") {
 			deleteDraft(draftKey, readDraftGenerationFromUrl(req));
@@ -638,6 +636,8 @@ export async function startAnnotateServer(options: {
 			}
 		} else if (url.pathname === "/api/save-notes" && req.method === "POST") {
 			await handleSaveNotesRequest(req, res);
+		} else if (url.pathname.startsWith("/api/")) {
+			handleApiNotFound(res, url.pathname);
 		} else {
 			html(res, options.htmlContent);
 		}
@@ -650,6 +650,9 @@ export async function startAnnotateServer(options: {
 	agentTerminalCapability = agentTerminal.capability;
 
 	const { port, portSource } = await listenOnPort(server);
+
+	// Mirror the Bun server: bind first, then warm through the async shared walk.
+	void warmFileListCache(process.cwd(), "code");
 
 	return {
 		port,

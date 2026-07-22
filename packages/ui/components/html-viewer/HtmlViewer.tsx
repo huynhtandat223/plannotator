@@ -67,6 +67,8 @@ export interface HtmlViewerProps {
   /** Toggle the diff-highlighted view on/off. */
   onToggleDiff?: () => void;
   onAskAI?: CommentAskAIHandler;
+  /** Accessible iframe title. */
+  title?: string;
 }
 
 export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
@@ -89,6 +91,7 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
       diffActive,
       onToggleDiff,
       onAskAI,
+      title = "HTML Plan Viewer",
     },
     ref,
   ) => {
@@ -286,7 +289,7 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
               display: "block",
               colorScheme: "auto",
             }}
-            title="HTML Plan Viewer"
+            title={title}
           />
           </article>
         </div>

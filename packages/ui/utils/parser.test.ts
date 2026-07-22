@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { parseMarkdownToBlocks, computeListIndices, extractFrontmatter, exportAnnotations } from "./parser";
+import { shouldStripFrontmatter } from "@plannotator/core/annotatable";
 import type { Block } from "../types";
 
 /** Tiny factory for list-item blocks used by computeListIndices tests. */
@@ -1108,5 +1109,69 @@ describe("exportAnnotations — line labels", () => {
     const anns = [{ blockId: math.id, type: "COMMENT", text: "clarify", originalText: "x + y", startOffset: 0 }];
     const output = exportAnnotations(mathBlocks, anns);
     expect(output).toContain("(lines 3–5)");
+  });
+});
+
+describe("parseMarkdownToBlocks — non-markdown plain text (#1029)", () => {
+  /**
+   * Annotate now accepts YAML/JSON/TOML-style config files and renders them
+   * through the same pipeline as .txt. The parser must treat structured
+   * config content as ordinary text without crashing or dropping lines.
+   */
+  test("YAML content parses into blocks without crashing", () => {
+    const yaml = [
+      "name: plannotator",
+      "on:",
+      "  push:",
+      "    branches: [main]",
+      "jobs:",
+      "  build:",
+      "    steps:",
+      "      - uses: actions/checkout@v4",
+      "      - run: bun test",
+    ].join("\n");
+    const blocks = parseMarkdownToBlocks(yaml);
+    expect(blocks.length).toBeGreaterThan(0);
+    const joined = blocks.map((b) => b.content).join("\n");
+    expect(joined).toContain("name: plannotator");
+    expect(joined).toContain("uses: actions/checkout@v4");
+  });
+
+  test("JSON content parses into blocks without crashing", () => {
+    const json = '{\n  "name": "plannotator",\n  "private": true\n}';
+    const blocks = parseMarkdownToBlocks(json);
+    expect(blocks.length).toBeGreaterThan(0);
+    expect(blocks.map((b) => b.content).join("\n")).toContain('"name": "plannotator"');
+  });
+
+  test("multi-document YAML keeps its first document with frontmatter: false", () => {
+    // A k8s-style multi-document YAML starts with `---`. With frontmatter
+    // stripping disabled (the rule for non-markdown annotatable sources),
+    // the FIRST document must survive parsing.
+    const yaml = "---\napiVersion: v1\nkind: ConfigMap\n---\napiVersion: v1\nkind: Secret\n";
+    const blocks = parseMarkdownToBlocks(yaml, { frontmatter: false });
+    const joined = blocks.map((b) => b.content).join("\n");
+    expect(joined).toContain("kind: ConfigMap");
+    expect(joined).toContain("kind: Secret");
+    // First real content line keeps its original line number (nothing consumed).
+    expect(blocks[0].startLine).toBe(1);
+  });
+
+  test("default parse still strips markdown frontmatter", () => {
+    const md = "---\ntitle: Plan\n---\n# Heading\nbody\n";
+    const blocks = parseMarkdownToBlocks(md);
+    const joined = blocks.map((b) => b.content).join("\n");
+    expect(joined).not.toContain("title: Plan");
+    expect(joined).toContain("body");
+  });
+
+  test("shouldStripFrontmatter keys off the source path", () => {
+    expect(shouldStripFrontmatter(undefined)).toBe(true); // plans/messages
+    expect(shouldStripFrontmatter("notes.md")).toBe(true);
+    expect(shouldStripFrontmatter("guide.mdx")).toBe(true);
+    expect(shouldStripFrontmatter("deploy.yaml")).toBe(false);
+    expect(shouldStripFrontmatter("notes.txt")).toBe(false);
+    expect(shouldStripFrontmatter("data.csv")).toBe(false);
+    expect(shouldStripFrontmatter("https://example.com/page")).toBe(true); // converted source
   });
 });

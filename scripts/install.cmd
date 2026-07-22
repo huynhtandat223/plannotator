@@ -243,10 +243,22 @@ REM provenance support. Precedence: CLI flag > env var > config.json > default.
 set "VERIFY_ATTESTATION=0"
 
 REM Layer 3: config file (lowest precedence of the opt-in sources).
+REM Unset PLANNOTATOR_DATA_DIR: an existing %USERPROFILE%\.plannotator
+REM (legacy default) always wins; otherwise an explicitly-set absolute
+REM XDG_DATA_HOME (rare on Windows but honored the same way as the runtime;
+REM drive-rooted or UNC) places the directory at XDG_DATA_HOME\plannotator;
+REM otherwise %USERPROFILE%\.plannotator.
 if defined PLANNOTATOR_DATA_DIR (
     set "_CONFIG_DIR=!PLANNOTATOR_DATA_DIR!"
 ) else (
     set "_CONFIG_DIR=%USERPROFILE%\.plannotator"
+    if not exist "%USERPROFILE%\.plannotator\" if defined XDG_DATA_HOME (
+        if "!XDG_DATA_HOME:~1,1!"==":" (
+            set "_CONFIG_DIR=!XDG_DATA_HOME!\plannotator"
+        ) else if "!XDG_DATA_HOME:~0,2!"=="\\" (
+            set "_CONFIG_DIR=!XDG_DATA_HOME!\plannotator"
+        )
+    )
 )
 if /i "!_CONFIG_DIR!"=="~" set "_CONFIG_DIR=%USERPROFILE%"
 if "!_CONFIG_DIR:~0,2!"=="~\" set "_CONFIG_DIR=%USERPROFILE%\!_CONFIG_DIR:~2!"
@@ -418,7 +430,7 @@ if "!VERIFY_ATTESTATION!"=="1" (
     )
 ) else (
     echo SHA256 verified. For build provenance verification, see
-    echo https://plannotator.ai/docs/getting-started/installation/#verifying-your-install
+    echo https://docs.plannotator.ai/open-source/start/installation#pin-or-verify-a-release
 )
 
 REM Install binary
@@ -680,10 +692,10 @@ if "!EXTRAS_CHOICE!"=="yes" if "!EXTRAS_PRESENT!"=="0" (
     if !ERRORLEVEL! equ 0 if "!RUN_WIZARD!"=="1" set "NPX_OK=1"
     if "!NPX_OK!"=="1" (
         echo Launching the skills CLI for the extras ^(pick your agents in its UI^)...
-        call npx skills add backnotprop/plannotator/apps/skills/extra
-        if not !ERRORLEVEL! equ 0 echo skills CLI did not complete - install later with: npx skills add backnotprop/plannotator/apps/skills/extra
+        call npx skills add backnotprop/plannotator/apps/skills/extra --global
+        if not !ERRORLEVEL! equ 0 echo skills CLI did not complete - install later with: npx skills add backnotprop/plannotator/apps/skills/extra --global
     ) else (
-        echo Install the extras with: npx skills add backnotprop/plannotator/apps/skills/extra
+        echo Install the extras with: npx skills add backnotprop/plannotator/apps/skills/extra --global
     )
 )
 
@@ -969,7 +981,7 @@ echo The /plannotator-review, /plannotator-annotate, and /plannotator-last skill
 if not "!EXTRAS_CHOICE!"=="yes" (
     echo.
     echo Optional skills ^(compound planning, setup-goal, visual explainer^):
-    echo   npx skills add backnotprop/plannotator/apps/skills/extra
+    echo   npx skills add backnotprop/plannotator/apps/skills/extra --global
 )
 
 REM Warn if plannotator is configured in both settings.json hooks AND the plugin (causes double execution)
