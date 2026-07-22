@@ -248,14 +248,15 @@ describe('CommentPopover allowImages', () => {
     expect(textarea.value).toBe('Inspect @packages/editor/App.tsx:100-140');
   });
 
-  test.skipIf(!hasDom)('keeps typed slash text as a normal comment until a command is selected', async () => {
+  test.skipIf(!hasDom)('keeps typed slash text as a normal comment until Run is selected', async () => {
     const submitted: Array<unknown> = [];
+    const runCalls: Array<unknown> = [];
     await mount(
       <CommentPopover
         {...popoverProps}
         anchorEl={makeAnchor()}
         livePiCommands={[{ name: 'handoff', source: 'extension' }]}
-        onRunLivePiCommand={async () => { throw new Error('must not run'); }}
+        onRunLivePiCommand={async (command, args) => { runCalls.push({ command, args }); }}
         onSubmit={(text, images) => submitted.push({ text, images })}
       />,
     );
@@ -270,6 +271,7 @@ describe('CommentPopover allowImages', () => {
       textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', metaKey: true, bubbles: true }));
     });
     expect(submitted).toEqual([{ text: '/not-a-command', images: undefined }]);
+    expect(runCalls).toEqual([]);
   });
 });
 

@@ -144,6 +144,8 @@ export interface PlannotatorConfig {
    * PLANNOTATOR_CURSOR_SANDBOX env var, which takes precedence.
    */
   cursorSandbox?: boolean;
+  /** Default setup values for Ex-Plannotator's durable Pi companion chat. */
+  exAIChat?: { model?: string; instruction?: string };
 }
 
 const CONFIG_DIR = getPlannotatorDataDir();

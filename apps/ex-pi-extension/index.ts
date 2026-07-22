@@ -6,7 +6,7 @@ import {
 import { startLiveMessageReviewBrowser } from "./browser.js";
 import { formatLiveFeedbackBatch } from "./session.js";
 import type { LiveMessageReviewServer } from "./server.js";
-import { beginHerdrTool, clearHerdrTools, endHerdrTool, pollHerdrFeedback, pollHerdrInstruction, releaseHerdrSession, reportHerdrSession } from "./herdr-registration.js";
+import { beginHerdrTool, clearHerdrTools, endHerdrTool, EX_PLANNOTATOR_MODEL_COMMAND, EX_PLANNOTATOR_NEW_COMMAND, EX_PLANNOTATOR_RELOAD_COMMAND, pollHerdrFeedback, pollHerdrInstruction, releaseHerdrSession, reportHerdrSession } from "./herdr-registration.js";
 
 export const EX_PLANNOTATOR_COMMAND = "ex-plannotator-last";
 
@@ -74,6 +74,35 @@ export default function exPlannotator(
 		currentPiSessionId = null;
 		if (stop) server.stop();
 	}
+
+	pi.registerCommand(EX_PLANNOTATOR_NEW_COMMAND, {
+		description: "Start a new Pi session",
+		handler: async (_args, ctx) => {
+			await ctx.newSession();
+		},
+	});
+
+	pi.registerCommand(EX_PLANNOTATOR_MODEL_COMMAND, {
+		description: "Switch Pi model",
+		handler: async (args, ctx) => {
+			const [provider, ...modelId] = args.trim().split("/");
+			const model = provider && modelId.length > 0
+				? ctx.modelRegistry.find(provider, modelId.join("/"))
+				: undefined;
+			if (!model) {
+				ctx.ui.notify("Choose a model as provider/model.", "error");
+				return;
+			}
+			if (!await pi.setModel(model)) ctx.ui.notify(`Could not select ${provider}/${modelId.join("/")}.`, "error");
+		},
+	});
+
+	pi.registerCommand(EX_PLANNOTATOR_RELOAD_COMMAND, {
+		description: "Reload Pi extensions, skills, prompts, themes, and context files",
+		handler: async (_args, ctx) => {
+			await ctx.reload();
+		},
+	});
 
 	pi.registerCommand(EX_PLANNOTATOR_COMMAND, {
 		description: "Review recent assistant responses in a persistent Ex-Plannotator tab, approve, annotate, and send feedback in batches",

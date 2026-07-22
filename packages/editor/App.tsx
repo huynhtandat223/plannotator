@@ -78,9 +78,10 @@ import { generateId } from '@plannotator/ui/utils/generateId';
 import { SidebarTabs } from '@plannotator/ui/components/sidebar/SidebarTabs';
 import { SidebarContainer } from '@plannotator/ui/components/sidebar/SidebarContainer';
 import { PlanReviewSourcesBrowser, planFileSnapshotKey, type PlanReviewSnapshot, type PlanReviewSelection } from './components/PlanReviewSourcesBrowser';
-import { ScoutDock } from './components/ScoutDock';
 import type { ArchivedPlan } from '@plannotator/ui/components/sidebar/ArchiveBrowser';
 import type { PickerMessage } from '@plannotator/ui/components/sidebar/MessagesBrowser';
+import { useExAIChat } from './useExAIChat';
+import { ExAIChatPanel } from './components/ExAIChatPanel';
 import { PlanDiffViewer } from '@plannotator/ui/components/plan-diff/PlanDiffViewer';
 import { CodeFilePopout, type CodeFileAnnotationInput } from '@plannotator/ui/components/CodeFilePopout';
 import type { PlanDiffMode } from '@plannotator/ui/components/plan-diff/PlanDiffModeSwitcher';
@@ -186,14 +187,6 @@ type LiveMessageReviewSnapshot = {
   selectedMessageId: string | null;
   reviewRoundStatus: LiveReviewRoundStatus;
   deliveryError: string | null;
-  scouts?: Array<{
-    workspaceKey: string;
-    workspaceId: string;
-    cwd: string;
-    paneId: string;
-    status: 'awaiting-registration' | 'running' | 'ready' | 'failed';
-    error?: string;
-  }>;
 };
 
 type PlanReviewCapability = {
@@ -370,6 +363,7 @@ const App: React.FC = () => {
   // Herdr pane termination is separate from the existing review-session exit
   // flow: it must never submit or close this browser surface.
   const [showLivePaneCloseConfirm, setShowLivePaneCloseConfirm] = useState(false);
+  const [showExAIStopConfirm, setShowExAIStopConfirm] = useState(false);
   const [showSourceFileEditWarning, setShowSourceFileEditWarning] = useState(false);
   const [sourceFileEditWarningAction, setSourceFileEditWarningAction] = useState<SourceFileEditWarningAction>('send-feedback');
   const sourceFileEditWarningContinuationRef = useRef<(() => void | Promise<void>) | null>(null);
@@ -378,7 +372,7 @@ const App: React.FC = () => {
   const [showAgentWarning, setShowAgentWarning] = useState(false);
   const [agentWarningMessage, setAgentWarningMessage] = useState('');
   const [isPanelOpen, setIsPanelOpen] = useState(() => window.innerWidth >= 768);
-  const [rightSidebarTab, setRightSidebarTab] = useState<'annotations' | 'ai'>('annotations');
+  const [rightSidebarTab, setRightSidebarTab] = useState<'annotations' | 'ai' | 'ex-ai'>('annotations');
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
   const [editorMode, setEditorMode] = useState<EditorMode>(getEditorMode);
   const [inputMethod, setInputMethod] = useState<InputMethod>(getInputMethod);
@@ -463,8 +457,6 @@ const App: React.FC = () => {
   // This capability is only emitted by Ex-Plannotator. Official annotate-last
   // sessions keep their terminal submit behavior and never open this adapter.
   const [liveMessageReview, setLiveMessageReview] = useState(false);
-  const [isScoutDockOpen, setIsScoutDockOpen] = useState(false);
-  const [scouts, setScouts] = useState<LiveMessageReviewSnapshot['scouts']>([]);
   // False until a reviewer deliberately picks a response. Until then, the
   // server-selected Herdr pane is authoritative, including focus changes that
   // happen between /api/plan and the first SSE snapshot.
@@ -1285,9 +1277,6 @@ const App: React.FC = () => {
     liveSnapshotMessagesRef.current = snapshot.messages;
     setLiveReviewRoundStatus(snapshot.reviewRoundStatus);
     setLiveReviewDeliveryError(snapshot.deliveryError);
-    if (snapshot.scouts !== undefined) {
-      setScouts(snapshot.scouts);
-    }
     setRecentMessages(snapshot.messages);
     const selectedWorkspaceMessage = snapshot.messages.find((message) => message.messageId === nextSelectedMessageId);
     if (selectedWorkspaceMessage?.cwd) setProjectRoot(selectedWorkspaceMessage.cwd);
@@ -2632,9 +2621,6 @@ const App: React.FC = () => {
         setLiveMessageSelectionPinned(false);
         setLiveMessageReviewReloadOnSelection(data.liveMessageReviewReloadOnSelection !== false);
         setLiveMessageReviewReadOnly(data.liveMessageReviewReadOnly === true);
-        if (data.scouts !== undefined) {
-          setScouts(data.scouts);
-        }
         setPlanReview(data.planReview ?? null);
         if (data.mode === 'annotate' || data.mode === 'annotate-last' || data.mode === 'annotate-folder') {
           setAnnotateMode(true);
@@ -3752,8 +3738,30 @@ const App: React.FC = () => {
     versionInfo,
   ]);
 
+  // Derive live source identity from the selected message for AI session binding.
+  // This is intentionally NOT a useMemo — it must be a stable identity that the
+  // AI session reset can defer to on identity change.
+  const liveSourceIdentity = useMemo(() => {
+    if (!liveMessageReview) return { cwd: null as string | null, sourceSession: null as { paneId: string; sessionId: string } | null, identityKey: null as string | null };
+    const msg = selectedLiveMessage;
+    if (!msg?.paneId) return { cwd: null, sourceSession: null, identityKey: null };
+    const sid = msg.piSessionId;
+    if (!sid) return { cwd: msg.cwd ?? null, sourceSession: null, identityKey: null };
+    return {
+      cwd: msg.cwd ?? null,
+      sourceSession: { paneId: msg.paneId, sessionId: sid },
+      identityKey: `${msg.paneId}:${sid}`,
+    };
+  }, [liveMessageReview, selectedLiveMessage]);
+
+  // Reset AI session when the source identity changes so a session can't
+  // continue under a different pane/workspace.
+  const prevLiveSourceIdentityKeyRef = useRef<string | null>(null);
+
   const aiChat = useAIChat({
     context: aiContext,
+    cwd: liveSourceIdentity.cwd,
+    sourceSession: liveSourceIdentity.sourceSession,
     providerId: aiConfig.providerId,
     model: aiConfig.model,
     reasoningEffort: aiConfig.reasoningEffort,
@@ -3771,6 +3779,18 @@ const App: React.FC = () => {
     resetThread: resetAIThread,
     sessionId: aiSessionId,
   } = aiChat;
+
+  // Reset AI session when the source identity changes so a session can't
+  // continue under a different pane/workspace.
+  useEffect(() => {
+    if (!aiSessionEnabled) return;
+    const key = liveSourceIdentity.identityKey;
+    if (prevLiveSourceIdentityKeyRef.current !== null && prevLiveSourceIdentityKeyRef.current !== key) {
+      resetAISession();
+    }
+    prevLiveSourceIdentityKeyRef.current = key;
+  }, [liveSourceIdentity.identityKey, aiSessionEnabled, resetAISession]);
+
   const canUseAI = aiAvailable && aiContext !== null;
   const canUseAskAI = canUseAI || isAgentTerminalReady;
   const canUseDocumentAskAI = canUseAskAI;
@@ -3835,6 +3855,18 @@ const App: React.FC = () => {
     resetAISession();
   }, [applyConfigChange, resetAISession]);
 
+  const exAIIdentity = liveMessageReview && selectedLiveMessage?.paneId && selectedLiveMessage.piSessionId && !selectedLiveMessage.isExAICompanion
+    ? { paneId: selectedLiveMessage.paneId, sessionId: selectedLiveMessage.piSessionId }
+    : null;
+  const exAIChat = useExAIChat(exAIIdentity);
+  const exAIEligible = exAIIdentity !== null;
+  const openExAIChat = useCallback(() => {
+    if (!exAIEligible) return;
+    if (wideModeType !== null) exitWideMode({ restore: false, panelOpen: true });
+    setRightSidebarTab('ex-ai');
+    setIsPanelOpen(true);
+  }, [exAIEligible, exitWideMode, wideModeType]);
+
   const openAIChat = useCallback(() => {
     if (wideModeType !== null) {
       exitWideMode({ restore: false, panelOpen: true });
@@ -3877,7 +3909,9 @@ const App: React.FC = () => {
       } : undefined,
       contextUpdate: aiSessionId ? aiAnnotationsContext : undefined,
     });
-    return true;
+    // Only Global Comment owns an editable draft. General questions from the
+    // AI panel itself still close selection/code comment popovers normally.
+    return context?.fromGlobalComment !== true;
   }, [
     aiAnnotationsContext,
     aiDocumentPath,
@@ -4466,6 +4500,8 @@ const App: React.FC = () => {
           isPanelOpen={isPanelOpen && rightSidebarTab === 'annotations'}
           aiAvailable={canUseAskAI}
           isAIChatOpen={isPanelOpen && rightSidebarTab === 'ai'}
+          showExAIChat={exAIEligible}
+          isExAIChatOpen={isPanelOpen && rightSidebarTab === 'ex-ai'}
           aiHasMessages={visibleAIMessages.length > 0}
           hasAnyAnnotations={hasAnyAnnotations || hasDirectEdits || hasSavedFileChanges}
           annotationCount={feedbackAnnotationCount}
@@ -4501,6 +4537,7 @@ const App: React.FC = () => {
           onApprove={handleHeaderApprove}
           onAnnotationPanelToggle={handleAnnotationPanelToggle}
           onAIChatToggle={handleAIChatToggle}
+          onExAIChatToggle={openExAIChat}
           onArchiveCopy={archive.copy}
           onArchiveDone={archive.done}
           onTaterModeChange={handleTaterModeChange}
@@ -4610,19 +4647,7 @@ const App: React.FC = () => {
             ) : (
               <span className="font-medium text-foreground flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
                 {liveWorkspaceMode ? (
-                  <>
-                    <span>Live Pi responses are read-only.</span>
-                    <button
-                      type="button"
-                      onClick={() => setIsScoutDockOpen(true)}
-                      className="inline-flex items-center gap-1.5 rounded border border-primary/30 bg-primary/10 px-2 py-0.5 text-xs font-semibold text-foreground hover:bg-primary/20 transition-all shadow-sm active:scale-95 cursor-pointer"
-                    >
-                      <svg className="w-3.5 h-3.5 text-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                      </svg>
-                      Launch Scout
-                    </button>
-                  </>
+                  <span>Live Pi responses are read-only.</span>
                 ) : liveMessageReview ? (
                   paneMetadata.length > 0
                     ? <span className="font-normal text-muted-foreground break-words">{paneMetadata.join(' · ')}</span>
@@ -5187,23 +5212,9 @@ const App: React.FC = () => {
               ancestor (`contents` = no layout box). */}
           <div className="contents group/sidebar">
           {/* Resize Handle */}
-          {((!liveWorkspaceMode && isPanelOpen && wideModeType === null && !goalSetupMode && (rightSidebarTab === 'annotations' || canUseAskAI)) || (liveWorkspaceMode && isScoutDockOpen)) && (
-            <ResizeHandle
-              {...panelResize.handleProps}
-              className="hidden md:block z-[55]"
-              side="right"
-              hideHoverTrack
-              tooltip={RESIZE_HANDLE_TOOLTIP}
-              onCollapse={() => {
-                if (liveWorkspaceMode) {
-                  setIsScoutDockOpen(false);
-                } else {
-                  setIsPanelOpen(false);
-                }
-              }}
-            />
+          {(isPanelOpen && wideModeType === null && !goalSetupMode && (rightSidebarTab === 'annotations' || rightSidebarTab === 'ai')) && (
+            <ResizeHandle {...panelResize.handleProps} className="hidden md:block z-[55]" side="right" hideHoverTrack tooltip={RESIZE_HANDLE_TOOLTIP} onCollapse={() => setIsPanelOpen(false)} />
           )}
-
           {/* Annotation Panel */}
           <AnnotationPanel
             isOpen={!liveWorkspaceMode && isPanelOpen && rightSidebarTab === 'annotations' && wideModeType === null && !goalSetupMode}
@@ -5237,67 +5248,21 @@ const App: React.FC = () => {
             onOtherFileAnnotationsClick={handleFlashAnnotatedFiles}
           />
 
-          {/* Scout Dock Panel */}
-          {liveWorkspaceMode && (
-            <ScoutDock
-              isOpen={isScoutDockOpen}
-              onClose={() => setIsScoutDockOpen(false)}
-              width={`var(--rpanel-w, ${panelResize.width}px)`}
-              selectedMessage={recentMessages.find((m) => m.messageId === selectedMessageId) || null}
-              currentScout={(() => {
-                const sel = recentMessages.find((m) => m.messageId === selectedMessageId);
-                if (!sel?.workspaceKey) return null;
-                return scouts?.find((scout) => scout.workspaceKey === sel.workspaceKey) || null;
-              })()}
-            />
-          )}
           {isPanelOpen && rightSidebarTab === 'ai' && wideModeType === null && !goalSetupMode && canUseAskAI && (
             <aside
               data-annotation-panel="true"
-              className={`border-l border-border/50 bg-card flex flex-col flex-shrink-0 ${
-                isMobile ? 'fixed top-12 bottom-0 right-0 z-[60] w-full max-w-sm shadow-2xl bg-card' : ''
-              }`}
+              className={`border-l border-border/50 bg-card flex flex-col flex-shrink-0 ${isMobile ? 'fixed top-12 bottom-0 right-0 z-[60] w-full max-w-sm shadow-2xl bg-card' : ''}`}
               style={isMobile ? undefined : { width: `var(--rpanel-w, ${panelResize.width ?? 288}px)` }}
             >
-              <div className="border-b border-border/50">
-                <div className="flex h-10 items-center justify-between px-3">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <SparklesIcon className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
-                    <h2 className="text-xs font-medium text-foreground">
-                      AI
-                    </h2>
-                    {visibleAIMessages.length > 0 && (
-                      <span className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-primary/10 px-1 font-mono text-[10px] font-medium tabular-nums text-primary">
-                        {visibleAIMessages.length}
-                      </span>
-                    )}
-                  </div>
-                  {isMobile && (
-                    <button
-                      onClick={() => setIsPanelOpen(false)}
-                      className="relative rounded-md p-1.5 text-muted-foreground transition-colors before:absolute before:-inset-1.5 before:content-[''] hover:text-foreground md:hidden"
-                      title="Close panel"
-                      aria-label="Close AI panel"
-                    >
-                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  )}
-                </div>
-              </div>
-              <DocumentAIChatPanel
-                messages={visibleAIMessages}
-                isCreatingSession={isAgentTerminalReady ? false : aiIsCreatingSession}
-                isStreaming={isAgentTerminalReady ? false : aiIsStreaming}
-                onAskGeneral={handleAskGeneralAI}
-                onStop={isAgentTerminalReady ? undefined : abortAI}
-                permissionRequests={isAgentTerminalReady ? [] : aiPermissionRequests}
-                onRespondToPermission={isAgentTerminalReady ? undefined : respondToAIPermission}
-                aiProviders={visibleAIProviders}
-                aiConfig={visibleAIConfig}
-                onAIConfigChange={isAgentTerminalReady ? undefined : handleAIConfigChange}
-              />
+              <div className="border-b border-border/50"><div className="flex h-10 items-center justify-between px-3"><div className="flex items-center gap-2 min-w-0"><SparklesIcon className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" /><h2 className="text-xs font-medium text-foreground">AI</h2>{visibleAIMessages.length > 0 && <span className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-primary/10 px-1 font-mono text-[10px] font-medium tabular-nums text-primary">{visibleAIMessages.length}</span>}</div>{isMobile && <button onClick={() => setIsPanelOpen(false)} className="relative rounded-md p-1.5 text-muted-foreground transition-colors hover:text-foreground md:hidden" title="Close panel" aria-label="Close AI panel"><svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg></button>}</div></div>
+              <DocumentAIChatPanel messages={visibleAIMessages} isCreatingSession={isAgentTerminalReady ? false : aiIsCreatingSession} isStreaming={isAgentTerminalReady ? false : aiIsStreaming} onAskGeneral={handleAskGeneralAI} onStop={isAgentTerminalReady ? undefined : abortAI} permissionRequests={isAgentTerminalReady ? [] : aiPermissionRequests} onRespondToPermission={isAgentTerminalReady ? undefined : respondToAIPermission} aiProviders={visibleAIProviders} aiConfig={visibleAIConfig} onAIConfigChange={isAgentTerminalReady ? undefined : handleAIConfigChange} />
+            </aside>
+          )}
+
+          {isPanelOpen && rightSidebarTab === 'ex-ai' && wideModeType === null && exAIEligible && (
+            <aside data-ex-ai-chat="true" className={`border-l border-border/50 bg-card flex flex-col flex-shrink-0 ${isMobile ? 'fixed top-12 bottom-0 right-0 z-[60] w-full max-w-sm shadow-2xl' : ''}`} style={isMobile ? undefined : { width: `var(--rpanel-w, ${panelResize.width ?? 288}px)` }}>
+              <div className="flex h-10 items-center justify-between border-b border-border/50 px-3"><h2 className="text-xs font-medium">Ex AI Chat</h2><div className="flex items-center gap-3">{(exAIChat.state.status === 'ready' || exAIChat.state.status === 'recovering') && <button onClick={() => setShowExAIStopConfirm(true)} className="text-xs text-destructive">Stop companion</button>}<button onClick={() => setIsPanelOpen(false)} aria-label="Hide Ex AI Chat" className="text-xs text-muted-foreground">Hide</button></div></div>
+              <ExAIChatPanel state={exAIChat.state} error={exAIChat.error} onStart={exAIChat.start} onSend={exAIChat.send} onHandoff={exAIChat.handoff} />
             </aside>
           )}
           </div>
@@ -5416,6 +5381,24 @@ const App: React.FC = () => {
             </>
           }
           confirmText="Approve Anyway"
+          cancelText="Cancel"
+          variant="warning"
+          showCancel
+        />
+
+        <ConfirmDialog
+          isOpen={showExAIStopConfirm}
+          onClose={() => setShowExAIStopConfirm(false)}
+          onConfirm={() => {
+            setShowExAIStopConfirm(false);
+            void exAIChat.stop()
+              .then(() => toast('Ex AI companion stopped', { description: 'The main Pi session is still running.' }))
+              .catch((error) => toast.error(error instanceof Error ? error.message : 'Could not stop Ex AI companion'));
+          }}
+          title="Stop Ex AI companion?"
+          message="This stops and closes the companion Pi pane in Herdr. The paired main Pi session stays running."
+          subMessage="The chat remains available as closed history. Starting again creates a new companion session."
+          confirmText="Stop Companion"
           cancelText="Cancel"
           variant="warning"
           showCancel

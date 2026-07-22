@@ -351,7 +351,7 @@ export const HtmlViewer = forwardRef<ViewerHandle, HtmlViewerProps>(
               onSubmit={handleGlobalCommentSubmit}
               onClose={() => setGlobalCommentPopover(null)}
               onAskAI={onAskAI}
-              askAIContext={{ kind: "general", label: "Document" }}
+              askAIContext={{ kind: "general", fromGlobalComment: true, label: "Document" }}
             />,
             document.body,
           )}

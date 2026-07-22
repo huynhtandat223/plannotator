@@ -35,7 +35,7 @@ export interface PickerMessage {
   /** Canonical live workspace identity supplied by the Herdr host. */
   workspaceKey?: string;
   /** Slash commands explicitly advertised by this live pane's current Pi session. */
-  commands?: Array<{ name: string; description?: string; source: 'extension' | 'prompt' | 'skill' }>;
+  commands?: Array<{ name: string; description?: string; source: 'extension' | 'prompt' | 'skill'; arguments?: string[] }>;
   /** Pi-reported active context usage; null tokens are intentionally unknown. */
   contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
   /** Current model selected in the Pi session. */
@@ -48,6 +48,8 @@ export interface PickerMessage {
   latestCompactionTokens?: number;
   /** Git branch resolved from this live pane's working directory. */
   gitBranch?: string;
+  /** Managed Ex AI companion panes are visible but cannot create another companion. */
+  isExAICompanion?: boolean;
 }
 
 interface MessagesBrowserProps {
@@ -123,6 +125,7 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
             {groupedByPane && (
               <div className="px-2 pt-1 text-[10px] font-medium text-muted-foreground">
                 <div>{group.label}</div>
+                {group.messages[0]?.isExAICompanion && <div className="mt-0.5 inline-flex rounded border border-primary/30 bg-primary/10 px-1 py-0.5 text-[9px] text-primary">Ex AI companion</div>}
                 {group.description && <div className="font-normal text-[9px] opacity-80">{group.description}</div>}
               </div>
             )}

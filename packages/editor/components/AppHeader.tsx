@@ -35,6 +35,8 @@ interface AppHeaderProps {
   isPanelOpen: boolean;
   aiAvailable: boolean;
   isAIChatOpen: boolean;
+  showExAIChat?: boolean;
+  isExAIChatOpen?: boolean;
   aiHasMessages: boolean;
   hasAnyAnnotations: boolean;
   annotationCount: number;
@@ -77,6 +79,7 @@ interface AppHeaderProps {
   onApprove: () => void;
   onAnnotationPanelToggle: () => void;
   onAIChatToggle: () => void;
+  onExAIChatToggle?: () => void;
   onArchiveCopy: () => void;
   onArchiveDone: () => void;
   onTaterModeChange: (enabled: boolean) => void;
@@ -135,6 +138,8 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   isPanelOpen,
   aiAvailable,
   isAIChatOpen,
+  showExAIChat,
+  isExAIChatOpen,
   aiHasMessages,
   hasAnyAnnotations,
   annotationCount,
@@ -170,6 +175,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   onApprove,
   onAnnotationPanelToggle,
   onAIChatToggle,
+  onExAIChatToggle,
   onArchiveCopy,
   onArchiveDone,
   onTaterModeChange,
@@ -272,6 +278,13 @@ export const AppHeader = React.memo<AppHeaderProps>(({
               Done
             </button>
           </>
+        )}
+
+        {showExAIChat && onExAIChatToggle && (
+          <button type="button" onClick={onExAIChatToggle} aria-pressed={isExAIChatOpen} title={isExAIChatOpen ? 'Hide Ex AI Chat' : 'Show Ex AI Chat'} className={`flex h-8 items-center gap-1 rounded-md px-2 text-xs ${isExAIChatOpen ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`}>
+            <SparklesIcon className="h-3.5 w-3.5" />
+            <span className="hidden md:inline">Ex AI Chat</span>
+          </button>
         )}
 
         {isApiMode && !linkedDocIsActive && goalSetupMode && (

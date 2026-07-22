@@ -121,7 +121,7 @@ interface ViewerProps {
   readOnly?: boolean;
   isWaiting?: boolean;
   /** Optional live Pi commands shown as explicit autocomplete in global comments. */
-  livePiCommands?: Array<{ name: string; description?: string; source: 'extension' | 'prompt' | 'skill' }>;
+  livePiCommands?: Array<{ name: string; description?: string; source: 'extension' | 'prompt' | 'skill'; arguments?: string[] }>;
   onRunLivePiCommand?: (command: string, args: string) => Promise<void>;
   /** Optional project-file lookup for Global Message @mentions. */
   onSearchFileMentions?: (query: string) => Promise<string[]>;
@@ -931,6 +931,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             onAskAI={onAskAI}
             askAIContext={{
               kind: viewerCommentPopover.isGlobal ? 'general' : 'selection',
+              fromGlobalComment: viewerCommentPopover.isGlobal,
               label: viewerCommentPopover.isGlobal ? 'Document' : 'Code block',
               text: viewerCommentPopover.selectedText,
               sourcePath: linkedDocInfo?.filepath ?? sourceInfo,

@@ -13,6 +13,7 @@ export interface CommentAskAIContext {
   label?: string;
   text?: string;
   sourcePath?: string;
+  fromGlobalComment?: boolean;
 }
 
 export type CommentAskAIHandler = (
@@ -25,6 +26,7 @@ export interface LivePiCommand {
   name: string;
   description?: string;
   source: 'extension' | 'prompt' | 'skill';
+  arguments?: string[];
 }
 
 interface CommentPopoverProps {
@@ -140,6 +142,14 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
         command.description?.toLowerCase().includes(commandQuery),
       ).slice(0, 6)
     : [];
+  const commandArgumentMatch = text.match(/^\/([-\w:.]+)\s+(.*)$/);
+  const commandForArguments = commandArgumentMatch
+    ? livePiCommands.find((command) => command.name === commandArgumentMatch[1])
+    : undefined;
+  const argumentQuery = commandArgumentMatch?.[2].toLowerCase() ?? '';
+  const matchingLivePiArguments = commandForArguments?.arguments
+    ?.filter((argument) => argument.toLowerCase().includes(argumentQuery))
+    .slice(0, 8) ?? [];
   const activeFileMention = isGlobal && onSearchFileMentions
     ? findActiveFileMention(text, textareaRef.current?.selectionStart ?? text.length)
     : null;
@@ -301,6 +311,15 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     });
   }, [text]);
 
+  const handleSelectLivePiArgument = useCallback((argument: string) => {
+    if (!commandForArguments) return;
+    const nextText = `/${commandForArguments.name} ${argument}`;
+    setText(nextText);
+    setSelectedLivePiCommand(commandForArguments);
+    setLivePiCommandError(null);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [commandForArguments]);
+
   const handleSelectLivePiCommand = useCallback((command: LivePiCommand) => {
     setText(`/${command.name} `);
     setSelectedLivePiCommand(command);
@@ -391,6 +410,22 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
         >
           <code className="text-xs font-semibold text-foreground">/{command.name}</code>
           {command.description && <span className="text-[11px] text-muted-foreground">{command.description}</span>}
+        </button>
+      ))}
+    </div>
+  );
+
+  const commandArgumentAutocomplete = commandForArguments && matchingLivePiArguments.length > 0 && (
+    <div className="mt-2 overflow-hidden rounded-md border border-border bg-muted/30" role="listbox" aria-label={`Arguments for /${commandForArguments.name}`}>
+      {matchingLivePiArguments.map((argument) => (
+        <button
+          key={argument}
+          type="button"
+          role="option"
+          onClick={() => handleSelectLivePiArgument(argument)}
+          className="flex w-full border-b border-border px-2.5 py-2 text-left font-mono text-xs text-foreground last:border-b-0 hover:bg-muted"
+        >
+          {argument}
         </button>
       ))}
     </div>
@@ -487,6 +522,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
               style={{ fieldSizing: 'content' } as React.CSSProperties}
             />
             {commandAutocomplete}
+            {commandArgumentAutocomplete}
             {fileAutocomplete}
           </div>
 
@@ -612,6 +648,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
           style={{ fieldSizing: 'content' } as React.CSSProperties}
         />
         {commandAutocomplete}
+        {commandArgumentAutocomplete}
         {fileAutocomplete}
       </div>
 

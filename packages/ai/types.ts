@@ -158,6 +158,17 @@ export interface CreateSessionOptions {
    */
   cwd?: string;
   /**
+   * Host-private identity of a related live agent session. Providers may use it
+   * to offer contextual assistance without inheriting that session's history.
+   * It is deliberately an opaque identity — never a client-supplied file path.
+   */
+  sourceSession?: {
+    paneId: string;
+    sessionId: string;
+    /** Resolved by a trusted host, never accepted from the browser. */
+    sessionFile?: string;
+  };
+  /**
    * Model override. Provider-specific string.
    * Falls back to provider default if omitted.
    */

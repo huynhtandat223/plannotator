@@ -13,14 +13,12 @@ import {
   feedbackBatch,
   formatInstructionFileReferences,
   instructionDelivery,
-  scoutDelivery,
   panelsFromSnapshot,
   releasePanelSession,
   reviewSnapshotFromPanels,
   searchLiveWorkspaceFiles,
   readPanelSessionJson,
   serveWorkspaceFilesStream,
-  managedScouts,
   panelSessions,
   type HerdrPanel,
   type PanelSessionEnrichment,
@@ -611,7 +609,11 @@ describe("feedbackBatch", () => {
       }),
     });
   });
+
+
 });
+
+
 
 describe("commandArgv", () => {
   test("parses executable arguments without shell evaluation", () => {
@@ -645,9 +647,8 @@ describe("commandDelivery", () => {
     });
   });
 
-  test("rejects a raw slash-prefixed message and commands absent from this pane session", () => {
+  test("rejects malformed commands and commands absent from this pane session", () => {
     expect(commandDelivery({ paneId: "w:p1", command: "/handoff-to-continue" }, [panel], registrations)).toBeNull();
-    expect(commandDelivery({ paneId: "w:p1", command: "continue-handoff" }, [panel], registrations)).toBeNull();
     expect(commandDelivery({ paneId: "w:p2", command: "handoff-to-continue" }, [panel], registrations)).toBeNull();
   });
 
@@ -655,30 +656,6 @@ describe("commandDelivery", () => {
     const replaced = new Map(registrations);
     replaced.set("w:p1", { paneId: "w:p1", sessionId: "session-2", messages: [], commands: [] });
     expect(commandDelivery({ paneId: "w:p1", command: "handoff-to-continue" }, [panel], replaced)).toBeNull();
-  });
-});
-
-describe("scoutDelivery", () => {
-  const panel: HerdrPanel = { id: "w:p1", workspaceId: "workspace-1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "idle", focused: true };
-  const source = {
-    messageId: "w:p1:assistant-1", paneId: "w:p1", piSessionId: "session-1", assistantMessageId: "assistant-1",
-    text: "I will replace the auth flow.", label: "Response 1 · latest", description: "Structured Pi assistant response",
-    paneLabel: "one", paneDescription: "Pane p1", agentStatus: "idle" as const, cwd: "/one", workspaceId: "workspace-1",
-  };
-  const snapshot = { messages: [source], selectedMessageId: source.messageId, unreadMessageIds: [], draftsByMessageId: {}, sentAnnotationsByMessageId: {}, reviewRoundStatus: "open" as const, deliveryError: null };
-  const registrations = new Map<string, PanelSessionEnrichment>([["w:p1", { paneId: "w:p1", sessionId: "session-1", messages: [{ messageId: "assistant-1", text: source.text }], commands: [] }]]);
-
-  test("uses only the live registered structured source response to build a bounded Scout briefing", () => {
-    const delivery = scoutDelivery({ sourcePaneId: "w:p1", sourceMessageId: source.messageId, question: "Find the unsafe assumptions." }, snapshot, [panel], registrations);
-    expect(delivery?.request.sourceSessionId).toBe("session-1");
-    expect(delivery?.request.prompt).toContain("Ideal direction");
-    expect(delivery?.request.prompt).toContain(source.text);
-    expect(delivery?.request.prompt).toContain("Find the unsafe assumptions.");
-  });
-
-  test("rejects waiting documents, foreign messages, and replaced source sessions", () => {
-    expect(scoutDelivery({ sourcePaneId: "w:p1", sourceMessageId: "w:p1:waiting", question: "Inspect" }, snapshot, [panel], registrations)).toBeNull();
-    expect(scoutDelivery({ sourcePaneId: "w:p1", sourceMessageId: source.messageId, question: "Inspect" }, snapshot, [panel], new Map([["w:p1", { ...registrations.get("w:p1")!, sessionId: "session-2" }]]))).toBeNull();
   });
 });
 
@@ -936,97 +913,4 @@ describe("panelsFromSnapshot", () => {
     expect(enrichments.has("w:p1")).toBe(false);
   });
 
-  test("includes scouts in reviewSnapshotFromPanels and handles pruning and status sync", () => {
-    managedScouts.clear();
-    managedScouts.set("workspace-1:/one", {
-      workspaceKey: "workspace-1:/one",
-      workspaceId: "workspace-1",
-      cwd: "/one",
-      paneId: "w:p2",
-      status: "running",
-      pending: null,
-      delivered: false,
-    });
-
-    // Test 1: includes scout when live panel matches key/cwd
-    const panel: HerdrPanel = { id: "w:p2", workspaceId: "workspace-1", workspace: "one", tab: "", panel: "Ex-Plannotator Scout", cwd: "/one", status: "working", focused: true };
-    let snapshot = reviewSnapshotFromPanels([panel], null, new Map());
-    expect(snapshot.scouts).toEqual([
-      {
-        workspaceKey: "workspace-1:/one",
-        workspaceId: "workspace-1",
-        cwd: "/one",
-        paneId: "w:p2",
-        status: "running",
-      },
-    ]);
-
-    // Test 2: transitions running -> ready when delivered is true and panel is idle
-    managedScouts.set("workspace-1:/one", {
-      workspaceKey: "workspace-1:/one",
-      workspaceId: "workspace-1",
-      cwd: "/one",
-      paneId: "w:p2",
-      status: "running",
-      pending: { requestId: "req-1", sourcePaneId: "w:p1", sourceSessionId: "s-1", sourceAssistantMessageId: "a-1", prompt: "Go" },
-      delivered: true,
-    });
-    const idlePanel: HerdrPanel = { id: "w:p2", workspaceId: "workspace-1", workspace: "one", tab: "", panel: "Ex-Plannotator Scout", cwd: "/one", status: "idle", focused: true };
-    snapshot = reviewSnapshotFromPanels([idlePanel], null, new Map());
-    expect(snapshot.scouts?.[0].status).toBe("ready");
-    expect(managedScouts.get("workspace-1:/one")?.status).toBe("ready");
-    expect(managedScouts.get("workspace-1:/one")?.pending).toBeNull();
-
-    // Test 3: remains running if panel is working
-    managedScouts.set("workspace-1:/one", {
-      workspaceKey: "workspace-1:/one",
-      workspaceId: "workspace-1",
-      cwd: "/one",
-      paneId: "w:p2",
-      status: "running",
-      pending: { requestId: "req-1", sourcePaneId: "w:p1", sourceSessionId: "s-1", sourceAssistantMessageId: "a-1", prompt: "Go" },
-      delivered: true,
-    });
-    const workingPanel: HerdrPanel = { id: "w:p2", workspaceId: "workspace-1", workspace: "one", tab: "", panel: "Ex-Plannotator Scout", cwd: "/one", status: "working", focused: true };
-    snapshot = reviewSnapshotFromPanels([workingPanel], null, new Map());
-    expect(snapshot.scouts?.[0].status).toBe("running");
-
-    // Test 4: handles failed status and includes error
-    managedScouts.set("workspace-1:/one", {
-      workspaceKey: "workspace-1:/one",
-      workspaceId: "workspace-1",
-      cwd: "/one",
-      paneId: "w:p2",
-      status: "failed",
-      pending: { requestId: "req-1", sourcePaneId: "w:p1", sourceSessionId: "s-1", sourceAssistantMessageId: "a-1", prompt: "Go" },
-      delivered: false,
-      error: "Could not deliver prompt",
-    });
-    snapshot = reviewSnapshotFromPanels([workingPanel], null, new Map());
-    expect(snapshot.scouts?.[0]).toEqual({
-      workspaceKey: "workspace-1:/one",
-      workspaceId: "workspace-1",
-      cwd: "/one",
-      paneId: "w:p2",
-      status: "failed",
-      error: "Could not deliver prompt",
-    });
-
-    // Test 5: prunes duplicate/stale mappings
-    managedScouts.set("workspace-1:/two", {
-      workspaceKey: "workspace-1:/two",
-      workspaceId: "workspace-1",
-      cwd: "/two",
-      paneId: "w:p2",
-      status: "ready",
-      pending: null,
-      delivered: false,
-    });
-    snapshot = reviewSnapshotFromPanels([workingPanel], null, new Map());
-    // Since workingPanel cwd is /one, the workspace-1:/two mapping is stale and is pruned
-    expect(snapshot.scouts?.length).toBe(1);
-    expect(managedScouts.has("workspace-1:/two")).toBe(false);
-
-    managedScouts.clear();
-  });
 });

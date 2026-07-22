@@ -46,8 +46,12 @@ export interface CreateSessionRequest {
   context: AIContext;
   /** Instance ID of the provider to use (optional — uses default if omitted). */
   providerId?: string;
+  /** Optional working directory (untrusted — validated by host getCwd). */
+  cwd?: string;
   /** Optional model override. */
   model?: string;
+  /** Opaque live source identity (untrusted — resolved by host getSourceSession). */
+  sourceSession?: { paneId?: string; sessionId?: string };
   /** Max agentic turns. */
   maxTurns?: number;
   /** Max budget in USD. */
@@ -79,8 +83,17 @@ export interface AIEndpointDeps {
   registry: ProviderRegistry;
   /** Session manager instance (one per server). */
   sessionManager: SessionManager;
-  /** Resolve the current working directory for new AI sessions. */
-  getCwd?: () => string;
+  /**
+   * Resolve an authorized working directory for a new AI session. The optional
+   * client request must be treated as untrusted by host implementations.
+   */
+  getCwd?: (requestedCwd?: string) => string | Promise<string>;
+  /**
+   * Authorize the selected live source identity before it reaches a provider.
+   * The result intentionally retains only opaque IDs, never host file paths.
+   */
+  getSourceSession?: (requested?: CreateSessionRequest["sourceSession"]) =>
+    CreateSessionOptions["sourceSession"] | undefined | Promise<CreateSessionOptions["sourceSession"] | undefined>;
   /** Optional hook to finish lazy provider capability loading before reporting capabilities. */
   beforeCapabilities?: () => Promise<void> | void;
 }
@@ -113,7 +126,7 @@ function clampPositiveNumber(value: unknown, max: number): number | undefined {
  * ```
  */
 export function createAIEndpoints(deps: AIEndpointDeps) {
-  const { registry, sessionManager, getCwd, beforeCapabilities } = deps;
+  const { registry, sessionManager, getCwd, getSourceSession, beforeCapabilities } = deps;
 
   return {
     "/api/ai/capabilities": async (_req: Request) => {
@@ -141,7 +154,7 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
       }
 
       const body = (await req.json()) as CreateSessionRequest;
-      const { context, providerId, model, maxTurns, maxBudgetUsd, reasoningEffort } = body;
+      const { context, cwd, providerId, model, sourceSession, maxTurns, maxBudgetUsd, reasoningEffort } = body;
 
       if (!context?.mode) {
         return Response.json(
@@ -167,7 +180,8 @@ export function createAIEndpoints(deps: AIEndpointDeps) {
         const boundedMaxBudgetUsd = clampPositiveNumber(maxBudgetUsd, MAX_CLIENT_BUDGET_USD);
         const options: CreateSessionOptions = {
           context,
-          cwd: getCwd?.(),
+          cwd: await getCwd?.(cwd),
+          sourceSession: await getSourceSession?.(sourceSession),
           model,
           ...(boundedMaxTurns !== undefined && { maxTurns: boundedMaxTurns }),
           ...(boundedMaxBudgetUsd !== undefined && { maxBudgetUsd: boundedMaxBudgetUsd }),

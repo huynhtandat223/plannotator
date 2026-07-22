@@ -52,6 +52,18 @@ Pi registration and browser-to-Pi claim endpoints are loopback-only. Browser mut
 
 The delivery queues are intentionally in memory and use destructive, at-most-once claims. That is safer than sending a duplicate Pi prompt after a crash, but it means a service restart clears registrations and undelivered items.
 
+## Ex AI Chat companion contract
+
+Ex AI Chat is an Ex-Plannotator-only companion projection, separate from the existing Ask AI provider session. The pinned action is available only for a selected, non-companion live Pi `{ paneId, sessionId }`. Ask AI and Ex AI Chat are mutually exclusive only in layout: hiding either panel retains its controller state.
+
+Opening Ex AI Chat shows inline setup with durable default model/instruction values and per-main overrides. It starts no process until Start. Start creates a normal interactive Pi process in an unfocused Herdr tab in the main pane's workspace and cwd. The service persists a small atomic registry under Plannotator's data directory at `ex-ai-companions.json`, keyed by the exact main identity. It stores pairing, setup, UI-originated projection and bounded handoff results; it is never proof of liveness or a second transcript.
+
+The companion's first Ex AI turn includes the base instruction, main workspace and optional transcript path as a hidden preamble. Later turns contain only the new user message. The service snapshots finalized registered message IDs before dispatch, then binds only a new finalized response from the exact companion session. Native companion-pane activity remains native Pi context and appears only as a collapsed **Companion activity occurred in Herdr** event in the projection. Registered model and command metadata describe the existing companion session; no model/command action recreates it.
+
+Fresh Herdr snapshots and current Pi registrations are authority. After a service restart, missing registrations yield `recovering` until extensions republish; they do not cause a live pair to be closed. Main pane absence or exact session replacement closes the companion and retires the pair. Direct companion closure leaves main untouched, exposes `closed`, and requires explicit Start for replacement. A companion pane is visibly badged and server-side nested Start requests are rejected.
+
+Assistant responses can be explicitly edited and sent to the exact paired main. The browser keeps a stable request ID per editor draft; host duplicate requests coalesce and are retained in the durable registry. The host rechecks fresh main liveness/registration and uses existing browser-write authorization; only the Pi claim transport remains loopback-only. Failed delivery retains the editor draft. Do not test delivery against a live user conversation without explicit approval.
+
 ## Reviewer behavior
 
 ### Responses and waiting panes
