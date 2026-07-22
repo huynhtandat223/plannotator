@@ -50,7 +50,16 @@ export function reconcileLiveMessageSelection(
   followNextPaneResponse: { paneId: string; latestMessageId: string } | null,
   /** A reviewer-selected source must remain stable across live snapshots. */
   hasUserSelectedMessage = false,
-): { nextSelectedMessageId: string | null; followNextPaneResponseReset: boolean } {
+): {
+  nextSelectedMessageId: string | null;
+  followNextPaneResponseReset: boolean;
+  /**
+   * A newer response became focused in a different pane while the reviewer was
+   * already viewing a real response. The caller keeps the current view and
+   * surfaces this as a notification instead of yanking to the other pane.
+   */
+  pendingFocusMessageId?: string | null;
+} {
   const selectedPaneId = previousMessages.find((message) => message.messageId === currentSelectedMessageId)?.paneId;
   const changedPaneIds = changedLivePaneSessionIds(previousMessages, nextMessages);
   const selectedPaneSessionChanged = changedPaneIds.has(selectedPaneId ?? "");
@@ -88,7 +97,22 @@ export function reconcileLiveMessageSelection(
   // live pane. That selection is Herdr's focused-pane truth; retaining the
   // initial /api/plan source after focus changed makes the viewer's content
   // and feedback target silently diverge.
+  //
+  // Exception: once the reviewer is already viewing a real structured response,
+  // a focus change to a *different* pane must not yank the view out from under
+  // them (a completed response in another pane should not steal the tab). In
+  // that case keep the current selection and report the focused message so the
+  // caller can surface a notification the reviewer can act on when ready.
   if (!hasUserSelectedMessage && snapshotSelectedMessageId !== null && nextMessages.some((message) => message.messageId === snapshotSelectedMessageId)) {
+    const snapshotSelectedPaneId = nextMessages.find((message) => message.messageId === snapshotSelectedMessageId)?.paneId;
+    const focusMovedToAnotherPane = selectedPaneId !== undefined && snapshotSelectedPaneId !== selectedPaneId;
+    if (!isCurrentlyWaiting && focusMovedToAnotherPane) {
+      return {
+        nextSelectedMessageId: currentSelectedMessageId,
+        followNextPaneResponseReset: false,
+        pendingFocusMessageId: snapshotSelectedMessageId,
+      };
+    }
     return {
       nextSelectedMessageId: snapshotSelectedMessageId,
       followNextPaneResponseReset: false,

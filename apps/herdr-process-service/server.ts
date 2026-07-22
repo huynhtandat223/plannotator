@@ -19,9 +19,10 @@ import {
   getWorkspaceStatusForDirectory,
   parseGitNumstat,
 } from "../../packages/shared/workspace-status";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { readFileSync, createReadStream } from "node:fs";
+import { createInterface } from "node:readline";
 import { ExAICompanionCoordinator } from "./ex-ai-companion";
-import { readFile, readdir, realpath, stat } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { Readable } from "node:stream";
 import { randomUUID } from "node:crypto";
@@ -46,7 +47,13 @@ const MAX_ACTION_REQUEST_BODY_BYTES = 16_384;
 /** Up to five finalized assistant responses, delivered only from a local Pi pane. */
 export const MAX_PANEL_SESSION_BODY_BYTES = 1_000_000;
 export const HERDR_LIVE_MESSAGE_LIMIT = 5;
-export const HERDR_SNAPSHOT_POLL_MS = 750;
+// Focus/status transitions are human-paced, not sub-second events. A 2s poll
+// cuts the per-tick `herdr api snapshot` + per-panel `git branch` subprocess
+// load ~2.6x versus the old 750ms cadence while staying responsive. Read-only
+// HTTP handlers now read the cached snapshot (cachedPanels) instead of spawning
+// their own `discoverPanels()` subprocess, so UI freshness no longer depends on
+// a tight poll.
+export const HERDR_SNAPSHOT_POLL_MS = 2_000;
 
 export type PublishedLiveSnapshot<T> = {
   revision: number;
@@ -60,6 +67,10 @@ export type PublishedLiveSnapshot<T> = {
  */
 export class LiveSnapshotPublisher<T> {
   private current: PublishedLiveSnapshot<T> | null = null;
+  // Cache the serialized form of `current` so the change-detection compare in
+  // refresh() does not have to re-stringify the whole (potentially 100KB+)
+  // snapshot on every poll tick.
+  private currentSerialized: string | null = null;
   private refreshInFlight: Promise<PublishedLiveSnapshot<T>> | null = null;
   private readonly subscribers = new Set<(snapshot: PublishedLiveSnapshot<T>) => void>();
 
@@ -72,9 +83,10 @@ export class LiveSnapshotPublisher<T> {
     const refresh = (async () => {
       const value = await this.read();
       const serialized = JSON.stringify(value);
-      if (this.current && JSON.stringify(this.current.value) === serialized) return this.current;
+      if (this.current && this.currentSerialized === serialized) return this.current;
       const snapshot = { revision: (this.current?.revision ?? 0) + 1, value };
       this.current = snapshot;
+      this.currentSerialized = serialized;
       for (const subscriber of this.subscribers) subscriber(snapshot);
       return snapshot;
     })();
@@ -242,6 +254,41 @@ type GitChangesReviewIdentity = {
 // for whether the pane is live; this map is process-local and is pruned on each
 // discovery reconciliation.
 export const panelSessions = new Map<string, PanelSessionEnrichment>();
+// Event-driven registration waiters keyed by paneId. A freshly created
+// companion pane registers asynchronously via /api/session; instead of
+// busy-polling the map, callers await a waiter that resolves the moment the
+// matching registration lands (F7). Waiters own their own timeout, so a pane
+// that never registers still rejects instead of leaking.
+const panelSessionWaiters = new Map<string, Set<() => void>>();
+export function notifyPanelSessionWaiters(paneId: string): void {
+  const waiters = panelSessionWaiters.get(paneId);
+  if (!waiters) return;
+  panelSessionWaiters.delete(paneId);
+  for (const resolve of waiters) resolve();
+}
+export function waitForPanelSessionRegistration(paneId: string, timeoutMs: number): Promise<PanelSessionEnrichment | undefined> {
+  const existing = panelSessions.get(paneId);
+  if (existing) return Promise.resolve(existing);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const waiters = panelSessionWaiters.get(paneId);
+      if (waiters) {
+        waiters.delete(onRegister);
+        if (waiters.size === 0) panelSessionWaiters.delete(paneId);
+      }
+      resolve(panelSessions.get(paneId));
+    };
+    const onRegister = () => finish();
+    const timer = setTimeout(finish, timeoutMs);
+    const waiters = panelSessionWaiters.get(paneId) ?? new Set<() => void>();
+    waiters.add(onRegister);
+    panelSessionWaiters.set(paneId, waiters);
+  });
+}
 // A delivery is held only until the matching local Pi extension claims it.
 // It is never persisted and cannot outlive a host restart.
 const pendingFeedbackDeliveries = new Map<string, PendingFeedbackDelivery>();
@@ -261,12 +308,8 @@ const exAICompanions = new ExAICompanionCoordinator({
   async create(input) {
     const created = await createProcessPanel(input, await discoverPanels());
     if (!created) throw new Error("Could not create an Ex AI companion Pi pane.");
-    const deadline = Date.now() + 15_000;
-    while (Date.now() < deadline) {
-      const registration = panelSessions.get(created.paneId);
-      if (registration) return created;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+    const registration = await waitForPanelSessionRegistration(created.paneId, 15_000);
+    if (registration) return created;
     throw new Error("The companion Pi pane has not registered yet.");
   },
   async close(paneId) {
@@ -493,15 +536,25 @@ async function sessionFallbackMetadata(sessionId: string): Promise<SessionFallba
       cached.expiresAt = now + SESSION_METADATA_CACHE_MS;
       return cached.metadata;
     }
-    const entries = (await readFile(file, "utf8")).split("\n").flatMap((line): SessionFileEntry[] => {
-      if (!line.trim()) return [];
-      try {
-        const value = JSON.parse(line) as unknown;
-        return value && typeof value === "object" ? [value as SessionFileEntry] : [];
-      } catch {
-        return [];
+    // Stream the JSONL line-by-line instead of reading the whole (up to 32MB)
+    // file into a single string plus an intermediate split array (F9). Both
+    // metadata reducers need the full ordered entry list, so we still collect
+    // entries, but peak allocation drops to one line at a time.
+    const entries: SessionFileEntry[] = [];
+    const rl = createInterface({ input: createReadStream(file, "utf8"), crlfDelay: Infinity });
+    try {
+      for await (const line of rl) {
+        if (!line.trim()) continue;
+        try {
+          const value = JSON.parse(line) as unknown;
+          if (value && typeof value === "object") entries.push(value as SessionFileEntry);
+        } catch {
+          // Skip malformed lines; a partially written tail line is expected.
+        }
       }
-    });
+    } finally {
+      rl.close();
+    }
     const metadata = sessionFallbackMetadataFromEntries(entries);
     sessionMetadataCache.set(sessionId, { file, expiresAt: now + SESSION_METADATA_CACHE_MS, mtimeMs: fileStat.mtimeMs, size: fileStat.size, metadata });
     return metadata;
@@ -605,7 +658,7 @@ async function uploadImage(request: IncomingMessage, response: ServerResponse): 
       writeJson(response, 400, { error: `File extension .${extension} is not a supported image type` });
       return;
     }
-    mkdirSync(UPLOAD_DIR, { recursive: true });
+    await mkdir(UPLOAD_DIR, { recursive: true });
     const path = join(UPLOAD_DIR, `${randomUUID()}.${extension}`);
     await Bun.write(path, upload);
     writeJson(response, 200, { path, originalName: upload.name });
@@ -614,19 +667,16 @@ async function uploadImage(request: IncomingMessage, response: ServerResponse): 
   }
 }
 
-function serveImage(response: ServerResponse, url: URL): void {
+async function serveImage(response: ServerResponse, url: URL): Promise<void> {
   const path = text(url.searchParams.get("path"));
   if (!path || !ALLOWED_IMAGE_EXTENSIONS.has(imageExtension(path))) {
     writeJson(response, 400, { error: "A supported image path is required" });
     return;
   }
   try {
-    if (!existsSync(path)) {
-      writeJson(response, 404, { error: "Image not found" });
-      return;
-    }
+    const content = await readFile(path);
     response.writeHead(200, { "content-type": IMAGE_CONTENT_TYPES[imageExtension(path)]!, "cache-control": "no-store" });
-    response.end(readFileSync(path));
+    response.end(content);
   } catch {
     writeJson(response, 404, { error: "Image not found" });
   }
@@ -1178,6 +1228,7 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
     return;
   }
   panelSessions.set(paneId, incoming);
+  notifyPanelSessionWaiters(paneId);
   await exAICompanions.reconcile();
   // Publish the new structured response against the same host snapshot used by
   // /api/plan and all connected browsers; do not wait for the next poll.
@@ -1701,30 +1752,44 @@ async function gitBranch(cwd: string): Promise<string | undefined> {
   return branch;
 }
 
+// Fingerprint of the only two inputs the prune loops react to: the live pane
+// set and each pane's registered sessionId. When both are unchanged from the
+// previous tick no prune condition can newly fire, so the five map scans are
+// skipped (F11). Staleness stays self-correcting because any pane close or
+// session change alters this key and re-runs the full prune.
+let lastPruneKey: string | null = null;
+
 async function readLiveState(): Promise<HerdrLiveState> {
   const panels = await discoverPanels();
   const livePaneIds = new Set(panels.map((panel) => panel.id));
-  for (const paneId of panelSessions.keys()) {
-    if (!livePaneIds.has(paneId)) panelSessions.delete(paneId);
-  }
-  for (const review of activeGitChangesReviews.values()) {
-    if (!livePaneIds.has(review.paneId) || panelSessions.get(review.paneId)?.sessionId !== review.sessionId) {
-      stopGitChangesReview(review);
+  const pruneKey = `${[...livePaneIds].sort().join(",")}|${[...panelSessions.entries()]
+    .map(([paneId, registration]) => `${paneId}:${registration.sessionId}`)
+    .sort()
+    .join(",")}`;
+  if (pruneKey !== lastPruneKey) {
+    lastPruneKey = pruneKey;
+    for (const paneId of panelSessions.keys()) {
+      if (!livePaneIds.has(paneId)) panelSessions.delete(paneId);
     }
-  }
-  for (const [paneId, launch] of pendingGitChangesReviewLaunches) {
-    if (!livePaneIds.has(paneId) || panelSessions.get(paneId)?.sessionId !== launch.sessionId) {
-      cancelPendingGitChangesReviewLaunch(pendingGitChangesReviewLaunches, paneId, launch.sessionId);
+    for (const review of activeGitChangesReviews.values()) {
+      if (!livePaneIds.has(review.paneId) || panelSessions.get(review.paneId)?.sessionId !== review.sessionId) {
+        stopGitChangesReview(review);
+      }
     }
-  }
-  for (const [deliveryId, delivery] of pendingFeedbackDeliveries) {
-    if (!livePaneIds.has(delivery.paneId) || panelSessions.get(delivery.paneId)?.sessionId !== delivery.sessionId) {
-      pendingFeedbackDeliveries.delete(deliveryId);
+    for (const [paneId, launch] of pendingGitChangesReviewLaunches) {
+      if (!livePaneIds.has(paneId) || panelSessions.get(paneId)?.sessionId !== launch.sessionId) {
+        cancelPendingGitChangesReviewLaunch(pendingGitChangesReviewLaunches, paneId, launch.sessionId);
+      }
     }
-  }
-  for (const [deliveryId, delivery] of pendingInstructionDeliveries) {
-    if (!livePaneIds.has(delivery.paneId) || panelSessions.get(delivery.paneId)?.sessionId !== delivery.sessionId) {
-      pendingInstructionDeliveries.delete(deliveryId);
+    for (const [deliveryId, delivery] of pendingFeedbackDeliveries) {
+      if (!livePaneIds.has(delivery.paneId) || panelSessions.get(delivery.paneId)?.sessionId !== delivery.sessionId) {
+        pendingFeedbackDeliveries.delete(deliveryId);
+      }
+    }
+    for (const [deliveryId, delivery] of pendingInstructionDeliveries) {
+      if (!livePaneIds.has(delivery.paneId) || panelSessions.get(delivery.paneId)?.sessionId !== delivery.sessionId) {
+        pendingInstructionDeliveries.delete(deliveryId);
+      }
     }
   }
   const [panelsWithGitBranches, enrichedSessions] = await Promise.all([
@@ -1752,6 +1817,15 @@ async function reviewSnapshot(): Promise<HerdrLiveState> {
 
 async function currentLiveState(): Promise<PublishedLiveSnapshot<HerdrLiveState>> {
   return liveSnapshotPublisher.snapshot();
+}
+
+// Read-only file-browsing handlers only need the current panel set, not a
+// fresh `herdr api snapshot` subprocess. The 2s poll loop keeps this cache
+// current, so reads become near-instant instead of spawning a subprocess per
+// request. The cached panels are a superset of discoverPanels() (they carry
+// gitBranch enrichment), which is safe for id/cwd lookups.
+async function cachedPanels(): Promise<HerdrPanel[]> {
+  return (await liveSnapshotPublisher.snapshot()).value.panels;
 }
 
 const FILE_BROWSER_EXTENSIONS = /\.(mdx?|txt|html?)$/i;
@@ -1994,7 +2068,32 @@ function workspaceCompareLabel(mode: WorkspaceCompareMode, base?: string): strin
   return "Staged changes";
 }
 
+const WORKSPACE_STATUS_CACHE_MS = 2_000;
+const workspaceStatusCache = new Map<string, { expiresAt: number; inFlight: boolean; status: Promise<WorkspaceStatus> }>();
+
 export async function workspaceStatus(rootPath: string, compareMode: WorkspaceCompareMode = "since-base"): Promise<WorkspaceStatus> {
+  const cacheKey = `${rootPath}\0${compareMode}`;
+  const now = Date.now();
+  const existing = workspaceStatusCache.get(cacheKey);
+  if (existing && (existing.inFlight || existing.expiresAt > now)) return existing.status;
+
+  const status = computeWorkspaceStatus(rootPath, compareMode);
+  const entry = { expiresAt: 0, inFlight: true, status };
+  workspaceStatusCache.set(cacheKey, entry);
+  try {
+    const resolved = await status;
+    if (workspaceStatusCache.get(cacheKey) === entry) {
+      entry.inFlight = false;
+      entry.expiresAt = Date.now() + WORKSPACE_STATUS_CACHE_MS;
+    }
+    return resolved;
+  } catch (error) {
+    if (workspaceStatusCache.get(cacheKey) === entry) workspaceStatusCache.delete(cacheKey);
+    throw error;
+  }
+}
+
+async function computeWorkspaceStatus(rootPath: string, compareMode: WorkspaceCompareMode): Promise<WorkspaceStatus> {
   try {
     const repoResult = await runHerdrGit(["--no-optional-locks", "rev-parse", "--show-toplevel"], { cwd: rootPath });
     if (repoResult.exitCode !== 0 || !repoResult.stdout.trim()) throw new Error("not a git repository");
@@ -2157,7 +2256,7 @@ export async function serveWorkspaceFilesStream(
   url: URL,
   panels?: HerdrPanel[],
 ): Promise<void> {
-  const livePanels = panels ?? await discoverPanels();
+  const livePanels = panels ?? await cachedPanels();
   const rawDirPaths = url.searchParams.getAll("dirPath");
   if (rawDirPaths.length === 0) {
     writeJson(response, 400, { error: "Missing dirPath parameter" });
@@ -2175,7 +2274,7 @@ export async function serveWorkspaceFilesStream(
       subscriptions.push({ dirPath: workspace.root, clientDirPath: rawDirPath });
     }
   }
-  startFileBrowserWatchStream(request, response, subscriptions);
+  await startFileBrowserWatchStream(request, response, subscriptions);
 }
 
 function livePanePathspec(root: string, cwd: string): string | null {
@@ -2345,7 +2444,7 @@ async function serveFileMentionSearch(request: IncomingMessage, response: Server
     writeJson(response, 400, { error: "paneId is required" });
     return;
   }
-  const paths = await searchLiveWorkspaceFiles(paneId, query, await discoverPanels());
+  const paths = await searchLiveWorkspaceFiles(paneId, query, await cachedPanels());
   if (!paths) {
     writeJson(response, 403, { error: "Pane is not a currently live Herdr Pi workspace" });
     return;
@@ -2365,7 +2464,7 @@ async function serveWorkspaceFiles(response: ServerResponse, url: URL): Promise<
     writeJson(response, 400, { error: "dirPath is required" });
     return;
   }
-  const workspace = await liveWorkspaceDirectory(dirPath, await discoverPanels(), { exactRoot: true });
+  const workspace = await liveWorkspaceDirectory(dirPath, await cachedPanels(), { exactRoot: true });
   if (!workspace) {
     writeJson(response, 403, { error: "Directory is not a currently live Herdr Pi workspace" });
     return;
@@ -2398,7 +2497,7 @@ async function serveWorkspaceDocument(response: ServerResponse, url: URL): Promi
     writeJson(response, 400, { error: "path and a live Herdr workspace base are required" });
     return;
   }
-  const workspace = await liveWorkspaceDirectory(base, await discoverPanels(), { exactRoot: false });
+  const workspace = await liveWorkspaceDirectory(base, await cachedPanels(), { exactRoot: false });
   if (!workspace) {
     writeJson(response, 403, { error: "Document base is not a currently live Herdr Pi workspace" });
     return;
@@ -2562,7 +2661,7 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/image") {
-    serveImage(response, url);
+    void serveImage(response, url);
     return;
   }
   if (request.method === "POST" && url.pathname === "/api/upload") {

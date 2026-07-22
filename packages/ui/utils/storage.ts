@@ -117,6 +117,33 @@ export function setAutoCloseDelay(delay: AutoCloseDelay): void {
 }
 
 /**
+ * Message picker default visible count.
+ * Controls how many recent responses the sidebar shows before the
+ * "Show older" toggle. 'all' disables collapsing. Default: 3.
+ */
+const MESSAGE_PICKER_COUNT_KEY = 'plannotator-message-picker-count';
+
+export type MessagePickerCount = '1' | '3' | '5' | '10' | 'all';
+
+export const MESSAGE_PICKER_COUNT_OPTIONS: { value: MessagePickerCount; label: string }[] = [
+  { value: '1', label: '1' },
+  { value: '3', label: '3' },
+  { value: '5', label: '5' },
+  { value: '10', label: '10' },
+  { value: 'all', label: 'All' },
+];
+
+export function getMessagePickerCount(): MessagePickerCount {
+  const val = getItem(MESSAGE_PICKER_COUNT_KEY);
+  if (val === '1' || val === '3' || val === '5' || val === '10' || val === 'all') return val;
+  return '3';
+}
+
+export function setMessagePickerCount(value: MessagePickerCount): void {
+  setItem(MESSAGE_PICKER_COUNT_KEY, value);
+}
+
+/**
  * Last-used "Open in app" target.
  * Stores the app id from the OPEN_IN_APPS catalog (packages/shared/open-in-apps.ts).
  * Defaults to 'reveal' (the file manager) when unset.

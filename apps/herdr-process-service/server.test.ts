@@ -20,6 +20,8 @@ import {
   readPanelSessionJson,
   serveWorkspaceFilesStream,
   panelSessions,
+  notifyPanelSessionWaiters,
+  waitForPanelSessionRegistration,
   type HerdrPanel,
   type PanelSessionEnrichment,
   workspaceStatus,
@@ -913,4 +915,49 @@ describe("panelsFromSnapshot", () => {
     expect(enrichments.has("w:p1")).toBe(false);
   });
 
+});
+
+describe("waitForPanelSessionRegistration", () => {
+  const registration = (paneId: string, sessionId: string): PanelSessionEnrichment => ({
+    paneId,
+    sessionId,
+    commands: [],
+    messages: [],
+  });
+
+  afterEach(() => {
+    panelSessions.clear();
+  });
+
+  test("resolves immediately when the pane is already registered", async () => {
+    panelSessions.set("w:ready", registration("w:ready", "s-ready"));
+    const start = Date.now();
+    const result = await waitForPanelSessionRegistration("w:ready", 5_000);
+    expect(result?.sessionId).toBe("s-ready");
+    expect(Date.now() - start).toBeLessThan(200);
+  });
+
+  test("resolves the moment a registration lands, without polling", async () => {
+    const pending = waitForPanelSessionRegistration("w:late", 5_000);
+    // Register on the next tick, as /api/session would.
+    setTimeout(() => {
+      panelSessions.set("w:late", registration("w:late", "s-late"));
+      notifyPanelSessionWaiters("w:late");
+    }, 20);
+    const result = await pending;
+    expect(result?.sessionId).toBe("s-late");
+  });
+
+  test("resolves undefined when no registration arrives before the timeout", async () => {
+    const result = await waitForPanelSessionRegistration("w:never", 30);
+    expect(result).toBeUndefined();
+  });
+
+  test("a late notify after timeout does not throw or double-resolve", async () => {
+    const result = await waitForPanelSessionRegistration("w:stale", 20);
+    expect(result).toBeUndefined();
+    // The waiter already timed out and unregistered; this must be a no-op.
+    panelSessions.set("w:stale", registration("w:stale", "s-stale"));
+    expect(() => notifyPanelSessionWaiters("w:stale")).not.toThrow();
+  });
 });

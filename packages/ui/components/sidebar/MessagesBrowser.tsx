@@ -7,6 +7,12 @@
  */
 
 import React from "react";
+import {
+  getMessagePickerCount,
+  setMessagePickerCount,
+  MESSAGE_PICKER_COUNT_OPTIONS,
+  type MessagePickerCount,
+} from "../../utils/storage";
 
 export interface PickerMessage {
   messageId: string;
@@ -85,6 +91,46 @@ function formatTimestamp(ts?: string): string | null {
   });
 }
 
+function resolveVisibleCount(count: MessagePickerCount): number {
+  return count === "all" ? Number.POSITIVE_INFINITY : Number(count);
+}
+
+/** Original-list position retained so `#N` numbering and the ★ default marker
+ * stay stable even after rows are clustered into herd sections. */
+interface IndexedMessage {
+  msg: PickerMessage;
+  index: number;
+}
+
+interface HerdGroup {
+  key: string;
+  label: string;
+  entries: IndexedMessage[];
+}
+
+function sessionKey(message: PickerMessage): string {
+  return message.piSessionId ?? message.paneId ?? "ungrouped";
+}
+
+/** Cluster rows by their live herd/workspace, preserving first-seen order so the
+ * section list matches the order panes appear in the source snapshot. */
+function groupByHerd(entries: IndexedMessage[]): HerdGroup[] {
+  const order: string[] = [];
+  const byKey = new Map<string, HerdGroup>();
+  for (const entry of entries) {
+    const { msg } = entry;
+    const key = msg.workspaceKey ?? msg.workspaceId ?? msg.paneLabel ?? msg.paneId ?? "ungrouped";
+    let group = byKey.get(key);
+    if (!group) {
+      group = { key, label: msg.paneLabel ?? "Workspace", entries: [] };
+      byKey.set(key, group);
+      order.push(key);
+    }
+    group.entries.push(entry);
+  }
+  return order.map((key) => byKey.get(key)!);
+}
+
 export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   messages,
   selectedMessageId,
@@ -94,6 +140,16 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   emptyLabel = "No recent assistant messages found.",
   chronological = false,
 }) => {
+  const [count, setCount] = React.useState<MessagePickerCount>(() => getMessagePickerCount());
+  // Whether the user expanded the flat list past the count cap this session.
+  const [expanded, setExpanded] = React.useState(false);
+
+  const handleCountChange = React.useCallback((next: MessagePickerCount) => {
+    setCount(next);
+    setMessagePickerCount(next);
+    setExpanded(false);
+  }, []);
+
   if (messages.length === 0) {
     return (
       <div className="p-4 text-xs text-muted-foreground text-center">
@@ -102,75 +158,127 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
     );
   }
 
-  const paneGroups = messages.reduce<Array<{ paneId: string; label?: string; description?: string; messages: PickerMessage[] }>>(
-    (groups, message) => {
-      const paneId = message.paneId ?? message.messageId;
-      const group = groups.find((candidate) => candidate.paneId === paneId);
-      if (group) group.messages.push(message);
-      else groups.push({ paneId, label: message.paneLabel, description: message.paneDescription, messages: [message] });
-      return groups;
-    },
-    [],
-  );
+  // Rows carry pane identity when the host is a live/grouped picker (Herdr).
+  // In that mode we cluster rows under herd/workspace section headers instead
+  // of repeating the workspace name inline on every row.
   const groupedByPane = messages.some((message) => message.paneId !== undefined);
+  const visibleCount = resolveVisibleCount(count);
+
+  const renderRow = (msg: PickerMessage, idx: number) => {
+    const isSelected = msg.messageId === selectedMessageId;
+    const isDefault = idx === 0;
+    const ts = formatTimestamp(msg.timestamp);
+    const annotationCount = annotationCounts?.get(msg.messageId) ?? 0;
+    return (
+      <button
+        key={msg.messageId}
+        onClick={() => onSelect(msg.messageId)}
+        aria-current={isSelected ? "true" : undefined}
+        aria-pressed={isSelected}
+        className={`w-full text-left px-2 py-1.5 rounded text-xs transition-colors flex items-start gap-2 ${
+          isSelected
+            ? "bg-primary/10 text-primary border border-primary/30"
+            : "text-foreground hover:bg-muted/50 border border-transparent"
+        }`}
+      >
+        <span className="font-mono text-[10px] text-muted-foreground pt-0.5 w-8 shrink-0 text-right">
+          #{idx + 1}
+          {isDefault ? " \u2605" : ""}
+        </span>
+        <span className="flex-1 min-w-0">
+          {groupedByPane && msg.isExAICompanion && (
+            <span className="flex items-center gap-1 mb-0.5">
+              <span className="inline-flex rounded border border-primary/30 bg-primary/10 px-1 text-[9px] text-primary">
+                Ex AI
+              </span>
+            </span>
+          )}
+          <span className="line-clamp-2 leading-snug">
+            {msg.label ?? previewText(msg.text)}
+          </span>
+          {(msg.description || ts) && (
+            <span className="block text-[10px] text-muted-foreground mt-0.5 line-clamp-2">
+              {[msg.description, ts].filter(Boolean).join(' \u00b7 ')}
+            </span>
+          )}
+        </span>
+        {annotationCount > 0 && (
+          <span
+            className="shrink-0 min-w-5 h-5 px-1 rounded-full bg-primary/10 text-primary border border-primary/30 text-[10px] font-semibold inline-flex items-center justify-center"
+            title={`${annotationCount} annotation${annotationCount === 1 ? "" : "s"}`}
+          >
+            {annotationCount}
+          </span>
+        )}
+      </button>
+    );
+  };
+
+  // Grouped: herd/workspace remains a presentation boundary, while the count
+  // applies independently to each Pi session. Flat callers keep one global list.
+  // `index` stays global so `#N` numbering and the ★ marker remain stable.
+  const indexedAll: IndexedMessage[] = messages.map((msg, index) => ({ msg, index }));
+  let hiddenCount = 0;
+  const herdGroups = groupedByPane
+    ? groupByHerd(indexedAll).map((group) => {
+        const seenBySession = new Map<string, number>();
+        const entries = expanded ? group.entries : group.entries.filter(({ msg }) => {
+          const key = sessionKey(msg);
+          const seen = seenBySession.get(key) ?? 0;
+          seenBySession.set(key, seen + 1);
+          return seen < visibleCount;
+        });
+        hiddenCount += group.entries.length - entries.length;
+        return { ...group, entries };
+      })
+    : null;
+  const flatShown = herdGroups ? null : indexedAll.slice(0, expanded ? indexedAll.length : visibleCount);
+  if (flatShown) hiddenCount = messages.length - flatShown.length;
 
   return (
     <div className="p-2">
-      <div className="px-2 pt-1 pb-2 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-        {chronological ? "Recent responses — oldest first" : listLabel}
+      <div className="px-2 pt-1 pb-2 flex items-center justify-between gap-2">
+        <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+          {chronological ? "Recent responses — oldest first" : listLabel}
+        </span>
+        <label className="flex items-center gap-1 text-[10px] text-muted-foreground shrink-0">
+          <span className="sr-only">Messages to show</span>
+          <span aria-hidden="true">Show</span>
+          <select
+            value={count}
+            onChange={(event) => handleCountChange(event.target.value as MessagePickerCount)}
+            aria-label="Number of recent responses to show"
+            className="rounded border border-border bg-transparent px-1 py-0.5 text-[10px] text-foreground focus:outline-none focus:ring-1 focus:ring-primary/40"
+          >
+            {MESSAGE_PICKER_COUNT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
-      <div className="space-y-2">
-        {paneGroups.map((group) => (
-          <section key={group.paneId} className="space-y-0.5">
-            {groupedByPane && (
-              <div className="px-2 pt-1 text-[10px] font-medium text-muted-foreground">
-                <div>{group.label}</div>
-                {group.messages[0]?.isExAICompanion && <div className="mt-0.5 inline-flex rounded border border-primary/30 bg-primary/10 px-1 py-0.5 text-[9px] text-primary">Ex AI companion</div>}
-                {group.description && <div className="font-normal text-[9px] opacity-80">{group.description}</div>}
+      <div className="space-y-0.5">
+        {herdGroups
+          ? herdGroups.map((group) => (
+              <div key={group.key} className="space-y-0.5">
+                <div className="px-2 pt-2 pb-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground truncate">
+                  {group.label}
+                </div>
+                {group.entries.map(({ msg, index }) => renderRow(msg, index))}
               </div>
-            )}
-            {group.messages.map((msg, idx) => {
-              const isSelected = msg.messageId === selectedMessageId;
-              const isDefault = idx === 0;
-              const ts = formatTimestamp(msg.timestamp);
-              const annotationCount = annotationCounts?.get(msg.messageId) ?? 0;
-              return (
-                <button
-                  key={msg.messageId}
-                  onClick={() => onSelect(msg.messageId)}
-                  className={`w-full text-left px-2 py-1.5 rounded text-xs transition-colors flex items-start gap-2 ${
-                    isSelected
-                      ? "bg-primary/10 text-primary border border-primary/30"
-                      : "text-foreground hover:bg-muted/50 border border-transparent"
-                  }`}
-                >
-                  <span className="font-mono text-[10px] text-muted-foreground pt-0.5 w-8 shrink-0 text-right">
-                    #{idx + 1}
-                    {isDefault ? " ★" : ""}
-                  </span>
-                  <span className="flex-1 min-w-0">
-                    <span className="line-clamp-2 leading-snug">
-                      {msg.label ?? previewText(msg.text)}
-                    </span>
-                    {(msg.description || ts) && (
-                      <span className="block text-[10px] text-muted-foreground mt-0.5 line-clamp-2">
-                        {[msg.description, ts].filter(Boolean).join(' · ')}
-                      </span>
-                    )}
-                  </span>
-                  {annotationCount > 0 && (
-                    <span
-                      className="shrink-0 min-w-5 h-5 px-1 rounded-full bg-primary/10 text-primary border border-primary/30 text-[10px] font-semibold inline-flex items-center justify-center"
-                      title={`${annotationCount} annotation${annotationCount === 1 ? "" : "s"}`}
-                    >
-                      {annotationCount}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </section>
-        ))}
+            ))
+          : flatShown!.map(({ msg, index }) => renderRow(msg, index))}
+        {(hiddenCount > 0 || expanded) && (
+          <button
+            type="button"
+            onClick={() => setExpanded((prev) => !prev)}
+            aria-expanded={expanded}
+            className="w-full text-left px-2 py-1 rounded text-[10px] font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+          >
+            {expanded ? "Show fewer" : `Show ${hiddenCount} older`}
+          </button>
+        )}
       </div>
     </div>
   );

@@ -79,6 +79,8 @@ interface SidebarContainerProps {
   selectedMessageId?: string | null;
   onSelectMessage?: (messageId: string) => void;
   messageAnnotationCounts?: Map<string, number>;
+  /** A newer response finished in another pane while the reviewer stayed here. */
+  hasPendingResponse?: boolean;
   messagePickerLabels?: {
     tab: string;
     list: string;
@@ -141,6 +143,7 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
   selectedMessageId,
   onSelectMessage,
   messageAnnotationCounts,
+  hasPendingResponse,
   messagePickerLabels,
 }) => {
   const pickerLabels = messagePickerLabels ?? {
@@ -216,6 +219,7 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
             icon={<MessagesIcon className="w-3 h-3" />}
             label={pickerLabels.tab}
             badge={messageAnnotationCounts !== undefined && messageAnnotationCounts.size > 0}
+            pending={hasPendingResponse}
           />
         )}
         {showFilesTab && (
@@ -445,7 +449,8 @@ const TabButton: React.FC<{
   icon: React.ReactNode;
   label: string;
   badge?: boolean;
-}> = ({ active, onClick, icon, label, badge }) => (
+  pending?: boolean;
+}> = ({ active, onClick, icon, label, badge, pending }) => (
   <button
     onClick={onClick}
     className={`relative flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors min-w-0 shrink-0 ${
@@ -456,9 +461,11 @@ const TabButton: React.FC<{
   >
     {icon}
     {label}
-    {badge && (
+    {pending ? (
+      <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+    ) : badge ? (
       <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-primary" />
-    )}
+    ) : null}
 </button>
 );
 

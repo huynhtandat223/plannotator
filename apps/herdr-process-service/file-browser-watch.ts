@@ -1,5 +1,5 @@
 import chokidar, { type FSWatcher } from "chokidar";
-import { existsSync, statSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { isAbsolute, relative } from "node:path";
 
@@ -35,9 +35,9 @@ function isFileBrowserWatchIgnoredPath(path: string, root: string): boolean {
   return isFileBrowserExcludedPath(rel);
 }
 
-function isValidDirectory(dirPath: string): boolean {
+async function isValidDirectory(dirPath: string): Promise<boolean> {
   try {
-    return existsSync(dirPath) && statSync(dirPath).isDirectory();
+    return (await stat(dirPath)).isDirectory();
   } catch {
     return false;
   }
@@ -113,12 +113,13 @@ function ensureWatcher(dirPath: string): WatchEntry {
   return entry;
 }
 
-export function startFileBrowserWatchStream(
+export async function startFileBrowserWatchStream(
   request: IncomingMessage,
   response: ServerResponse,
   subscriptions: Array<{ dirPath: string; clientDirPath: string }>,
-): void {
-  if (subscriptions.length === 0 || subscriptions.some(({ dirPath }) => !isValidDirectory(dirPath))) {
+): Promise<void> {
+  const validity = await Promise.all(subscriptions.map(({ dirPath }) => isValidDirectory(dirPath)));
+  if (subscriptions.length === 0 || validity.some((valid) => !valid)) {
     response.writeHead(400, { "content-type": "application/json; charset=utf-8" });
     response.end(JSON.stringify({ error: "Invalid directory path" }));
     return;
