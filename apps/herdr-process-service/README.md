@@ -28,6 +28,16 @@ The extension reports the latest **five** structured assistant responses per pan
 
 Feedback is delivered through a narrow bridge: loopback and Tailscale browsers may queue a batch for one live `{ paneId, sessionId }`, then only the matching local Pi extension claims it through a loopback-only endpoint and reuses Ex-Plannotator's existing `formatLiveFeedbackBatch` + `pi.sendUserMessage(..., { deliverAs: "followUp" })` delivery. A changed or closed session invalidates queued feedback. The queue uses at-most-once claim semantics to avoid duplicate prompts after crashes.
 
+## Ex AI Chat companions
+
+Ex AI Chat is separate from Ask AI. For an eligible live main Pi `{ paneId, sessionId }`, the header opens inline setup and `POST /api/ex-ai-companion/start` creates one ordinary, unfocused Pi pane in the same Herdr workspace and cwd. Opening setup creates no process. The companion is durably paired with the exact main identity in `${PLANNOTATOR_DATA_DIR:-~/.plannotator}/ex-ai-companions.json`; the registry stores setup choices, UI-originated turn projection, and bounded handoff idempotency results, not a second transcript.
+
+`GET /api/ex-ai-companion?paneId=&sessionId=` returns setup, recovery, pair, model/capability metadata, and projected history. `POST /api/ex-ai-companion/turn` sends the first hidden preamble once, then only later user text, and waits for a newly finalized structured response from that exact companion session. Direct native-pane activity is represented as a collapsed activity event rather than copied into chat.
+
+Fresh Herdr panels are liveness authority. A service restart temporarily reports a pair as `recovering` until Pi registration republishes; it never closes a still-live companion merely because enrichment is briefly absent. A missing/replaced main closes its managed companion. A missing companion marks the pair `closed`; it is replaced only after explicit Start. Companion panes are badged in the picker and cannot start nested companions.
+
+`POST /api/ex-ai-companion/handoff` requires the same browser-write authorization as feedback, revalidates the exact live main registration, and queues a follow-up for the loopback-only Pi claim endpoint. Clients retain one request ID for a draft so duplicate retries converge to one delivery. Do not use this route to send an unapproved synthetic message into a live main conversation.
+
 ## Create a Pi panel
 
 The browser's **New panel** action creates one background Pi agent in a new tab of an existing, live Herdr workspace. Choose a live workspace, select a live panel's working directory or enter another existing absolute directory, give the panel a name, and start with `pi` or another command plus arguments. The action never changes the current Herdr focus or splits an existing pane. The header **Close** action closes the currently selected live Pi pane. Both actions use the same loopback/Tailscale/write-token browser authorization as feedback; Pi session registration and message claiming remain loopback-only.

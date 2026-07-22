@@ -134,6 +134,8 @@ export interface PlannotatorConfig {
    * env var value, which takes precedence over this setting.
    */
   share?: "enabled" | "disabled";
+  /** Default setup values for Ex-Plannotator's durable Pi companion chat. */
+  exAIChat?: { model?: string; instruction?: string };
 }
 
 const CONFIG_DIR = getPlannotatorDataDir();

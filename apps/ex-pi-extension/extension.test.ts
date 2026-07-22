@@ -40,12 +40,17 @@ function waitForDeferredReconciliation(): Promise<void> {
 }
 
 describe("Ex-Plannotator package surface", () => {
-	test("registers only the independent ex-plannotator-last command", () => {
+	test("registers the independent Ex-Plannotator commands", () => {
 		const pi = fakePi();
 		exPlannotator(pi.api as never);
 
 		expect(EX_PLANNOTATOR_COMMAND).toBe("ex-plannotator-last");
-		expect(pi.commands.map((command) => command.name)).toEqual(["ex-plannotator-last"]);
+		expect(pi.commands.map((command) => command.name)).toEqual([
+			"ex-plannotator-new",
+			"ex-plannotator-model",
+			"ex-plannotator-reload",
+			"ex-plannotator-last",
+		]);
 	});
 
 	test("opens the active branch snapshot through its command handler", async () => {
@@ -77,7 +82,7 @@ describe("Ex-Plannotator package surface", () => {
 			ui: { notify: (message: string) => notices.push(message) },
 		};
 
-		await pi.commands[0].options.handler("", context as never);
+		await pi.commands.find((command) => command.name === EX_PLANNOTATOR_COMMAND)!.options.handler("", context as never);
 
 		expect(opened).toEqual([{ messages: [{ messageId: "assistant", text: "Review me" }] }]);
 		expect(notices[0]).toContain("Ex-Plannotator opened");
@@ -157,7 +162,7 @@ describe("Ex-Plannotator package surface", () => {
 			sessionManager: { getBranch: () => branch, getSessionId: () => "test-session" },
 			ui: { notify() {} },
 		};
-		await pi.commands[0].options.handler("", context as never);
+		await pi.commands.find((command) => command.name === EX_PLANNOTATOR_COMMAND)!.options.handler("", context as never);
 		const onMessageEnd = pi.handlers.get("message_end")!;
 
 		onMessageEnd({ message: { role: "user", content: "Question" } } as never, context as never);
@@ -240,7 +245,7 @@ describe("Ex-Plannotator package surface", () => {
 			ui: { notify() {} },
 		};
 
-		await pi.commands[0].options.handler("", context as never);
+		await pi.commands.find((command) => command.name === EX_PLANNOTATOR_COMMAND)!.options.handler("", context as never);
 		expect(deliveryCallbacks).toHaveLength(1);
 
 		// Simulate a message_end to keep currentPiSessionId current
@@ -294,7 +299,7 @@ describe("Ex-Plannotator package surface", () => {
 			ui: { notify() {} },
 		};
 
-		await pi.commands[0].options.handler("", contextA as never);
+		await pi.commands.find((command) => command.name === EX_PLANNOTATOR_COMMAND)!.options.handler("", contextA as never);
 		expect(deliveryCallbacks).toHaveLength(1);
 
 		// Switch sessions without a message_end event from the new session.
@@ -346,7 +351,7 @@ describe("Ex-Plannotator package surface", () => {
 			ui: { notify() {} },
 		};
 
-		await pi.commands[0].options.handler("", context as never);
+		await pi.commands.find((command) => command.name === EX_PLANNOTATOR_COMMAND)!.options.handler("", context as never);
 		pi.handlers.get("agent_start")!({} as never, context as never);
 		pi.handlers.get("agent_end")!({} as never, context as never);
 		await resumeCallbacks[0]();
@@ -380,7 +385,7 @@ describe("Ex-Plannotator package surface", () => {
 			ui: { notify() {} },
 		};
 
-		await pi.commands[0].options.handler("", context as never);
+		await pi.commands.find((command) => command.name === EX_PLANNOTATOR_COMMAND)!.options.handler("", context as never);
 		closeHandler?.();
 		pi.handlers.get("session_shutdown")!({} as never, context as never);
 		expect(stopped).toBe(0);
@@ -411,7 +416,7 @@ describe("Ex-Plannotator package surface", () => {
 			ui: { notify() {} },
 		};
 
-		await pi.commands[0].options.handler("", context as never);
+		await pi.commands.find((command) => command.name === EX_PLANNOTATOR_COMMAND)!.options.handler("", context as never);
 
 		// Fire session_shutdown
 		const onShutdown = pi.handlers.get("session_shutdown")!;

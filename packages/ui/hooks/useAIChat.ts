@@ -46,6 +46,10 @@ export interface AskAIParams {
 
 interface UseAIChatOptions {
   context: AIContext | null;
+  /** Host-authorized workspace to execute this Ask AI session in, when needed. */
+  cwd?: string | null;
+  /** Opaque identity of a related live agent session; never a host path. */
+  sourceSession?: { paneId: string; sessionId: string } | null;
   providerId?: string | null;
   model?: string | null;
   reasoningEffort?: string | null;
@@ -195,6 +199,8 @@ function safeAbort(sessionId: string): Promise<unknown> {
 
 export function useAIChat({
   context,
+  cwd,
+  sourceSession,
   providerId,
   model,
   reasoningEffort,
@@ -238,6 +244,8 @@ export function useAIChat({
     try {
       const res = await aiTransport.session({
         context,
+        ...(cwd && { cwd }),
+        ...(sourceSession && { sourceSession }),
         ...(providerId && { providerId }),
         ...(model && { model }),
         ...(reasoningEffort && { reasoningEffort }),
@@ -260,7 +268,7 @@ export function useAIChat({
         setIsCreatingSession(false);
       }
     }
-  }, [context, model, providerId, reasoningEffort, setSessionId]);
+  }, [context, cwd, sourceSession, model, providerId, reasoningEffort, setSessionId]);
 
   // Tell the server to stop the current session's in-flight turn, and resolve
   // once it has. Used by the Stop button and when a new question supersedes a

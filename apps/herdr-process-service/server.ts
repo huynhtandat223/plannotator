@@ -3,7 +3,7 @@
 // existing Ex-Plannotator UI unchanged. It does not scan host processes,
 // persist snapshots, or depend on Docker.
 
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import {
@@ -20,6 +20,7 @@ import {
   parseGitNumstat,
 } from "../../packages/shared/workspace-status";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { ExAICompanionCoordinator } from "./ex-ai-companion";
 import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { Readable } from "node:stream";
@@ -31,6 +32,9 @@ import { prepareLocalReviewDiff } from "../../packages/server/vcs";
 import { loadConfig } from "../../packages/shared/config";
 import { extractFileMentionReferences } from "../../packages/core/file-mention";
 import { isWithinProjectRoot, resolveCodeFile } from "../../packages/shared/resolve-file";
+import { createAIEndpoints, ProviderRegistry, SessionManager } from "../../packages/ai/index";
+import { HerdrPiProvider, HERDR_PI_PROVIDER_ID, type HerdrPiGateway } from "./herdr-pi-provider";
+import { discoverPiModels } from "./pi-models";
 const execFileAsync = promisify(execFile);
 const port = parsePort(process.env.PLANNOTATOR_HERDR_PORT ?? "19432");
 const host = process.env.PLANNOTATOR_HERDR_HOST ?? "0.0.0.0";
@@ -131,6 +135,8 @@ type HerdrReviewSnapshot = {
     latestCompactionTokens?: number;
     /** Git branch resolved from this live pane's working directory. */
     gitBranch?: string;
+    /** Managed Ex AI companion panes remain visible but cannot create chains. */
+    isExAICompanion?: boolean;
   }>;
   selectedMessageId: string | null;
   unreadMessageIds: string[];
@@ -138,14 +144,6 @@ type HerdrReviewSnapshot = {
   sentAnnotationsByMessageId: Record<string, unknown[]>;
   reviewRoundStatus: "open";
   deliveryError: null;
-  scouts?: Array<{
-    workspaceKey: string;
-    workspaceId: string;
-    cwd: string;
-    paneId: string;
-    status: "awaiting-registration" | "running" | "ready" | "failed";
-    error?: string;
-  }>;
 };
 
 export type HerdrPanel = {
@@ -165,6 +163,7 @@ export type HerdrCommandCapability = {
   name: string;
   description?: string;
   source: "extension" | "prompt" | "skill";
+  arguments?: string[];
 };
 
 export type HerdrContextUsage = {
@@ -239,24 +238,6 @@ type GitChangesReviewIdentity = {
   compareMode?: WorkspaceCompareMode;
 };
 
-type ScoutRequest = {
-  requestId: string;
-  sourcePaneId: string;
-  sourceSessionId: string;
-  sourceAssistantMessageId: string;
-  prompt: string;
-};
-type ManagedScout = {
-  workspaceKey: string;
-  workspaceId: string;
-  cwd: string;
-  paneId: string;
-  status: "awaiting-registration" | "running" | "ready" | "failed";
-  pending: ScoutRequest | null;
-  delivered: boolean;
-  error?: string;
-};
-
 // Structured Pi data is optional enrichment only. Herdr remains authoritative
 // for whether the pane is live; this map is process-local and is pruned on each
 // discovery reconciliation.
@@ -267,6 +248,45 @@ const pendingFeedbackDeliveries = new Map<string, PendingFeedbackDelivery>();
 // Browser-originated user instructions are held only until the matching local
 // Pi extension claims them. They are not annotation feedback and never persist.
 const pendingInstructionDeliveries = new Map<string, PendingInstructionDelivery>();
+const exAICompanionDataDir = process.env.PLANNOTATOR_DATA_DIR
+  ? resolve(process.env.PLANNOTATOR_DATA_DIR.replace(/^~(?=$|\/)/, homedir()))
+  : join(homedir(), ".plannotator");
+const exAICompanions = new ExAICompanionCoordinator({
+  panels: discoverPanels,
+  registration: (paneId) => {
+    const registration = panelSessions.get(paneId);
+    return registration && { sessionId: registration.sessionId, messages: registration.messages, model: registration.model?.id, commands: registration.commands };
+  },
+  transcriptPath: findPiSessionFile,
+  async create(input) {
+    const created = await createProcessPanel(input, await discoverPanels());
+    if (!created) throw new Error("Could not create an Ex AI companion Pi pane.");
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      const registration = panelSessions.get(created.paneId);
+      if (registration) return created;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("The companion Pi pane has not registered yet.");
+  },
+  async close(paneId) {
+    await execFileAsync("herdr", ["pane", "close", paneId], { timeout: 10_000 });
+  },
+  async send(paneId, prompt) {
+    await execFileAsync("herdr", ["pane", "run", paneId, prompt], { timeout: 10_000 });
+  },
+  async claim(paneId, sessionId, content) {
+    const deliveryId = randomUUID();
+    pendingInstructionDeliveries.set(deliveryId, { deliveryId, paneId, sessionId, content });
+    return deliveryId;
+  },
+}, exAICompanionDataDir);
+const exAIConfig = loadConfig().exAIChat;
+const DEFAULT_EX_AI_INSTRUCTION = "Act as a concise first-layer assistant for the paired main Pi session. Inspect the main transcript and workspace when useful. Give clear, actionable guidance. Do not modify files or send messages to the main session unless explicitly asked.";
+void exAICompanions.setDefaults({
+  model: exAIConfig?.model?.trim() ?? "",
+  instruction: exAIConfig?.instruction?.trim() || DEFAULT_EX_AI_INSTRUCTION,
+});
 // Full review feedback is preformatted Markdown from the existing review UI.
 // It deliberately reuses the same session-scoped instruction claim transport
 // rather than trying to translate comments back into document annotations.
@@ -303,9 +323,6 @@ const PI_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-
 // request) before the first diff has finished preparing. This map coalesces
 // that asynchronous launch into exactly one isolated review server.
 const pendingGitChangesReviewLaunches = new Map<string, PendingGitChangesReviewLaunch<ActiveGitChangesReview>>();
-// A Scout is a real, independent Pi pane. This map is deliberately transient:
-// Herdr remains liveness authority and a host restart never replays a prompt.
-export const managedScouts = new Map<string, ManagedScout>();
 const UPLOAD_DIR = join(tmpdir(), "plannotator");
 const IMAGE_CONTENT_TYPES: Record<string, string> = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
@@ -761,6 +778,8 @@ export function feedbackBatch(
   const globalAttachments = imageAttachments(body.globalAttachments ?? []);
   if (!globalAttachments) return null;
   const sourceMessages = new Map(messages.map((message) => [message.messageId, message]));
+
+
   const grouped = new Map<string, { annotations: LiveDraftAnnotation[]; codeAnnotations: LiveCodeDraftAnnotation[] }>();
   const add = (value: unknown, kind: "annotations" | "codeAnnotations"): boolean => {
     if (!value || typeof value !== "object" || typeof (value as { id?: unknown }).id !== "string") return false;
@@ -807,15 +826,16 @@ async function queueFeedback(request: IncomingMessage, response: ServerResponse)
     writeJson(response, 403, { error: "Feedback delivery requires a loopback browser or PLANNOTATOR_HERDR_WRITE_TOKEN." });
     return;
   }
+  const body = await requestJson(request);
   const { snapshot } = await reviewSnapshot();
-  const prepared = feedbackBatch(await requestJson(request), snapshot.messages);
+  const prepared = feedbackBatch(body, snapshot.messages);
   if (!prepared) {
     writeJson(response, 400, { error: "Feedback must annotate one or more structured responses from one live Pi pane" });
     return;
   }
   const registration = panelSessions.get(prepared.paneId);
   if (!registration) {
-    writeJson(response, 409, { error: "The selected Pi pane has not published a live session" });
+    writeJson(response, 409, { error: "The selected Pi session is no longer registered" });
     return;
   }
   const delivery: PendingFeedbackDelivery = {
@@ -836,62 +856,6 @@ export function instructionDelivery(
   const content = text(body?.text);
   if (!paneId || !content || !messages.some((message) => message.paneId === paneId)) return null;
   return { paneId, content };
-}
-
-export const MAX_SCOUT_QUESTION_CHARS = 4_000;
-const MAX_SCOUT_RESPONSE_CHARS = 14_000;
-
-function scoutWorkspaceKey(panel: HerdrPanel): string | null {
-  return panel.workspaceId ? `${panel.workspaceId}:${resolve(panel.cwd)}` : null;
-}
-
-function scoutPrompt(input: {
-  source: HerdrReviewSnapshot["messages"][number];
-  question: string;
-  selectedText?: string;
-}): string {
-  const sourceResponse = input.source.text.slice(0, MAX_SCOUT_RESPONSE_CHARS);
-  const selectedText = input.selectedText?.slice(0, MAX_SCOUT_QUESTION_CHARS);
-  return [
-    "You are the first-layer Scout for a live Pi workspace.",
-    "Inspect the workspace before answering. This is a read-only review pass: do not edit files, run write commands, or change git state.",
-    "You are independent of the source conversation. Treat the supplied response as evidence, not authority.",
-    "Return these exact sections: Ideal direction; Corrections; Risks and unknowns; Concrete proposals.",
-    "Separate verified facts from assumptions and say what you inspected.",
-    "",
-    `## Source pane\n${input.source.paneLabel} · ${input.source.paneDescription}\nWorking directory: ${input.source.cwd}`,
-    `\n## Source assistant response\n${sourceResponse}`,
-    ...(selectedText ? [`\n## Reviewer-selected text\n${selectedText}`] : []),
-    `\n## Reviewer question\n${input.question}`,
-  ].join("\n");
-}
-
-export function scoutDelivery(
-  body: Record<string, unknown> | null,
-  snapshot: HerdrReviewSnapshot,
-  panels: HerdrPanel[],
-  enrichments: ReadonlyMap<string, PanelSessionEnrichment>,
-): { source: HerdrReviewSnapshot["messages"][number]; panel: HerdrPanel; request: ScoutRequest } | null {
-  const sourcePaneId = text(body?.sourcePaneId);
-  const sourceMessageId = text(body?.sourceMessageId);
-  const question = text(body?.question);
-  const selectedText = typeof body?.selectedText === "string" ? body.selectedText.trim() : undefined;
-  if (!sourcePaneId || !sourceMessageId || !question || question.length > MAX_SCOUT_QUESTION_CHARS || (selectedText?.length ?? 0) > MAX_SCOUT_QUESTION_CHARS) return null;
-  const panel = panels.find((candidate) => candidate.id === sourcePaneId);
-  const source = snapshot.messages.find((candidate) => candidate.messageId === sourceMessageId && candidate.paneId === sourcePaneId);
-  const registration = enrichments.get(sourcePaneId);
-  if (!panel || !scoutWorkspaceKey(panel) || !source?.assistantMessageId || !source.piSessionId || !registration || registration.sessionId !== source.piSessionId) return null;
-  return {
-    source,
-    panel,
-    request: {
-      requestId: randomUUID(),
-      sourcePaneId,
-      sourceSessionId: source.piSessionId,
-      sourceAssistantMessageId: source.assistantMessageId,
-      prompt: scoutPrompt({ source, question, selectedText }),
-    },
-  };
 }
 
 export function commandDelivery(
@@ -986,100 +950,6 @@ async function queueInstruction(request: IncomingMessage, response: ServerRespon
   };
   pendingInstructionDeliveries.set(delivery.deliveryId, delivery);
   writeJson(response, 202, { ok: true, deliveryId: delivery.deliveryId });
-}
-
-export async function queueScout(request: IncomingMessage, response: ServerResponse): Promise<void> {
-  if (!canWriteFeedback(request)) {
-    writeJson(response, 403, { error: "Starting a Scout requires a loopback, Tailscale, or write-token browser." });
-    return;
-  }
-  const { panels, snapshot } = await reviewSnapshot();
-  const prepared = scoutDelivery(await requestJson(request), snapshot, panels, panelSessions);
-  if (!prepared) {
-    writeJson(response, 400, { error: "A current structured source response, live pane session, and Scout question are required." });
-    return;
-  }
-  const workspaceKey = scoutWorkspaceKey(prepared.panel)!;
-  let existing = managedScouts.get(workspaceKey);
-
-  // Harden: Adopt an existing "Ex-Plannotator Scout" panel if it is already live in the workspace and has matching cwd
-  if (!existing) {
-    const discoveredScoutPanel = panels.find(
-      (p) => p.panel === "Ex-Plannotator Scout" &&
-             p.workspaceId === prepared.panel.workspaceId &&
-             resolve(p.cwd) === resolve(prepared.panel.cwd)
-    );
-    if (discoveredScoutPanel) {
-      existing = {
-        workspaceKey,
-        workspaceId: prepared.panel.workspaceId ?? "",
-        cwd: resolve(prepared.panel.cwd),
-        paneId: discoveredScoutPanel.id,
-        // A service restart intentionally forgets requests. If it discovers an
-        // already-working Scout, observe that turn until Herdr says it is idle;
-        // do not inject another briefing into a busy pane.
-        status: discoveredScoutPanel.status === "working"
-          ? "running"
-          : panelSessions.has(discoveredScoutPanel.id) ? "ready" : "awaiting-registration",
-        pending: null,
-        delivered: discoveredScoutPanel.status === "working",
-      };
-      managedScouts.set(workspaceKey, existing);
-    }
-  }
-
-  if (existing?.status === "running") {
-    writeJson(response, 409, { error: "This workspace's Scout is already inspecting a request." });
-    return;
-  }
-
-  if (existing && panels.some((panel) => panel.id === existing.paneId)) {
-    const isRegistered = !!panelSessions.get(existing.paneId)?.sessionId;
-    if (isRegistered) {
-      existing.pending = prepared.request;
-      existing.status = "running";
-      existing.delivered = false;
-      delete existing.error;
-      void execFileAsync("herdr", ["pane", "run", existing.paneId, prepared.request.prompt], { timeout: 10_000 })
-        .then(() => {
-          existing!.delivered = true;
-        })
-        .catch((error: unknown) => {
-          existing!.status = "failed";
-          existing!.error = `Failed to deliver prompt to pane: ${error instanceof Error ? error.message : String(error)}`;
-        });
-      writeJson(response, 202, { ok: true, paneId: existing.paneId, status: "running", reused: true });
-      return;
-    } else {
-      existing.pending = prepared.request;
-      existing.status = "awaiting-registration";
-      existing.delivered = false;
-      delete existing.error;
-      writeJson(response, 202, { ok: true, paneId: existing.paneId, status: "awaiting-registration", reused: true });
-      return;
-    }
-  }
-
-  const created = await createProcessPanel({
-    workspaceId: prepared.panel.workspaceId,
-    cwd: prepared.panel.cwd,
-    panelName: "Ex-Plannotator Scout",
-    command: "pi",
-  }, panels);
-  if (!created) {
-    writeJson(response, 503, { error: "Could not create a Scout Pi pane in this workspace." });
-    return;
-  }
-  managedScouts.set(workspaceKey, {
-    workspaceKey,
-    workspaceId: prepared.panel.workspaceId ?? "",
-    cwd: resolve(prepared.panel.cwd),
-    paneId: created.paneId,
-    status: "awaiting-registration",
-    pending: prepared.request,
-    delivered: false,
-  });
-  writeJson(response, 202, { ok: true, paneId: created.paneId, status: "awaiting-registration", reused: false });
 }
 
 async function queueCommand(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -1245,8 +1115,11 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
     const name = text(command.name);
     const description = text(command.description) ?? undefined;
     const source = command.source;
+    const argumentsList = Array.isArray(command.arguments)
+      ? command.arguments.filter((argument): argument is string => typeof argument === "string" && argument.length > 0 && argument.length <= 300).slice(0, 200)
+      : undefined;
     return name && /^[-\w:.]+$/.test(name) && (source === "extension" || source === "prompt" || source === "skill")
-      ? [{ name, ...(description ? { description } : {}), source }]
+      ? [{ name, ...(description ? { description } : {}), source, ...(argumentsList?.length ? { arguments: [...new Set(argumentsList)] } : {}) }]
       : [];
   });
   if (normalizedCommands.length !== commands.length || new Set(normalizedCommands.map((command) => command.name)).size !== normalizedCommands.length) {
@@ -1305,31 +1178,10 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
     return;
   }
   panelSessions.set(paneId, incoming);
+  await exAICompanions.reconcile();
   // Publish the new structured response against the same host snapshot used by
   // /api/plan and all connected browsers; do not wait for the next poll.
   await refreshLiveState();
-  const scout = [...managedScouts.values()].find((candidate) => candidate.paneId === paneId);
-  if (scout?.status === "awaiting-registration" && scout.pending) {
-    // Registration is the readiness gate: never send a prompt into an unbound
-    // pane, and reject context that crossed a source-session transition.
-    const sourceRegistration = panelSessions.get(scout.pending.sourcePaneId);
-    if (sourceRegistration?.sessionId !== scout.pending.sourceSessionId) {
-      scout.status = "failed";
-      scout.error = "Source session changed before registration.";
-    } else {
-      scout.status = "running";
-      scout.delivered = false;
-      delete scout.error;
-      void execFileAsync("herdr", ["pane", "run", paneId, scout.pending.prompt], { timeout: 10_000 })
-        .then(() => {
-          scout.delivered = true;
-        })
-        .catch((error: unknown) => {
-          scout.status = "failed";
-          scout.error = `Failed to deliver prompt to pane: ${error instanceof Error ? error.message : String(error)}`;
-        });
-    }
-  }
   writeJson(response, 200, { ok: true });
 }
 
@@ -1481,37 +1333,7 @@ export function reviewSnapshotFromPanels(
   enrichments: ReadonlyMap<string, PanelSessionEnrichment> = new Map(),
 ): HerdrReviewSnapshot {
   const livePaneIds = new Set(panels.map((panel) => panel.id));
-
-  // Prune duplicates, stale keys and reconcile statuses based on pane liveness/idle status
-  const seenPaneIds = new Set<string>();
-  for (const [workspaceKey, scout] of managedScouts) {
-    if (!livePaneIds.has(scout.paneId)) {
-      managedScouts.delete(workspaceKey);
-      continue;
-    }
-    const panel = panels.find((p) => p.id === scout.paneId);
-    if (!panel) {
-      managedScouts.delete(workspaceKey);
-      continue;
-    }
-    const canonicalKey = scoutWorkspaceKey(panel);
-    if (workspaceKey !== canonicalKey) {
-      managedScouts.delete(workspaceKey);
-      continue;
-    }
-    if (seenPaneIds.has(scout.paneId)) {
-      managedScouts.delete(workspaceKey);
-      continue;
-    }
-    seenPaneIds.add(scout.paneId);
-
-    // Scout must remain running until Herdr snapshot reports its pane is idle
-    if (scout.status === "running" && scout.delivered && panel.status === "idle") {
-      scout.status = "ready";
-      scout.pending = null;
-      scout.delivered = false;
-    }
-  }
+  const isCompanionPane = (paneId: string) => exAICompanions.isCompanionPane(paneId);
 
   const selected = panels.find((panel) => panel.id === preferredPanelId)
     ?? panels.find((panel) => panel.focused)
@@ -1537,7 +1359,6 @@ export function reviewSnapshotFromPanels(
         agentStatus: panel.status,
         cwd: panel.cwd,
         workspaceId: panel.workspaceId,
-        workspaceKey: scoutWorkspaceKey(panel) ?? undefined,
         commands: enrichments.get(panel.id)?.commands ?? [],
         ...(enrichments.get(panel.id)?.contextUsage ? { contextUsage: enrichments.get(panel.id)!.contextUsage } : {}),
         ...(enrichments.get(panel.id)?.model ? { model: enrichments.get(panel.id)!.model } : {}),
@@ -1545,6 +1366,7 @@ export function reviewSnapshotFromPanels(
         ...(enrichments.get(panel.id)?.totalUsedTokens !== undefined ? { totalUsedTokens: enrichments.get(panel.id)!.totalUsedTokens } : {}),
         ...(enrichments.get(panel.id)?.latestCompactionTokens !== undefined ? { latestCompactionTokens: enrichments.get(panel.id)!.latestCompactionTokens } : {}),
         ...(panel.gitBranch ? { gitBranch: panel.gitBranch } : {}),
+        ...(isCompanionPane(panel.id) ? { isExAICompanion: true } : {}),
       }];
     }
     return responses.map((response, index) => ({
@@ -1563,7 +1385,6 @@ export function reviewSnapshotFromPanels(
       agentStatus: panel.status,
       cwd: panel.cwd,
       workspaceId: panel.workspaceId,
-      workspaceKey: scoutWorkspaceKey(panel) ?? undefined,
       commands: enrichments.get(panel.id)!.commands,
       ...(enrichments.get(panel.id)?.contextUsage ? { contextUsage: enrichments.get(panel.id)!.contextUsage } : {}),
       ...(enrichments.get(panel.id)?.model ? { model: enrichments.get(panel.id)!.model } : {}),
@@ -1571,6 +1392,7 @@ export function reviewSnapshotFromPanels(
       ...(enrichments.get(panel.id)?.totalUsedTokens !== undefined ? { totalUsedTokens: enrichments.get(panel.id)!.totalUsedTokens } : {}),
       ...(enrichments.get(panel.id)?.latestCompactionTokens !== undefined ? { latestCompactionTokens: enrichments.get(panel.id)!.latestCompactionTokens } : {}),
       ...(panel.gitBranch ? { gitBranch: panel.gitBranch } : {}),
+      ...(isCompanionPane(panel.id) ? { isExAICompanion: true } : {}),
     }));
   });
   const selectedMessage = selected
@@ -1585,14 +1407,6 @@ export function reviewSnapshotFromPanels(
     sentAnnotationsByMessageId: {},
     reviewRoundStatus: "open",
     deliveryError: null,
-    scouts: [...managedScouts.values()].map((scout) => ({
-      workspaceKey: scout.workspaceKey,
-      workspaceId: scout.workspaceId,
-      cwd: scout.cwd,
-      paneId: scout.paneId,
-      status: scout.status,
-      ...(scout.error ? { error: scout.error } : {}),
-    })),
   };
 }
 
@@ -1626,7 +1440,177 @@ export function commandArgv(command: string): string[] | null {
   return argv.length > 0 ? argv : null;
 }
 
-type HerdrCliResponse = { result?: { tab?: { tab_id?: unknown }; agent?: { pane_id?: unknown } } };
+function commandOnPath(command: string): boolean {
+  try {
+    execFileSync(process.platform === "win32" ? "where" : "which", [command], {
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function shellQuote(argument: string): string {
+  return `'${argument.replace(/'/g, "'\\\"'\\\"'")}'`;
+}
+
+export async function resolveHerdrAIWorkspace(requestedCwd?: string): Promise<string> {
+  if (!requestedCwd || !isAbsolute(requestedCwd)) {
+    throw new Error("Select a live Pi response before starting Ask AI.");
+  }
+  const requested = resolve(requestedCwd);
+  const panels = await discoverPanels();
+  const panel = panels.find((candidate) => resolve(candidate.cwd) === requested && candidate.workspaceId);
+  if (!panel) {
+    throw new Error("The selected workspace is no longer a live Herdr Pi workspace.");
+  }
+  return panel.cwd;
+}
+
+/**
+ * Resolve only an exact currently registered pane/session pair. The browser
+ * sends opaque IDs, while the trusted local registration supplies any path.
+ * Missing persisted-session data intentionally degrades to a normal Ask AI
+ * session rather than exposing a host path or blocking assistance.
+ */
+export async function resolveHerdrAISourceSession(
+  requested?: { paneId?: string; sessionId?: string },
+  authorizedCwd?: string,
+  knownPanels?: ReadonlyArray<HerdrPanel>,
+  registrations: ReadonlyMap<string, PanelSessionEnrichment> = panelSessions,
+): Promise<{ paneId: string; sessionId: string; sessionFile?: string } | undefined> {
+  const paneId = text(requested?.paneId);
+  const sessionId = text(requested?.sessionId);
+  if (!paneId || !sessionId) return undefined;
+
+  const panels = knownPanels ?? await discoverPanels();
+  const panel = panels.find((candidate) => candidate.id === paneId);
+  if (!panel) {
+    throw new Error("The selected Pi session is no longer live.");
+  }
+  if (authorizedCwd && resolve(panel.cwd) !== resolve(authorizedCwd)) {
+    throw new Error("The selected Pi session does not belong to this workspace.");
+  }
+  const registration = registrations.get(paneId);
+  if (!registration || registration.sessionId !== sessionId) {
+    throw new Error("The selected Pi session has changed.");
+  }
+  return {
+    paneId,
+    sessionId,
+    ...(registration.sessionFile ? { sessionFile: registration.sessionFile } : {}),
+  };
+}
+
+const herdrPiGateway: HerdrPiGateway = {
+  async launch({ cwd, label, model, thinking }) {
+    const panels = await discoverPanels();
+    const owner = panels.find((panel) => resolve(panel.cwd) === resolve(cwd) && panel.workspaceId);
+    if (!owner?.workspaceId) {
+      throw new Error("The selected workspace is no longer a live Herdr Pi workspace.");
+    }
+    const command = [
+      "pi",
+      "--tools", shellQuote("read,grep,find,ls"),
+      ...(model ? ["--model", shellQuote(model)] : []),
+      ...(thinking ? ["--thinking", shellQuote(thinking)] : []),
+    ].join(" ");
+    const created = await createProcessPanel({
+      workspaceId: owner.workspaceId,
+      cwd: owner.cwd,
+      panelName: label,
+      command,
+    }, panels);
+    if (!created) throw new Error("Could not create an Ask AI Pi pane in this workspace.");
+    return created;
+  },
+  registration(paneId) {
+    const registration = panelSessions.get(paneId);
+    return registration && {
+      sessionId: registration.sessionId,
+      messages: registration.messages,
+      model: registration.model?.id,
+      commands: registration.commands,
+    };
+  },
+  async send(paneId, prompt) {
+    await execFileAsync("herdr", ["pane", "run", paneId, prompt], { timeout: 10_000 });
+  },
+  async close(pane) {
+    if (pane.tabId) {
+      await execFileAsync("herdr", ["tab", "close", pane.tabId], { timeout: 10_000 });
+      return;
+    }
+    await execFileAsync("herdr", ["pane", "close", pane.paneId], { timeout: 10_000 });
+  },
+};
+
+const herdrAIRegistry = new ProviderRegistry();
+/** Models populated lazily on the first capabilities call so server startup is never blocked by `pi --list-models`. */
+const herdrPiModels = new Array<{ id: string; label: string; default?: boolean }>();
+let herdrPiModelsResolved = false;
+let herdrPiModelsPromise: Promise<void> | null = null;
+async function ensureHerdrPiModels(): Promise<void> {
+  if (herdrPiModelsResolved) return;
+  herdrPiModelsPromise ??= (async () => {
+    const models = await discoverPiModels();
+    herdrPiModels.length = 0;
+    herdrPiModels.push(...models.map((model, index) => ({
+      ...model,
+      ...(index === 0 ? { default: true } : {}),
+    })));
+  })();
+  await herdrPiModelsPromise;
+  herdrPiModelsResolved = true;
+}
+if (commandOnPath("pi")) {
+  herdrAIRegistry.register(
+    new HerdrPiProvider({ gateway: herdrPiGateway, models: herdrPiModels }),
+    HERDR_PI_PROVIDER_ID,
+  );
+}
+const herdrAISessionManager = new SessionManager();
+const herdrAIEndpoints = createAIEndpoints({
+  registry: herdrAIRegistry,
+  sessionManager: herdrAISessionManager,
+  getCwd: resolveHerdrAIWorkspace,
+  getSourceSession: resolveHerdrAISourceSession,
+  beforeCapabilities: ensureHerdrPiModels,
+});
+
+async function handleHerdrAIRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: URL,
+): Promise<boolean> {
+  if (!url.pathname.startsWith("/api/ai/")) return false;
+  if (url.pathname !== "/api/ai/capabilities" && !canWriteFeedback(request)) {
+    writeJson(response, 403, { error: "Ask AI requires a loopback, Tailscale, or write-token browser." });
+    return true;
+  }
+  const handler = herdrAIEndpoints[url.pathname as keyof typeof herdrAIEndpoints];
+  if (!handler) {
+    writeJson(response, 404, { error: "Not found" });
+    return true;
+  }
+  try {
+    const webResponse = await handler(webRequest(request));
+    const headers: Record<string, string> = {};
+    webResponse.headers.forEach((value, key) => { headers[key] = value; });
+    response.writeHead(webResponse.status, headers);
+    if (webResponse.body) {
+      Readable.fromWeb(webResponse.body as never).pipe(response);
+    } else {
+      response.end();
+    }
+  } catch (error) {
+    writeJson(response, 500, { error: error instanceof Error ? error.message : "Ask AI endpoint error" });
+  }
+  return true;
+}
+
+type HerdrCliResponse = { result?: { tab?: { tab_id?: unknown }; root_pane?: { pane_id?: unknown }; agent?: { pane_id?: unknown } } };
 
 export async function createProcessPanel(
   body: Record<string, unknown> | null,
@@ -1649,15 +1633,22 @@ export async function createProcessPanel(
   if (!directory.isDirectory()) return null;
 
   // A dedicated background tab preserves every existing pane and its focus.
-  // Herdr uses the tab's initial pane for agent.start, so this produces one
-  // named Pi panel rather than changing an existing layout.
+  // `tab create` opens the tab with an empty shell root pane; `agent start
+  // --tab` then adds the Pi pane beside it. Close that initial root pane so
+  // the tab holds exactly the one named Pi panel instead of a stray shell.
   const tabResult = await execFileAsync("herdr", ["tab", "create", "--workspace", workspaceId, "--cwd", cwd, "--label", panelName, "--no-focus"], { timeout: 10_000 });
-  const tabId = text((JSON.parse(tabResult.stdout) as HerdrCliResponse).result?.tab?.tab_id);
+  const parsedTab = (JSON.parse(tabResult.stdout) as HerdrCliResponse).result;
+  const tabId = text(parsedTab?.tab?.tab_id);
+  const rootPaneId = text(parsedTab?.root_pane?.pane_id);
   if (!tabId) throw new Error("Herdr did not return the new tab");
   try {
     const agentResult = await execFileAsync("herdr", ["agent", "start", panelName, "--workspace", workspaceId, "--tab", tabId, "--cwd", cwd, "--no-focus", "--", ...argv], { timeout: 10_000 });
     const paneId = text((JSON.parse(agentResult.stdout) as HerdrCliResponse).result?.agent?.pane_id);
     if (!paneId) throw new Error("Herdr did not return the new Pi pane");
+    // The agent lands in its own pane; retire the leftover empty root pane.
+    if (rootPaneId && rootPaneId !== paneId) {
+      await execFileAsync("herdr", ["pane", "close", rootPaneId], { timeout: 10_000 }).catch(() => {});
+    }
     return { paneId, panelName };
   } catch (error) {
     // Avoid leaving an empty tab behind if the process command cannot start.
@@ -1716,9 +1707,6 @@ async function readLiveState(): Promise<HerdrLiveState> {
   for (const paneId of panelSessions.keys()) {
     if (!livePaneIds.has(paneId)) panelSessions.delete(paneId);
   }
-  for (const [workspaceKey, scout] of managedScouts) {
-    if (!livePaneIds.has(scout.paneId)) managedScouts.delete(workspaceKey);
-  }
   for (const review of activeGitChangesReviews.values()) {
     if (!livePaneIds.has(review.paneId) || panelSessions.get(review.paneId)?.sessionId !== review.sessionId) {
       stopGitChangesReview(review);
@@ -1752,7 +1740,10 @@ async function readLiveState(): Promise<HerdrLiveState> {
 const liveSnapshotPublisher = new LiveSnapshotPublisher(readLiveState);
 
 async function refreshLiveState(): Promise<PublishedLiveSnapshot<HerdrLiveState>> {
-  return liveSnapshotPublisher.refresh();
+  const published = await liveSnapshotPublisher.refresh();
+  // Fresh Herdr snapshots are liveness authority for durable Ex AI pair reconciliation.
+  await exAICompanions.reconcile();
+  return published;
 }
 
 async function reviewSnapshot(): Promise<HerdrLiveState> {
@@ -2431,6 +2422,73 @@ async function serveWorkspaceDocument(response: ServerResponse, url: URL): Promi
   }
 }
 
+async function serveExAICompanion(response: ServerResponse, url: URL): Promise<void> {
+  const paneId = text(url.searchParams.get("paneId"));
+  const sessionId = text(url.searchParams.get("sessionId"));
+  if (!paneId || !sessionId) {
+    writeJson(response, 400, { error: "paneId and sessionId are required" });
+    return;
+  }
+  await Promise.all([exAICompanions.reconcile(), ensureHerdrPiModels()]);
+  const state = await exAICompanions.state({ paneId, sessionId });
+  writeJson(response, 200, {
+    ...state,
+    defaults: {
+      ...state.defaults,
+      model: herdrPiModels.some((model) => model.id === state.defaults.model)
+        ? state.defaults.model
+        : herdrPiModels.find((model) => model.default)?.id || herdrPiModels[0]?.id || "",
+    },
+    models: herdrPiModels.map(({ id, label }) => ({ id, label })),
+  });
+}
+
+async function mutateExAICompanion(request: IncomingMessage, response: ServerResponse, action: "start" | "turn" | "handoff" | "stop"): Promise<void> {
+  if (!canWriteFeedback(request)) {
+    writeJson(response, 403, { error: "Ex AI Chat requires a loopback, Tailscale, or write-token browser." });
+    return;
+  }
+  const body = await requestJson(request);
+  const paneId = text(body?.paneId);
+  const sessionId = text(body?.sessionId);
+  if (!paneId || !sessionId) {
+    writeJson(response, 400, { error: "paneId and sessionId are required" });
+    return;
+  }
+  const main = { paneId, sessionId };
+  if (action === "start") {
+    const model = text(body?.model);
+    const instruction = typeof body?.instruction === "string" ? body.instruction.trim() : "";
+    if (!model || model.length > 300 || instruction.length > 8_000) {
+      writeJson(response, 400, { error: "A valid model and base instruction are required" });
+      return;
+    }
+    writeJson(response, 201, await exAICompanions.start(main, { model, instruction }));
+    return;
+  }
+  if (action === "stop") {
+    writeJson(response, 200, await exAICompanions.stop(main));
+    return;
+  }
+  if (action === "turn") {
+    const turn = text(body?.text);
+    if (!turn || turn.length > 16_000) {
+      writeJson(response, 400, { error: "A message is required" });
+      return;
+    }
+    writeJson(response, 202, await exAICompanions.sendTurn(main, turn));
+    return;
+  }
+  const requestId = text(body?.requestId);
+  const content = text(body?.text);
+  if (!requestId || requestId.length > 200 || !content || content.length > 16_000) {
+    writeJson(response, 400, { error: "A stable request ID and message are required" });
+    return;
+  }
+  const result = await exAICompanions.handoff(main, requestId, content);
+  writeJson(response, 202, { ...await exAICompanions.state(main), handoff: result });
+}
+
 async function servePlan(response: ServerResponse): Promise<void> {
   const { revision, value: { panels, snapshot } } = await refreshLiveState();
   const selected = panels.find((panel) => panel.focused) ?? panels[0] ?? null;
@@ -2516,8 +2574,8 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
     response.end('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#18181b"/><path fill="#fafafa" d="M18 14h28v8H28v8h16v8H28v12h-10z"/></svg>');
     return;
   }
-  if (request.method === "GET" && url.pathname === "/api/ai/capabilities") {
-    writeJson(response, 200, { available: false, providers: [] });
+  if (url.pathname.startsWith("/api/ai/")) {
+    void handleHerdrAIRequest(request, response, url);
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/draft") {
@@ -2557,7 +2615,30 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/plan") {
-    void servePlan(response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
+    void servePlan(response).catch((error: unknown) => {
+      console.error("[plannotator-herdr] Failed to build live plan snapshot", error);
+      writeJson(response, 503, { error: "Herdr snapshot unavailable" });
+    });
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/api/ex-ai-companion") {
+    void serveExAICompanion(response, url).catch((error: unknown) => writeJson(response, 503, { error: error instanceof Error ? error.message : "Ex AI Chat unavailable" }));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/ex-ai-companion/start") {
+    void mutateExAICompanion(request, response, "start").catch((error: unknown) => writeJson(response, 409, { error: error instanceof Error ? error.message : "Could not start Ex AI Chat" }));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/ex-ai-companion/turn") {
+    void mutateExAICompanion(request, response, "turn").catch((error: unknown) => writeJson(response, 409, { error: error instanceof Error ? error.message : "Could not send Ex AI Chat turn" }));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/ex-ai-companion/stop") {
+    void mutateExAICompanion(request, response, "stop").catch((error: unknown) => writeJson(response, 409, { error: error instanceof Error ? error.message : "Could not stop Ex AI Chat" }));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/ex-ai-companion/handoff") {
+    void mutateExAICompanion(request, response, "handoff").catch((error: unknown) => writeJson(response, 409, { error: error instanceof Error ? error.message : "Could not hand off Ex AI Chat response" }));
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/session") {
@@ -2617,10 +2698,6 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
     void openGitChangesReview(request, response).catch((error: unknown) => writeJson(response, 500, { error: error instanceof Error ? error.message : "Could not open full review" }));
     return;
   }
-  if (request.method === "POST" && url.pathname === "/api/scout") {
-    void queueScout(request, response).catch((error: unknown) => writeJson(response, 503, { error: error instanceof Error ? error.message : "Could not start Scout" }));
-    return;
-  }
   if (request.method === "POST" && url.pathname === "/api/command") {
     void queueCommand(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
     return;
@@ -2668,7 +2745,11 @@ if (import.meta.main) {
   void refreshLiveState().catch(() => {});
   const refreshTimer = setInterval(() => void refreshLiveState().catch(() => {}), HERDR_SNAPSHOT_POLL_MS);
   const server = createServer(serve);
-  server.on("close", () => clearInterval(refreshTimer));
+  server.on("close", () => {
+    clearInterval(refreshTimer);
+    herdrAISessionManager.disposeAll();
+    herdrAIRegistry.disposeAll();
+  });
   server.listen(port, host, () => {
     console.log(`Plannotator Herdr service listening on http://${host}:${port}`);
   });
