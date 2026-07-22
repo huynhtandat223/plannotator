@@ -10,13 +10,20 @@ type SessionEntry = {
 
 type TextBlock = { type?: unknown; text?: unknown };
 
-function assistantText(message: unknown): string | null {
+/**
+ * Which assistant content blocks become the Reviewed Source. `"text"` keeps the
+ * final response blocks reviewed by /ex-plannotator-last; `"thinking"` surfaces
+ * the assistant's reasoning blocks for /ex-plannotator-thinking.
+ */
+export type AssistantBlockKind = "text" | "thinking";
+
+function assistantText(message: unknown, kind: AssistantBlockKind = "text"): string | null {
 	if (!message || typeof message !== "object") return null;
 	const candidate = message as { role?: unknown; content?: unknown };
 	if (candidate.role !== "assistant" || !Array.isArray(candidate.content)) return null;
 	const text = candidate.content
 		.filter((block): block is TextBlock => !!block && typeof block === "object")
-		.filter((block) => block.type === "text" && typeof block.text === "string")
+		.filter((block) => block.type === kind && typeof block.text === "string")
 		.map((block) => block.text as string)
 		.join("\n");
 	return text.trim() ? text : null;
@@ -31,13 +38,14 @@ function normalizeTimestamp(value: unknown): string | undefined {
 
 export function getActiveBranchAssistantMessages(
 	ctx: ExtensionContext,
+	kind: AssistantBlockKind = "text",
 ): LiveAssistantMessage[] {
 	const branch = ctx.sessionManager.getBranch() as SessionEntry[];
 	const messages: LiveAssistantMessage[] = [];
 	for (let index = branch.length - 1; index >= 0; index -= 1) {
 		const entry = branch[index];
 		if (entry.type !== "message") continue;
-		const text = assistantText(entry.message);
+		const text = assistantText(entry.message, kind);
 		if (!text) continue;
 		const timestamp = normalizeTimestamp(entry.timestamp);
 		messages.push({
@@ -52,6 +60,25 @@ export function getActiveBranchAssistantMessages(
 export function getRecentAssistantMessages(
 	ctx: ExtensionContext,
 	limit = 25,
+	kind: AssistantBlockKind = "text",
 ): LiveAssistantMessage[] {
-	return getActiveBranchAssistantMessages(ctx).slice(0, limit);
+	return getActiveBranchAssistantMessages(ctx, kind).slice(0, limit);
+}
+
+/**
+ * Reviewed Source variant that surfaces the assistant's thinking/reasoning
+ * blocks instead of the final text blocks. Backs /ex-plannotator-thinking while
+ * /ex-plannotator-last keeps its text-only snapshot unchanged.
+ */
+export function getActiveBranchAssistantThinking(
+	ctx: ExtensionContext,
+): LiveAssistantMessage[] {
+	return getActiveBranchAssistantMessages(ctx, "thinking");
+}
+
+export function getRecentAssistantThinking(
+	ctx: ExtensionContext,
+	limit = 25,
+): LiveAssistantMessage[] {
+	return getRecentAssistantMessages(ctx, limit, "thinking");
 }

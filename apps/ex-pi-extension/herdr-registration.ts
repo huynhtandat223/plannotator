@@ -25,6 +25,7 @@ export type HerdrCommandCapability = {
 export const EX_PLANNOTATOR_NEW_COMMAND = "ex-plannotator-new";
 export const EX_PLANNOTATOR_MODEL_COMMAND = "ex-plannotator-model";
 export const EX_PLANNOTATOR_RELOAD_COMMAND = "ex-plannotator-reload";
+export const EX_PLANNOTATOR_THINKING_COMMAND = "ex-plannotator-thinking";
 
 export type HerdrContextUsage = {
 	tokens: number | null;

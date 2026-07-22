@@ -19,11 +19,13 @@
   "pi": {
     "extensions": [
       "./",
-      "./plan-extension.ts"
+      "./plan-extension.ts",
+      "./thinking-extension.ts"
     ]
   },
   "files": [
     "index.ts",
+    "thinking-extension.ts",
     "assistant-message.ts",
     "herdr-registration.ts",
     "browser.ts",
