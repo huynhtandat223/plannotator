@@ -37,7 +37,7 @@ const GITBUTLER_WORKSPACE_REFS = new Set([
 const STATUS_TIMEOUT_MS = 30_000;
 const VERSION_TIMEOUT_MS = 5_000;
 const OBJECT_ID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
-const STATUS_CACHE_MS = 1_000;
+const STATUS_CACHE_MS = 5_000;
 
 /** Runtime operations needed by the shared GitButler provider. */
 export interface ReviewGitButlerRuntime extends ReviewGitRuntime {

@@ -96,7 +96,10 @@ describe('live message session scope', () => {
     expect(result.followNextPaneResponseReset).toBe(true);
   });
 
-  test('follows Herdr’s focused-pane selection until the reviewer picks a source', () => {
+  test('keeps the current response and reports the focused pane when a newer response finishes elsewhere', () => {
+    // Reviewer is viewing a real response in p1 (no manual pick). A response
+    // finishes in p2 and Herdr focuses it. We must not steal the tab: keep p1
+    // and report p2 so the caller can offer a one-tap jump instead.
     const previous = [message('w:p1:response-1', 'w:p1', 'session-1', 'response-1')];
     const next = [
       message('w:p1:response-1', 'w:p1', 'session-1', 'response-1'),
@@ -111,7 +114,8 @@ describe('live message session scope', () => {
       null,
     );
 
-    expect(result.nextSelectedMessageId).toBe('w:p2:response-1');
+    expect(result.nextSelectedMessageId).toBe('w:p1:response-1');
+    expect(result.pendingFocusMessageId).toBe('w:p2:response-1');
   });
 
   test('follows the focus transition from a waiting pane to a structured response in another pane before user selection', () => {

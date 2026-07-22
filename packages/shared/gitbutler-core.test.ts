@@ -601,7 +601,7 @@ describe("GitButler diffs and expansion", () => {
     expect(fixture.gitCalls.some((args) => args[0] === "diff")).toBe(true);
   });
 
-  test("pins a committed patch, context, and fingerprint to one status revision across the cache TTL", async () => {
+  test("pins a committed patch, context, and fingerprint to one status revision across the cache TTL", { timeout: 10_000 }, async () => {
     const fixture = createRuntime();
     const committedDiffType = "gitbutler:branch:feature%2Ftop%20lane" as const;
     const originalRunBut = fixture.runtime.runBut.bind(fixture.runtime);
@@ -642,7 +642,7 @@ describe("GitButler diffs and expansion", () => {
       ROOT,
     );
     await diffStarted;
-    await Bun.sleep(1_050);
+    await Bun.sleep(5_050);
     currentStatus = JSON.stringify(newerStatus);
     const newContext = await getGitButlerContext(fixture.runtime, ROOT);
     expect(newContext.defaultBranch).toBe(newerMergeBase);
