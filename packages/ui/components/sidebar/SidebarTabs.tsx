@@ -19,6 +19,8 @@ interface SidebarTabsProps {
   showChangesTab?: boolean;
   showMessagesTab?: boolean;
   messagesTabTitle?: string;
+  /** A newer response finished in another pane while the reviewer stayed here. */
+  hasPendingResponse?: boolean;
   showAgentTerminalTab?: boolean;
   isAgentTerminalOpen?: boolean;
   isAgentTerminalRunning?: boolean;
@@ -37,6 +39,7 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({
   showChangesTab,
   showMessagesTab,
   messagesTabTitle = "Pick a different message",
+  hasPendingResponse,
   showAgentTerminalTab,
   isAgentTerminalOpen,
   isAgentTerminalRunning,
@@ -123,9 +126,11 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({
           title={messagesTabTitle}
         >
           <MessagesIcon />
-          {hasMessageAnnotations && (
+          {hasPendingResponse ? (
+            <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+          ) : hasMessageAnnotations ? (
             <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-primary" />
-          )}
+          ) : null}
         </button>
       )}
 

@@ -534,6 +534,12 @@ const App: React.FC = () => {
   // a single pane session transition cannot discard drafts or toast repeatedly.
   const liveSnapshotMessagesRef = useRef<PickerMessage[]>([]);
   const liveSnapshotRevisionRef = useRef<number | null>(null);
+  // The last focused-in-another-pane response we already notified about, so
+  // repeated snapshots for the same response don't re-toast.
+  const notifiedPendingFocusRef = useRef<string | null>(null);
+  // A newer response finished in another pane while the reviewer stayed on the
+  // current one. Surfaced as a badge on the Messages tab instead of a toast.
+  const [pendingResponseMessageId, setPendingResponseMessageId] = useState<string | null>(null);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   // This capability is only emitted by Ex-Plannotator. Official annotate-last
   // sessions keep their terminal submit behavior and never open this adapter.
@@ -1295,6 +1301,8 @@ const App: React.FC = () => {
     const msg = recentMessages.find((m) => m.messageId === messageId);
     if (!msg || messageId === selectedMessageId) return;
 
+    if (pendingResponseMessageId === messageId) setPendingResponseMessageId(null);
+
     if (liveMessageReview && msg.cwd) setProjectRoot(msg.cwd);
     const states = saveCurrentMessageState();
     const targetState = normalizeMessageState(
@@ -1310,6 +1318,7 @@ const App: React.FC = () => {
   }, [
     recentMessages,
     selectedMessageId,
+    pendingResponseMessageId,
     liveMessageReview,
     saveCurrentMessageState,
     linkedDocHook.restoreSession,
@@ -1332,7 +1341,7 @@ const App: React.FC = () => {
     const selectedPaneId = previousMessages.find((message) => message.messageId === selectedMessageId)?.paneId;
     const changedPaneIds = changedLivePaneSessionIds(previousMessages, snapshot.messages);
     const selectedPaneSessionChanged = changedPaneIds.has(selectedPaneId ?? '');
-    const { nextSelectedMessageId, followNextPaneResponseReset } = reconcileLiveMessageSelection(
+    const { nextSelectedMessageId, followNextPaneResponseReset, pendingFocusMessageId } = reconcileLiveMessageSelection(
       previousMessages,
       snapshot.messages,
       selectedMessageId,
@@ -1366,6 +1375,17 @@ const App: React.FC = () => {
       toast('Agent response received', { description: 'Showing the latest response.' });
     }
 
+    // A newer response finished in another pane while the reviewer is mid-review
+    // here. Don't steal the tab; flag it as a pending response on the Messages
+    // tab (a badge) instead of a toast, and only flag once per focused response.
+    if (pendingFocusMessageId && pendingFocusMessageId !== notifiedPendingFocusRef.current) {
+      notifiedPendingFocusRef.current = pendingFocusMessageId;
+      setPendingResponseMessageId(pendingFocusMessageId);
+    } else if (!pendingFocusMessageId) {
+      notifiedPendingFocusRef.current = null;
+      setPendingResponseMessageId(null);
+    }
+
     if (!nextSelectedMessageId || (nextSelectedMessageId === selectedMessageId && !selectedPaneSessionChanged)) return;
     const targetMessage = snapshot.messages.find((message) => message.messageId === nextSelectedMessageId);
     if (!targetMessage) return;
@@ -1386,7 +1406,7 @@ const App: React.FC = () => {
       toast('Agent response received', { description: 'Reloading the latest review state.' });
       window.location.reload();
     }
-  }, [selectedMessageId, recentMessages, followNextPaneResponse, liveMessageSelectionPinned, saveCurrentMessageState, linkedDocHook.restoreSession, liveMessageReviewReloadOnSelection]);
+  }, [selectedMessageId, recentMessages, followNextPaneResponse, liveMessageSelectionPinned, saveCurrentMessageState, linkedDocHook.restoreSession, liveMessageReviewReloadOnSelection, handleSelectMessage]);
 
   const handleLiveReviewAction = React.useCallback(async (
     path: '/api/session/feedback/retry' | '/api/session/resume' | '/api/session/cancel-waiting',
@@ -4806,6 +4826,7 @@ const App: React.FC = () => {
               isAgentTerminalRunning={isAgentTerminalRunning}
               onToggleAgentTerminal={toggleAgentTerminal}
               hasMessageAnnotations={activeMessageAnnotationCounts.size > 0}
+              hasPendingResponse={pendingResponseMessageId !== null}
               hasFileAnnotations={hasFileAnnotations}
               className="hidden lg:flex absolute left-0 top-0 z-20"
             />
@@ -4897,6 +4918,7 @@ const App: React.FC = () => {
                 selectedMessageId={selectedMessageId}
                 onSelectMessage={handleSelectMessage}
                 messageAnnotationCounts={activeMessageAnnotationCounts}
+                hasPendingResponse={pendingResponseMessageId !== null}
                 messagePickerLabels={liveWorkspaceMode ? {
                   tab: 'Workspaces',
                   list: 'Live Pi responses · newest first',
