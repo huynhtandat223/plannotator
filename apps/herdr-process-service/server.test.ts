@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { SingleFlight } from "../../packages/shared/single-flight";
 import {
   LiveSnapshotPublisher,
   acceptsPanelSessionUpdate,
@@ -29,6 +30,11 @@ import {
   reuseOrLaunchGitChangesReview,
   cancelPendingGitChangesReviewLaunch,
   type PendingGitChangesReviewLaunch,
+  askAiWorkspaceFromSnapshot,
+  resolveOrCreateAskAiWorkspace,
+  resolveHerdrAIWorkspace,
+  createProcessPanel,
+  isKnownProcessPanelWorkspace,
 } from "./server";
 
 const temporaryRepos: string[] = [];
@@ -959,5 +965,178 @@ describe("waitForPanelSessionRegistration", () => {
     // The waiter already timed out and unregistered; this must be a no-op.
     panelSessions.set("w:stale", registration("w:stale", "s-stale"));
     expect(() => notifyPanelSessionWaiters("w:stale")).not.toThrow();
+  });
+});
+
+describe("askAiWorkspaceFromSnapshot", () => {
+  test("resolves a shell-only workspace by label+cwd via the panes array", () => {
+    const workspaceId = askAiWorkspaceFromSnapshot({
+      workspaces: [
+        { workspace_id: "w1", label: "bridge-kernel-app" },
+        { workspace_id: "w2", label: "other" },
+      ],
+      panes: [
+        { pane_id: "w1:p1", workspace_id: "w1", cwd: "/host/app", foreground_cwd: "/host/app" },
+        { pane_id: "w2:p1", workspace_id: "w2", cwd: "/host/other" },
+      ],
+      agents: [],
+    }, "bridge-kernel-app", "/host/app");
+    expect(workspaceId).toBe("w1");
+  });
+
+  test("matches on foreground_cwd, falling back to cwd", () => {
+    expect(askAiWorkspaceFromSnapshot({
+      workspaces: [{ workspace_id: "w1", label: "bridge-kernel-app" }],
+      panes: [{ pane_id: "w1:p1", workspace_id: "w1", cwd: "/other", foreground_cwd: "/host/app" }],
+    }, "bridge-kernel-app", "/host/app")).toBe("w1");
+    expect(askAiWorkspaceFromSnapshot({
+      workspaces: [{ workspace_id: "w1", label: "bridge-kernel-app" }],
+      panes: [{ pane_id: "w1:p1", workspace_id: "w1", cwd: "/host/app" }],
+    }, "bridge-kernel-app", "/host/app")).toBe("w1");
+  });
+
+  test("does NOT reuse a mislabeled-at-different-path workspace (label matches, cwd differs)", () => {
+    expect(askAiWorkspaceFromSnapshot({
+      workspaces: [{ workspace_id: "w1", label: "bridge-kernel-app" }],
+      panes: [{ pane_id: "w1:p1", workspace_id: "w1", cwd: "/somewhere/else" }],
+    }, "bridge-kernel-app", "/host/app")).toBeNull();
+  });
+
+  test("does not match when the label differs even if a pane sits at cwd", () => {
+    expect(askAiWorkspaceFromSnapshot({
+      workspaces: [{ workspace_id: "w1", label: "not-it" }],
+      panes: [{ pane_id: "w1:p1", workspace_id: "w1", cwd: "/host/app" }],
+    }, "bridge-kernel-app", "/host/app")).toBeNull();
+  });
+
+  test("returns null on an empty snapshot", () => {
+    expect(askAiWorkspaceFromSnapshot({}, "bridge-kernel-app", "/host/app")).toBeNull();
+  });
+});
+
+describe("resolveOrCreateAskAiWorkspace", () => {
+  test("reuses an existing workspace without creating a new one", async () => {
+    let created = 0;
+    const result = await resolveOrCreateAskAiWorkspace(
+      "bridge-kernel-app",
+      "/host/app",
+      async () => ({
+        workspaces: [{ workspace_id: "w1", label: "bridge-kernel-app" }],
+        panes: [{ pane_id: "w1:p1", workspace_id: "w1", cwd: "/host/app" }],
+      }),
+      async () => { created++; return "should-not-happen"; },
+    );
+    expect(result).toEqual({ workspaceId: "w1", cwd: "/host/app" });
+    expect(created).toBe(0);
+  });
+
+  test("creates the workspace when the snapshot has no match", async () => {
+    let created = 0;
+    const result = await resolveOrCreateAskAiWorkspace(
+      "bridge-kernel-app",
+      "/host/app",
+      async () => ({ workspaces: [], panes: [] }),
+      async (label, cwd) => { created++; expect(label).toBe("bridge-kernel-app"); expect(cwd).toBe("/host/app"); return "w-new"; },
+    );
+    expect(result).toEqual({ workspaceId: "w-new", cwd: "/host/app" });
+    expect(created).toBe(1);
+  });
+
+  // ensureAskAiWorkspace wraps resolveOrCreateAskAiWorkspace in a SingleFlight
+  // keyed on the label. Two near-simultaneous Ask AI creates must coalesce so
+  // only ONE workspace is ever created for the same label.
+  test("single-flight coalesces concurrent creates into one workspace", async () => {
+    const flight = new SingleFlight<{ workspaceId: string; cwd: string }>();
+    let created = 0;
+    let releaseSnapshot: () => void = () => {};
+    const snapshotGate = new Promise<void>((r) => { releaseSnapshot = r; });
+    const run = () => flight.run("bridge-kernel-app", () => resolveOrCreateAskAiWorkspace(
+      "bridge-kernel-app",
+      "/host/app",
+      async () => { await snapshotGate; return { workspaces: [], panes: [] }; },
+      async () => { created++; return "w-new"; },
+    ));
+    const first = run();
+    const second = run();
+    releaseSnapshot();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a).toEqual({ workspaceId: "w-new", cwd: "/host/app" });
+    expect(b).toEqual({ workspaceId: "w-new", cwd: "/host/app" });
+    expect(created).toBe(1);
+  });
+});
+
+describe("isKnownProcessPanelWorkspace (createProcessPanel guard)", () => {
+  const livePanel: HerdrPanel = {
+    id: "w-live:p1",
+    workspaceId: "w-live",
+    workspace: "live",
+    tab: "",
+    panel: "Pane p1",
+    cwd: "/host/live",
+    status: "idle",
+    focused: false,
+  };
+
+  test("accepts a workspace that already hosts a live pi pane", () => {
+    expect(isKnownProcessPanelWorkspace("w-live", [livePanel])).toBe(true);
+  });
+
+  test("accepts a vouched-for, pi-pane-less workspace absent from panels", () => {
+    // The ensured Ask AI workspace may be shell-only, so it never appears in
+    // `panels` (which is built from `agents`). The extra allow-set lets it
+    // through without weakening the rejection of unknown ids.
+    expect(isKnownProcessPanelWorkspace("w-ensured", [], new Set(["w-ensured"]))).toBe(true);
+    expect(isKnownProcessPanelWorkspace("w-ensured", [livePanel], new Set(["w-ensured"]))).toBe(true);
+  });
+
+  test("still rejects an unknown workspaceId (neither live nor vouched-for)", () => {
+    expect(isKnownProcessPanelWorkspace("w-unknown", [])).toBe(false);
+    expect(isKnownProcessPanelWorkspace("w-unknown", [livePanel])).toBe(false);
+    expect(isKnownProcessPanelWorkspace("w-unknown", [livePanel], new Set(["w-ensured"]))).toBe(false);
+  });
+});
+
+// These createProcessPanel cases return null at the input/guard stage, BEFORE
+// any live `herdr` CLI call, so they are safe to run in unit tests.
+describe("createProcessPanel input guard (no live herdr)", () => {
+  const validBody = {
+    workspaceId: "w-ensured",
+    cwd: "/does/not/exist/on/disk",
+    panelName: "Ask AI",
+    command: "pi --tools read,grep,find,ls",
+  };
+
+  test("rejects an unknown workspaceId that is neither a live panel nor vouched-for", async () => {
+    expect(await createProcessPanel(validBody, [])).toBeNull();
+  });
+
+  test("rejects a vouched-for workspaceId that differs from the request", async () => {
+    expect(await createProcessPanel(validBody, [], new Set(["some-other-ws"]))).toBeNull();
+  });
+});
+
+// resolveHerdrAIWorkspace only touches live herdr on the requested-cwd branch
+// (via discoverPanels). The no-cwd branch is driven entirely by the injected
+// ensureWorkspace seam, so these cases stay off live herdr.
+// resolveHerdrAIWorkspace's non-absolute-cwd branch takes an injectable
+// ensureWorkspace, so feature-on/off behavior is unit-testable without touching
+// live herdr (a real client cwd would call discoverPanels()).
+describe("resolveHerdrAIWorkspace feature gate (no client cwd)", () => {
+  test("feature OFF: preserves the exact legacy error message", async () => {
+    await expect(resolveHerdrAIWorkspace(undefined, async () => null)).rejects.toThrow(
+      "Select a live Pi response before starting Ask AI.",
+    );
+    await expect(resolveHerdrAIWorkspace("not-absolute", async () => null)).rejects.toThrow(
+      "Select a live Pi response before starting Ask AI.",
+    );
+  });
+
+  test("feature ON: resolves to the ensured workspace cwd instead of throwing", async () => {
+    const cwd = await resolveHerdrAIWorkspace(undefined, async () => ({
+      workspaceId: "w-ensured",
+      cwd: "/host/app",
+    }));
+    expect(cwd).toBe("/host/app");
   });
 });

@@ -146,6 +146,16 @@ export interface PlannotatorConfig {
   cursorSandbox?: boolean;
   /** Default setup values for Ex-Plannotator's durable Pi companion chat. */
   exAIChat?: { model?: string; instruction?: string };
+  /**
+   * Opt-in dedicated Herdr workspace for the BridgeKernel Ask AI feature.
+   * When `cwd` is set, herdr-process-service resolves (creating if missing) a
+   * Herdr workspace whose label matches `label` and whose root pane runs in
+   * `cwd`, so Ask AI works end-to-end without first selecting a live Pi pane.
+   * When `cwd` is unset the feature is OFF and default Ask AI behavior is
+   * unchanged. Mirrors the PLANNOTATOR_ASKAI_WORKSPACE_CWD /
+   * PLANNOTATOR_ASKAI_WORKSPACE_LABEL env vars, which take precedence.
+   */
+  askAiWorkspace?: { label?: string; cwd?: string };
 }
 
 const CONFIG_DIR = getPlannotatorDataDir();
@@ -330,4 +340,29 @@ export function resolveCursorSandbox(config: PlannotatorConfig): boolean {
     return v !== "0" && v !== "false" && v !== "disabled";
   }
   return coerceConfigBoolean(config.cursorSandbox, true);
+}
+
+/** Default label for the opt-in BridgeKernel Ask AI dedicated workspace. */
+export const DEFAULT_ASKAI_WORKSPACE_LABEL = "bridge-kernel-app";
+
+/**
+ * Resolve the opt-in dedicated Ask AI workspace configuration.
+ *
+ * The feature is OFF unless a root `cwd` is provided. Priority (highest wins):
+ *   PLANNOTATOR_ASKAI_WORKSPACE_CWD env var    →  config.askAiWorkspace.cwd
+ *   PLANNOTATOR_ASKAI_WORKSPACE_LABEL env var  →  config.askAiWorkspace.label  →  default
+ *
+ * Returns `null` when no `cwd` is configured (feature disabled), otherwise the
+ * resolved `{ label, cwd }`. The `cwd` is returned verbatim (not resolved to an
+ * absolute path here) so callers can apply their own path normalization.
+ */
+export function resolveAskAiWorkspace(
+  config: PlannotatorConfig,
+): { label: string; cwd: string } | null {
+  const envCwd = process.env.PLANNOTATOR_ASKAI_WORKSPACE_CWD?.trim();
+  const cwd = (envCwd || config.askAiWorkspace?.cwd?.trim()) ?? "";
+  if (!cwd) return null;
+  const envLabel = process.env.PLANNOTATOR_ASKAI_WORKSPACE_LABEL?.trim();
+  const label = (envLabel || config.askAiWorkspace?.label?.trim()) || DEFAULT_ASKAI_WORKSPACE_LABEL;
+  return { label, cwd };
 }
