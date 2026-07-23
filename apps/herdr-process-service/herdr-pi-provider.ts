@@ -18,6 +18,10 @@ export const HERDR_PI_REGISTRATION_TIMEOUT_MS = 15_000;
 export type HerdrPiRegistration = {
   sessionId: string;
   messages: Array<{ messageId: string; text: string }>;
+  /** Pi settles failed turns without an assistant message. */
+  agentStatus?: "working" | "idle" | "blocked" | "unknown";
+  /** Explicit terminal marker from the Pi extension's agent_end event. */
+  agentSettled?: boolean;
 };
 
 export type HerdrPiPane = {
@@ -48,6 +52,8 @@ export interface HerdrPiGateway {
   }): Promise<HerdrPiPane>;
   /** `undefined` means registration has not arrived yet. */
   registration(paneId: string): HerdrPiRegistration | undefined | Promise<HerdrPiRegistration | undefined>;
+  /** Resolves when the host receives the next registration for this pane. */
+  waitForRegistration?(paneId: string, timeoutMs: number): Promise<HerdrPiRegistration | undefined>;
   send(paneId: string, prompt: string): Promise<void>;
   close(pane: HerdrPiPane): Promise<void>;
 }
@@ -76,6 +82,16 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
 
 function messageIds(registration: HerdrPiRegistration | undefined): Set<string> {
   return new Set(registration?.messages.map((message) => message.messageId) ?? []);
+}
+
+function hasSettledWithoutResponse(
+  registration: HerdrPiRegistration,
+  expectedSessionId: string,
+  before: ReadonlySet<string>,
+): boolean {
+  return registration.sessionId === expectedSessionId
+    && registration.agentSettled === true
+    && !registration.messages.some((message) => !before.has(message.messageId));
 }
 
 function isSafeThinkingValue(value: string): value is "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" {
@@ -295,6 +311,9 @@ export class HerdrPiSession extends BaseSession {
     signal: AbortSignal,
   ): Promise<{ messageId: string; text: string }> {
     const deadline = Date.now() + this.queryTimeoutMs;
+    // The first registration can still show state from before `pane run`
+    // reaches Pi. Only the extension's explicit post-turn marker may report a
+    // terminal failure; a generic idle pane could merely be awaiting its turn.
     while (Date.now() < deadline) {
       const registration = await this.gateway.registration(paneId);
       if (!registration) {
@@ -306,7 +325,20 @@ export class HerdrPiSession extends BaseSession {
       }
       const response = registration.messages.find((message) => !before.has(message.messageId));
       if (response) return response;
-      await delay(150, signal);
+      if (this.gateway.waitForRegistration) {
+        const updated = await this.gateway.waitForRegistration(
+          paneId,
+          Math.min(150, Math.max(1, deadline - Date.now())),
+        );
+        if (updated && hasSettledWithoutResponse(updated, expectedSessionId, before)) {
+          throw new Error("The Herdr Pi pane stopped without producing a response.");
+        }
+      } else {
+        if (hasSettledWithoutResponse(registration, expectedSessionId, before)) {
+          throw new Error("The Herdr Pi pane stopped without producing a response.");
+        }
+        await delay(150, signal);
+      }
     }
     throw new Error("The Herdr Pi pane did not produce a response before the timeout.");
   }

@@ -208,6 +208,8 @@ export type PanelSessionEnrichment = {
   /** Optional while an already-running, pre-metadata Pi extension republishs. */
   totalUsedTokens?: number;
   latestCompactionTokens?: number;
+  /** Pi settled the current turn; errors may have no assistant message. */
+  agentSettled?: boolean;
 };
 
 type LiveDraftAnnotation = { id: string; [key: string]: unknown };
@@ -267,9 +269,7 @@ export function notifyPanelSessionWaiters(paneId: string): void {
   panelSessionWaiters.delete(paneId);
   for (const resolve of waiters) resolve();
 }
-export function waitForPanelSessionRegistration(paneId: string, timeoutMs: number): Promise<PanelSessionEnrichment | undefined> {
-  const existing = panelSessions.get(paneId);
-  if (existing) return Promise.resolve(existing);
+function waitForPanelSessionUpdate(paneId: string, timeoutMs: number): Promise<PanelSessionEnrichment | undefined> {
   return new Promise((resolve) => {
     let settled = false;
     const finish = () => {
@@ -289,6 +289,17 @@ export function waitForPanelSessionRegistration(paneId: string, timeoutMs: numbe
     waiters.add(onRegister);
     panelSessionWaiters.set(paneId, waiters);
   });
+}
+
+export function waitForPanelSessionRegistration(paneId: string, timeoutMs: number): Promise<PanelSessionEnrichment | undefined> {
+  return panelSessions.has(paneId)
+    ? Promise.resolve(panelSessions.get(paneId))
+    : waitForPanelSessionUpdate(paneId, timeoutMs);
+}
+
+/** Wait for a registration newer than the caller's current snapshot. */
+export function waitForNextPanelSessionRegistration(paneId: string, timeoutMs: number): Promise<PanelSessionEnrichment | undefined> {
+  return waitForPanelSessionUpdate(paneId, timeoutMs);
 }
 // A delivery is held only until the matching local Pi extension claims it.
 // It is never persisted and cannot outlive a host restart.
@@ -1251,6 +1262,11 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
     writeJson(response, 400, { error: "Invalid Pi compaction tokens" });
     return;
   }
+  const agentSettled = body?.agentSettled;
+  if (agentSettled !== undefined && agentSettled !== true) {
+    writeJson(response, 400, { error: "Invalid Pi agent settled state" });
+    return;
+  }
 
   const panels = await discoverPanels();
   if (!panels.some((panel) => panel.id === paneId)) {
@@ -1267,6 +1283,7 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
     ...(model ? { model } : {}),
     ...(activity ? { activity } : {}),
     ...(typeof compactedTokens === "number" ? { latestCompactionTokens: compactedTokens } : {}),
+    ...(agentSettled ? { agentSettled: true } : {}),
   };
   if (!acceptsPanelSessionUpdate(panelSessions.get(paneId), incoming, isSubagent)) {
     // A nested Pi child inherited this pane's HERDR_PANE_ID. It is not the
@@ -1670,28 +1687,31 @@ export async function resolveHerdrAISourceSession(
   };
 }
 
+export function selectHerdrAIWorkspace(
+  cwd: string,
+  panels: ReadonlyArray<HerdrPanel>,
+  ensured: { workspaceId: string; cwd: string } | null,
+): { workspaceId: string; cwd: string; ensuredWorkspaceId?: string } | null {
+  // An explicitly configured Ask AI workspace is an identity, not a cwd
+  // preference. Prefer it before looking for an arbitrary live pane at the
+  // same path; otherwise a captain's or user's live workspace can receive
+  // background Ask-AI tabs.
+  if (ensured && resolve(ensured.cwd) === resolve(cwd)) {
+    return { workspaceId: ensured.workspaceId, cwd: ensured.cwd, ensuredWorkspaceId: ensured.workspaceId };
+  }
+  const owner = panels.find((panel) => resolve(panel.cwd) === resolve(cwd) && panel.workspaceId);
+  return owner ? { workspaceId: owner.workspaceId, cwd: owner.cwd } : null;
+}
+
 const herdrPiGateway: HerdrPiGateway = {
   async launch({ cwd, label, model, thinking }) {
     const panels = await discoverPanels();
-    const owner = panels.find((panel) => resolve(panel.cwd) === resolve(cwd) && panel.workspaceId);
-    let workspaceId = owner?.workspaceId;
-    let workspaceCwd = owner?.cwd;
-    // The dedicated Ask AI workspace may be shell-only (no live pi pane yet), so
-    // it is invisible to discoverPanels(). Fall back to the ensured workspace
-    // when its cwd matches the request; ensureAskAiWorkspace is the authority
-    // that created/validated the workspace_id.
-    let ensuredWorkspaceId: string | undefined;
-    if (!workspaceId) {
-      const ensured = await ensureAskAiWorkspace();
-      if (ensured && resolve(ensured.cwd) === resolve(cwd)) {
-        workspaceId = ensured.workspaceId;
-        workspaceCwd = ensured.cwd;
-        ensuredWorkspaceId = ensured.workspaceId;
-      }
-    }
-    if (!workspaceId || !workspaceCwd) {
+    const ensured = await ensureAskAiWorkspace();
+    const workspace = selectHerdrAIWorkspace(cwd, panels, ensured);
+    if (!workspace) {
       throw new Error("The selected workspace is no longer a live Herdr Pi workspace.");
     }
+    const { workspaceId, cwd: workspaceCwd, ensuredWorkspaceId } = workspace;
     const command = [
       "pi",
       "--tools", shellQuote("read,grep,find,ls"),
@@ -1707,14 +1727,20 @@ const herdrPiGateway: HerdrPiGateway = {
     if (!created) throw new Error("Could not create an Ask AI Pi pane in this workspace.");
     return created;
   },
-  registration(paneId) {
+  async registration(paneId) {
     const registration = panelSessions.get(paneId);
+    const panel = (await cachedPanels()).find((candidate) => candidate.id === paneId);
     return registration && {
       sessionId: registration.sessionId,
       messages: registration.messages,
+      agentStatus: panel?.status,
+      agentSettled: registration.agentSettled,
       model: registration.model?.id,
       commands: registration.commands,
     };
+  },
+  waitForRegistration(paneId, timeoutMs) {
+    return waitForNextPanelSessionRegistration(paneId, timeoutMs);
   },
   async send(paneId, prompt) {
     await execFileAsync("herdr", ["pane", "run", paneId, prompt], { timeout: 10_000 });
