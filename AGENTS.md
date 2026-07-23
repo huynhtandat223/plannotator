@@ -237,6 +237,10 @@ Ask AI providers are detected independently from installed/authenticated local C
 
 Per-origin choices are persisted in cookies, so a user can override the automatic match for one agent without changing the default for another.
 
+### Herdr Ask AI dedicated workspace (opt-in)
+
+`apps/herdr-process-service/server.ts` can resolve a dedicated Herdr workspace by label (default `bridge-kernel-app`) for Ask AI, so the feature works without first selecting a live Pi pane. It is OFF unless a root cwd is configured via `PLANNOTATOR_ASKAI_WORKSPACE_CWD` (or `config.askAiWorkspace.cwd`); see `resolveAskAiWorkspace` in `packages/shared/config.ts`. When on, `ensureAskAiWorkspace()` resolves-or-creates the workspace (single-flight guarded) and `resolveHerdrAIWorkspace` uses it instead of throwing on a missing client cwd. Key facts: `discoverPanels()`/`panelsFromSnapshot` parse only `snapshot.agents` (pi panes), so a shell-only workspace is invisible there — resolve it via `snapshot.panes` (which carry `cwd`/`foreground_cwd`/`workspace_id`) using `askAiWorkspaceFromSnapshot`. `createProcessPanel`'s workspace guard (`isKnownProcessPanelWorkspace`) accepts a caller-vouched ensured workspace id so a pi-pane-less-but-real workspace passes while unknown ids are still rejected.
+
 > **Codex transport note:** the `codex-sdk` provider id is a stable identifier only — it no longer uses `@openai/codex-sdk` / `codex exec`. It drives a long-lived `codex app-server` process over JSON-RPC (`packages/ai/providers/codex-app-server.ts`), which respects the user's/enterprise-managed approval policy and supports interactive Allow/Deny approvals. The id stays `codex-sdk` to preserve saved cookie preferences, the `agents.ts` mapping, and the UI reasoning-effort gate.
 
 ## Annotate Flow

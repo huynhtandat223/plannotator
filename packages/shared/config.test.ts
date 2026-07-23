@@ -4,6 +4,8 @@ import {
   resolveUseGlimpse,
   resolveAnnotateHistory,
   resolveUseJina,
+  resolveAskAiWorkspace,
+  DEFAULT_ASKAI_WORKSPACE_LABEL,
 } from "./config";
 import type { PlannotatorConfig } from "./config";
 
@@ -138,4 +140,73 @@ describe("config.json boolean coercion", () => {
       });
     });
   }
+});
+
+describe("resolveAskAiWorkspace", () => {
+  const CWD_ENV = "PLANNOTATOR_ASKAI_WORKSPACE_CWD";
+  const LABEL_ENV = "PLANNOTATOR_ASKAI_WORKSPACE_LABEL";
+  const originalCwd = process.env[CWD_ENV];
+  const originalLabel = process.env[LABEL_ENV];
+
+  beforeEach(() => {
+    delete process.env[CWD_ENV];
+    delete process.env[LABEL_ENV];
+  });
+  afterAll(() => {
+    if (originalCwd === undefined) delete process.env[CWD_ENV];
+    else process.env[CWD_ENV] = originalCwd;
+    if (originalLabel === undefined) delete process.env[LABEL_ENV];
+    else process.env[LABEL_ENV] = originalLabel;
+  });
+
+  test("feature is OFF (null) when no cwd is configured anywhere", () => {
+    expect(resolveAskAiWorkspace({})).toBeNull();
+    expect(resolveAskAiWorkspace({ askAiWorkspace: { label: "x" } })).toBeNull();
+  });
+
+  test("config.askAiWorkspace.cwd enables the feature with the default label", () => {
+    expect(resolveAskAiWorkspace({ askAiWorkspace: { cwd: "/home/me/app" } })).toEqual({
+      label: DEFAULT_ASKAI_WORKSPACE_LABEL,
+      cwd: "/home/me/app",
+    });
+  });
+
+  test("config label is honored when set", () => {
+    expect(resolveAskAiWorkspace({ askAiWorkspace: { cwd: "/home/me/app", label: "custom" } })).toEqual({
+      label: "custom",
+      cwd: "/home/me/app",
+    });
+  });
+
+  test("env cwd wins over config cwd and still enables the feature", () => {
+    process.env[CWD_ENV] = "/env/path";
+    expect(resolveAskAiWorkspace({ askAiWorkspace: { cwd: "/config/path" } })).toEqual({
+      label: DEFAULT_ASKAI_WORKSPACE_LABEL,
+      cwd: "/env/path",
+    });
+  });
+
+  test("env label wins over config label", () => {
+    process.env[CWD_ENV] = "/env/path";
+    process.env[LABEL_ENV] = "env-label";
+    expect(resolveAskAiWorkspace({ askAiWorkspace: { cwd: "/config/path", label: "config-label" } })).toEqual({
+      label: "env-label",
+      cwd: "/env/path",
+    });
+  });
+
+  test("blank/whitespace values are ignored", () => {
+    process.env[CWD_ENV] = "   ";
+    expect(resolveAskAiWorkspace({})).toBeNull();
+    expect(resolveAskAiWorkspace({ askAiWorkspace: { cwd: "  ", label: "  " } })).toBeNull();
+  });
+
+  test("blank env label falls back to config label then default", () => {
+    process.env[CWD_ENV] = "/env/path";
+    process.env[LABEL_ENV] = "  ";
+    expect(resolveAskAiWorkspace({ askAiWorkspace: { cwd: "/config/path", label: "config-label" } })).toEqual({
+      label: "config-label",
+      cwd: "/env/path",
+    });
+  });
 });

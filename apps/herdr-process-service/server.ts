@@ -30,7 +30,8 @@ import { promisify } from "node:util";
 import { startFileBrowserWatchStream } from "./file-browser-watch";
 import { startReviewServer, type ReviewServerResult } from "../../packages/server/review";
 import { prepareLocalReviewDiff } from "../../packages/server/vcs";
-import { loadConfig } from "../../packages/shared/config";
+import { loadConfig, resolveAskAiWorkspace, type PlannotatorConfig } from "../../packages/shared/config";
+import { SingleFlight } from "../../packages/shared/single-flight";
 import { extractFileMentionReferences } from "../../packages/core/file-mention";
 import { isWithinProjectRoot, resolveCodeFile } from "../../packages/shared/resolve-file";
 import { createAIEndpoints, ProviderRegistry, SessionManager } from "../../packages/ai/index";
@@ -388,8 +389,15 @@ type HerdrAgent = {
 
 type HerdrSnapshot = {
   agents?: unknown;
+  panes?: unknown;
   tabs?: unknown;
   workspaces?: unknown;
+};
+
+type HerdrPaneEntry = {
+  cwd?: unknown;
+  foreground_cwd?: unknown;
+  workspace_id?: unknown;
 };
 
 type NamedHerdrResource = { workspace_id?: unknown; tab_id?: unknown; label?: unknown };
@@ -729,9 +737,48 @@ export function panelsFromSnapshot(snapshot: HerdrSnapshot): HerdrPanel[] {
 }
 
 export async function discoverPanels(): Promise<HerdrPanel[]> {
+  return panelsFromSnapshot(await fetchHerdrSnapshot());
+}
+
+/** Fetch and parse Herdr's authoritative live snapshot (agents + panes + workspaces). */
+export async function fetchHerdrSnapshot(): Promise<HerdrSnapshot> {
   const { stdout } = await execFileAsync("herdr", ["api", "snapshot"], { maxBuffer: 1024 * 1024, timeout: 2_000 });
   const response = JSON.parse(stdout) as { result?: { snapshot?: HerdrSnapshot } };
-  return panelsFromSnapshot(response.result?.snapshot ?? {});
+  return response.result?.snapshot ?? {};
+}
+
+/**
+ * Find a workspace in the snapshot whose label matches `label` AND that has a
+ * pane (from the `panes` array, not `agents`) whose resolved cwd matches `cwd`.
+ * Uses `panes` so a shell-only workspace still resolves. A workspace whose
+ * label matches but has no pane at `cwd` is intentionally treated as not-found
+ * so we never reuse a mislabeled workspace rooted at a different path.
+ * Returns the matching `workspace_id`, or null.
+ */
+export function askAiWorkspaceFromSnapshot(
+  snapshot: HerdrSnapshot,
+  label: string,
+  cwd: string,
+): string | null {
+  const workspaces = Array.isArray(snapshot.workspaces) ? snapshot.workspaces : [];
+  const panes = Array.isArray(snapshot.panes) ? snapshot.panes : [];
+  const targetCwd = resolve(cwd);
+  for (const entry of workspaces) {
+    if (!entry || typeof entry !== "object") continue;
+    const workspace = entry as NamedHerdrResource;
+    if (text(workspace.label) !== label) continue;
+    const workspaceId = text(workspace.workspace_id);
+    if (!workspaceId) continue;
+    const hasPaneAtCwd = panes.some((paneEntry) => {
+      if (!paneEntry || typeof paneEntry !== "object") return false;
+      const pane = paneEntry as HerdrPaneEntry;
+      if (text(pane.workspace_id) !== workspaceId) return false;
+      const paneCwd = text(pane.foreground_cwd) ?? text(pane.cwd);
+      return paneCwd != null && resolve(paneCwd) === targetCwd;
+    });
+    if (hasPaneAtCwd) return workspaceId;
+  }
+  return null;
 }
 
 function escapeHtml(value: string): string {
@@ -1506,8 +1553,77 @@ function shellQuote(argument: string): string {
   return `'${argument.replace(/'/g, "'\\\"'\\\"'")}'`;
 }
 
-export async function resolveHerdrAIWorkspace(requestedCwd?: string): Promise<string> {
+type HerdrWorkspaceCreateResponse = {
+  result?: { workspace?: { workspace_id?: unknown } };
+};
+
+/**
+ * Pure create-if-missing orchestration for the opt-in Ask AI workspace.
+ * Resolves an existing workspace by label+cwd from the snapshot, otherwise
+ * creates one. I/O is injected so this is unit-testable without live Herdr.
+ */
+export async function resolveOrCreateAskAiWorkspace(
+  label: string,
+  cwd: string,
+  fetchSnapshot: () => Promise<HerdrSnapshot>,
+  createWorkspace: (label: string, cwd: string) => Promise<string>,
+): Promise<{ workspaceId: string; cwd: string }> {
+  const existing = askAiWorkspaceFromSnapshot(await fetchSnapshot(), label, cwd);
+  if (existing) return { workspaceId: existing, cwd };
+  const workspaceId = await createWorkspace(label, cwd);
+  return { workspaceId, cwd };
+}
+
+async function createAskAiWorkspaceViaHerdr(label: string, cwd: string): Promise<string> {
+  const { stdout } = await execFileAsync(
+    "herdr",
+    ["workspace", "create", "--cwd", cwd, "--label", label, "--no-focus"],
+    { timeout: 10_000 },
+  );
+  let parsed: HerdrWorkspaceCreateResponse;
+  try {
+    parsed = JSON.parse(stdout) as HerdrWorkspaceCreateResponse;
+  } catch {
+    throw new Error(`Could not parse 'herdr workspace create' output for Ask AI workspace "${label}".`);
+  }
+  const workspaceId = text(parsed.result?.workspace?.workspace_id);
+  if (!workspaceId) {
+    throw new Error(`'herdr workspace create' did not return a workspace_id for Ask AI workspace "${label}".`);
+  }
+  return workspaceId;
+}
+
+// Single-flight guard so two near-simultaneous Ask AI session creates never
+// create two workspaces with the same label (see ensureHerdrPiModels for the
+// lazy single-flight precedent).
+const askAiWorkspaceSingleFlight = new SingleFlight<{ workspaceId: string; cwd: string }>();
+
+/**
+ * Ensure the opt-in dedicated Ask AI workspace exists, creating it if missing.
+ * Returns `null` when the feature is disabled (no configured cwd), leaving all
+ * default Ask AI behavior unchanged. Concurrency-safe via single-flight keyed
+ * on the workspace label.
+ */
+export function ensureAskAiWorkspace(
+  config: PlannotatorConfig = loadConfig(),
+): Promise<{ workspaceId: string; cwd: string } | null> {
+  const settings = resolveAskAiWorkspace(config);
+  if (!settings) return Promise.resolve(null);
+  const cwd = resolve(settings.cwd.replace(/^~(?=$|\/)/, homedir()));
+  return askAiWorkspaceSingleFlight.run(settings.label, () =>
+    resolveOrCreateAskAiWorkspace(settings.label, cwd, fetchHerdrSnapshot, createAskAiWorkspaceViaHerdr),
+  );
+}
+
+export async function resolveHerdrAIWorkspace(
+  requestedCwd?: string,
+  ensureWorkspace: () => Promise<{ workspaceId: string; cwd: string } | null> = ensureAskAiWorkspace,
+): Promise<string> {
   if (!requestedCwd || !isAbsolute(requestedCwd)) {
+    // Feature-on: resolve (create-if-missing) the dedicated workspace so Ask AI
+    // works without first selecting a live Pi pane. Feature-off: unchanged.
+    const ensured = await ensureWorkspace();
+    if (ensured) return ensured.cwd;
     throw new Error("Select a live Pi response before starting Ask AI.");
   }
   const requested = resolve(requestedCwd);
@@ -1558,7 +1674,22 @@ const herdrPiGateway: HerdrPiGateway = {
   async launch({ cwd, label, model, thinking }) {
     const panels = await discoverPanels();
     const owner = panels.find((panel) => resolve(panel.cwd) === resolve(cwd) && panel.workspaceId);
-    if (!owner?.workspaceId) {
+    let workspaceId = owner?.workspaceId;
+    let workspaceCwd = owner?.cwd;
+    // The dedicated Ask AI workspace may be shell-only (no live pi pane yet), so
+    // it is invisible to discoverPanels(). Fall back to the ensured workspace
+    // when its cwd matches the request; ensureAskAiWorkspace is the authority
+    // that created/validated the workspace_id.
+    let ensuredWorkspaceId: string | undefined;
+    if (!workspaceId) {
+      const ensured = await ensureAskAiWorkspace();
+      if (ensured && resolve(ensured.cwd) === resolve(cwd)) {
+        workspaceId = ensured.workspaceId;
+        workspaceCwd = ensured.cwd;
+        ensuredWorkspaceId = ensured.workspaceId;
+      }
+    }
+    if (!workspaceId || !workspaceCwd) {
       throw new Error("The selected workspace is no longer a live Herdr Pi workspace.");
     }
     const command = [
@@ -1568,11 +1699,11 @@ const herdrPiGateway: HerdrPiGateway = {
       ...(thinking ? ["--thinking", shellQuote(thinking)] : []),
     ].join(" ");
     const created = await createProcessPanel({
-      workspaceId: owner.workspaceId,
-      cwd: owner.cwd,
+      workspaceId,
+      cwd: workspaceCwd,
       panelName: label,
       command,
-    }, panels);
+    }, panels, ensuredWorkspaceId ? new Set([ensuredWorkspaceId]) : undefined);
     if (!created) throw new Error("Could not create an Ask AI Pi pane in this workspace.");
     return created;
   },
@@ -1662,17 +1793,32 @@ async function handleHerdrAIRequest(
 }
 
 type HerdrCliResponse = { result?: { tab?: { tab_id?: unknown }; root_pane?: { pane_id?: unknown }; agent?: { pane_id?: unknown } } };
+/**
+ * Guard for which workspace ids createProcessPanel may spawn a pane in. Accept
+ * a workspace that already hosts a live pi pane, OR one explicitly vouched for
+ * by the caller (the ensured Ask AI workspace, which may be shell-only and thus
+ * absent from `panels`). Both are real, snapshot-backed workspace ids; an
+ * arbitrary/unknown workspaceId is still rejected.
+ */
+export function isKnownProcessPanelWorkspace(
+  workspaceId: string,
+  panels: ReadonlyArray<HerdrPanel>,
+  extraWorkspaceIds?: ReadonlySet<string>,
+): boolean {
+  return panels.some((panel) => panel.workspaceId === workspaceId) || extraWorkspaceIds?.has(workspaceId) === true;
+}
 
 export async function createProcessPanel(
   body: Record<string, unknown> | null,
   panels: HerdrPanel[],
+  extraWorkspaceIds?: ReadonlySet<string>,
 ): Promise<{ paneId: string; panelName: string } | null> {
   const workspaceId = text(body?.workspaceId);
   const cwd = text(body?.cwd);
   const panelName = text(body?.panelName);
   const command = text(body?.command);
   if (!workspaceId || !cwd || !panelName || panelName.length > 80 || !command || !isAbsolute(cwd)) return null;
-  if (!panels.some((panel) => panel.workspaceId === workspaceId)) return null;
+  if (!isKnownProcessPanelWorkspace(workspaceId, panels, extraWorkspaceIds)) return null;
   const argv = commandArgv(command);
   if (!argv) return null;
   let directory: Awaited<ReturnType<typeof stat>>;
