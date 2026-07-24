@@ -16,6 +16,19 @@ export const ExAIChatPanel: React.FC<{
   const [draft, setDraft] = useState<string | null>(null);
   const [handoffId, setHandoffId] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // One click on an option delivers it to the main session via the existing handoff
+  // path. The requestId is deterministic per (boundary, option) so a double click or
+  // remount reuses the idempotent handoff record instead of double-sending.
+  const [sentOptions, setSentOptions] = useState<Set<string>>(() => new Set());
+  const [sendingOption, setSendingOption] = useState<string | null>(null);
+  const suggestion = state.status === 'ready' ? state.suggestion : undefined;
+  const selectOption = async (index: number, text: string) => {
+    if (!suggestion || sendingOption) return;
+    const requestId = `suggest:${suggestion.boundaryId}:${index}`;
+    setSendingOption(requestId);
+    try { await onHandoff(requestId, text); setSentOptions((prev) => new Set(prev).add(requestId)); }
+    finally { setSendingOption(null); }
+  };
   useEffect(() => { setModel(state.defaults?.model ?? state.pair?.model ?? ''); setInstruction(state.defaults?.instruction ?? state.pair?.instruction ?? ''); }, [state.pair?.main.paneId, state.pair?.main.sessionId, state.defaults?.model, state.defaults?.instruction]);
   const submit = async () => {
     if (!input.trim() || pending) return;
@@ -35,6 +48,14 @@ export const ExAIChatPanel: React.FC<{
   if (state.status === 'retired') return <div className="p-4 text-xs text-muted-foreground">The paired main Pi session changed or closed.</div>;
   if (state.status === 'recovering') return <div className="p-4 text-xs text-muted-foreground">Reconnecting to the companion Pi session…</div>;
   return <div className="flex h-full flex-col">
+    {suggestion && suggestion.options.length > 0 && <div className="border-b border-border/50 p-3" data-ex-ai-options="true">
+      <p className="mb-2 text-[11px] font-medium text-muted-foreground">Suggested replies to the main session</p>
+      <div className="space-y-2">{suggestion.options.map((option, index) => {
+        const requestId = `suggest:${suggestion.boundaryId}:${index}`;
+        const sent = sentOptions.has(requestId);
+        return <button key={requestId} type="button" disabled={sent || sendingOption !== null} onClick={() => void selectOption(index, option)} className="block w-full rounded border border-border/60 bg-background p-2.5 text-left text-xs hover:border-primary/60 hover:bg-primary/5 disabled:opacity-60"><span className="whitespace-pre-wrap">{option}</span>{sent && <span className="mt-1 block text-[10px] text-primary">Sent to main session</span>}{!sent && sendingOption === requestId && <span className="mt-1 block text-[10px] text-muted-foreground">Sending…</span>}</button>;
+      })}</div>
+    </div>}
     <OverlayScrollArea className="min-h-0 flex-1"><div className="space-y-3 p-3">
       {state.history.map((entry, index) => entry.kind === 'activity'
         ? <details key={index} className="rounded border border-border p-2 text-xs text-muted-foreground"><summary>{entry.text}</summary></details>

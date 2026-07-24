@@ -2,12 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 export type ExAIIdentity = { paneId: string; sessionId: string };
 type History = { kind: 'user'; text: string } | { kind: 'assistant'; text: string; messageId: string } | { kind: 'activity'; text: 'Companion activity occurred in Herdr' };
+export type ExAISuggestedOptions = { boundaryId: string; options: string[] };
 export type ExAIChatState = {
   status: 'setup' | 'ready' | 'closed' | 'retired' | 'recovering';
   pair?: { main: ExAIIdentity; companion: ExAIIdentity; model: string; instruction: string };
   history: History[];
   defaults?: { model: string; instruction: string };
   models?: Array<{ id: string; label: string }>;
+  /** Companion-generated response options for the current main last-message boundary. */
+  suggestion?: ExAISuggestedOptions;
 };
 
 async function request(path: string, method: string, body?: unknown): Promise<ExAIChatState> {
@@ -58,5 +61,13 @@ export function useExAIChat(main: ExAIIdentity | null) {
     try { const next = await request('/api/ex-ai-companion/handoff', 'POST', { ...main, requestId, text }); setState(next); setError(null); return next; }
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not send to the main session'); throw reason; }
   }, [main]);
-  return { state, error, refresh, start, stop, send, handoff };
+  // Asks the companion to read the main session's last message and propose response
+  // options for a specific last-message boundary. Idempotent per boundary in the
+  // coordinator; safe to call again if the main produces a new last message.
+  const suggest = useCallback(async (boundaryId: string, lastMessage: string) => {
+    if (!main) return;
+    try { setState(await request('/api/ex-ai-companion/suggest', 'POST', { ...main, boundaryId, lastMessage })); setError(null); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not generate options'); throw reason; }
+  }, [main]);
+  return { state, error, refresh, start, stop, send, handoff, suggest };
 }

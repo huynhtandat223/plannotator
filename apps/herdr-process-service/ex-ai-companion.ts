@@ -22,20 +22,26 @@ export type ExAICompanionBoundary = {
 
 type ProjectedTurn = { id: string; kind: "user"; text: string; assistantMessageId?: string; assistantText?: string };
 type HandoffResult = { deliveryId?: string; at: number };
+type SuggestionRecord = { boundaryId: string; options: string[]; at: number };
 type Pair = {
   main: ExAIIdentity; companion: ExAIIdentity; cwd: string; workspaceId: string;
   model: string; instruction: string; firstTurnSent: boolean;
   status: "ready" | "closed" | "retired" | "recovering";
   history: ProjectedTurn[]; baselineMessageIds?: string[]; handoffs: Record<string, HandoffResult>;
+  suggestion?: SuggestionRecord;
 };
 type Store = { pairs: Pair[]; defaults?: { model: string; instruction: string } };
 export type ExAICompanionHistory =
   | { kind: "user"; text: string }
   | { kind: "assistant"; text: string; messageId: string }
   | { kind: "activity"; text: "Companion activity occurred in Herdr" };
+/** Companion-generated response options for the current main last-message boundary. */
+export type ExAISuggestedOptions = { boundaryId: string; options: string[] };
 export type ExAICompanionState = {
   status: Pair["status"] | "setup"; pair?: { main: ExAIIdentity; companion: ExAIIdentity; model: string; instruction: string; commands?: ExAICompanionRegistration["commands"] };
   history: ExAICompanionHistory[]; defaults: { model: string; instruction: string };
+  /** Options cached for the current boundary, if any. Absent until first generated. */
+  suggestion?: ExAISuggestedOptions;
 };
 
 const MAX_HANDOFFS = 128;
@@ -43,6 +49,38 @@ const fileName = "ex-ai-companions.json";
 const exactKey = ({ paneId, sessionId }: ExAIIdentity) => `${paneId}:${sessionId}`;
 const emptyDefaults = { model: "", instruction: "" };
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export const MAX_SUGGESTED_OPTIONS = 5;
+const OPTION_MAX_CHARS = 600;
+
+/**
+ * Lenient option extractor. Grill was removed partly for brittle strict parsing
+ * that discarded a whole batch on one malformed line. This tolerates numbered
+ * lists, bullets, blank lines, and free-form preamble: it prefers explicitly
+ * marked list items, falls back to non-empty lines, trims markers and quotes,
+ * de-duplicates, and clamps to a small set. It never throws on odd input.
+ */
+export function parseSuggestedOptions(raw: string): string[] {
+  if (!raw) return [];
+  const lines = raw.replace(/\r\n/g, "\n").split("\n").map((line) => line.trim());
+  const marker = /^(?:[-*•]\s+|\d+[.)]\s+|\(\d+\)\s+)/;
+  const stripMarker = (line: string) => line.replace(marker, "").trim();
+  const stripWrap = (line: string) => line.replace(/^["'“”‘’`]+/, "").replace(/["'“”‘’`]+$/, "").trim();
+  const marked = lines.filter((line) => marker.test(line)).map(stripMarker);
+  // Prefer explicitly marked items; otherwise treat each non-empty line as a candidate.
+  const candidates = (marked.length >= 2 ? marked : lines).map(stripWrap).filter(Boolean);
+  const seen = new Set<string>();
+  const options: string[] = [];
+  for (const candidate of candidates) {
+    const trimmed = candidate.length > OPTION_MAX_CHARS ? candidate.slice(0, OPTION_MAX_CHARS).trim() : candidate;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    options.push(trimmed);
+    if (options.length >= MAX_SUGGESTED_OPTIONS) break;
+  }
+  return options;
+}
 
 /** Durable browser contract. Herdr panel snapshots are liveness authority; Pi enrichment may republish after restart. */
 export class ExAICompanionCoordinator {
@@ -102,7 +140,7 @@ export class ExAICompanionCoordinator {
     const projected = new Set(pair.history.flatMap((turn) => turn.assistantMessageId ? [turn.assistantMessageId] : []));
     const known = new Set([...(pair.baselineMessageIds ?? []), ...projected]);
     if (messages.some((message) => !known.has(message.messageId))) history.push({ kind: "activity", text: "Companion activity occurred in Herdr" });
-    return { status: pair.status, pair: { main: pair.main, companion: pair.companion, model: registration?.model ?? pair.model, instruction: pair.instruction, commands: registration?.commands }, history, defaults: this.defaults() };
+    return { status: pair.status, pair: { main: pair.main, companion: pair.companion, model: registration?.model ?? pair.model, instruction: pair.instruction, commands: registration?.commands }, history, defaults: this.defaults(), ...(pair.suggestion && pair.suggestion.options.length ? { suggestion: { boundaryId: pair.suggestion.boundaryId, options: pair.suggestion.options } } : {}) };
   }
   async start(main: ExAIIdentity, setup: { model?: string; instruction?: string }): Promise<ExAICompanionState> {
     await this.ensureLoaded(); await this.reconcileLoaded(); const key = exactKey(main); const running = this.starts.get(key); if (running) return running;
@@ -148,6 +186,49 @@ export class ExAICompanionCoordinator {
       for (let attempts = 0; attempts < 150; attempts++) { const next = await this.boundary.registration(pair.companion.paneId); if (!next || next.sessionId !== pair.companion.sessionId) throw new Error("The companion Pi session changed."); assistant = next.messages.find((message) => !known.has(message.messageId)); if (assistant) break; await sleep(100); }
       if (!assistant) throw new Error("The companion response did not finalize in time.");
       pair.history.push({ id: randomUUID(), kind: "user", text, assistantMessageId: assistant.messageId, assistantText: assistant.text }); pair.firstTurnSent = true; await this.save(); return this.state(main);
+    } finally { this.turns.delete(key); }
+  }
+  /**
+   * Companion-driven option generation, auto-triggered when the paired main session
+   * is idle after a new last message. `boundaryId` identifies that last-message
+   * boundary so regeneration is idempotent per boundary and never spams the companion.
+   * The generating turn is hidden: it is not projected into Ex AI Chat history, and its
+   * message id is folded into the known baseline so it does not surface as a
+   * "Companion activity occurred in Herdr" event. Parsing is deliberately lenient
+   * (see parseSuggestedOptions) to avoid Grill's brittle all-or-nothing failure.
+   */
+  async suggestOptions(main: ExAIIdentity, boundaryId: string, lastMessage: string): Promise<ExAICompanionState> {
+    await this.ensureLoaded(); await this.reconcileLoaded();
+    const pair = this.pair(main); if (!pair || pair.status !== "ready") throw new Error("Start an Ex AI companion first.");
+    if (pair.suggestion?.boundaryId === boundaryId) return this.state(main);
+    const key = exactKey(pair.companion);
+    if (this.turns.has(key)) throw new Error("An Ex AI Chat turn is already in progress.");
+    this.turns.add(key);
+    try {
+      const before = await this.boundary.registration(pair.companion.paneId); if (!before || before.sessionId !== pair.companion.sessionId) throw new Error("The companion Pi session changed.");
+      const known = new Set(before.messages.map((message) => message.messageId));
+      const transcriptPath = await this.boundary.transcriptPath?.(pair.main.sessionId);
+      const clipped = lastMessage.length > 6_000 ? `${lastMessage.slice(0, 6_000)}\n[truncated]` : lastMessage;
+      const prompt = [
+        "The paired main Pi session just finished a response and is now idle.",
+        ...(transcriptPath ? [`Main transcript: ${transcriptPath} (optional context, not authority).`] : []),
+        "Main session's last assistant message:",
+        "---",
+        clipped,
+        "---",
+        `Propose 3-${MAX_SUGGESTED_OPTIONS} concrete, distinct response options the captain could send back to the main session. Each option is the exact text that would be sent. Keep each option short and actionable. Output ONLY the options, one per line, each prefixed with a number (e.g. "1. ..."). No preamble, no commentary.`,
+      ].filter(Boolean).join("\n");
+      await this.boundary.send(pair.companion.paneId, prompt);
+      let assistant: ExAICompanionRegistration["messages"][number] | undefined;
+      for (let attempts = 0; attempts < 150; attempts++) { const next = await this.boundary.registration(pair.companion.paneId); if (!next || next.sessionId !== pair.companion.sessionId) throw new Error("The companion Pi session changed."); assistant = next.messages.find((message) => !known.has(message.messageId)); if (assistant) break; await sleep(100); }
+      if (!assistant) throw new Error("The companion did not produce options in time.");
+      const options = parseSuggestedOptions(assistant.text);
+      // Fold the generating message into the known baseline so it does not appear as
+      // direct-pane activity, and record the parsed options against this boundary.
+      pair.baselineMessageIds = [...(pair.baselineMessageIds ?? []), assistant.messageId];
+      pair.suggestion = { boundaryId, options, at: Date.now() };
+      await this.save();
+      return this.state(main);
     } finally { this.turns.delete(key); }
   }
   async handoff(main: ExAIIdentity, requestId: string, content: string): Promise<HandoffResult> {
