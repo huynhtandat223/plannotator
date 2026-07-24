@@ -23,6 +23,7 @@ import {
   panelSessions,
   notifyPanelSessionWaiters,
   waitForPanelSessionRegistration,
+  waitForNextPanelSessionRegistration,
   type HerdrPanel,
   type PanelSessionEnrichment,
   workspaceStatus,
@@ -35,6 +36,7 @@ import {
   resolveHerdrAIWorkspace,
   createProcessPanel,
   isKnownProcessPanelWorkspace,
+  selectHerdrAIWorkspace,
 } from "./server";
 
 const temporaryRepos: string[] = [];
@@ -959,6 +961,16 @@ describe("waitForPanelSessionRegistration", () => {
     expect(result).toBeUndefined();
   });
 
+  test("waits for a next registration even when a prior snapshot already exists", async () => {
+    panelSessions.set("w:next", registration("w:next", "old"));
+    const pending = waitForNextPanelSessionRegistration("w:next", 100);
+    setTimeout(() => {
+      panelSessions.set("w:next", registration("w:next", "new"));
+      notifyPanelSessionWaiters("w:next");
+    }, 20);
+    await expect(pending).resolves.toMatchObject({ sessionId: "new" });
+  });
+
   test("a late notify after timeout does not throw or double-resolve", async () => {
     const result = await waitForPanelSessionRegistration("w:stale", 20);
     expect(result).toBeUndefined();
@@ -1063,6 +1075,41 @@ describe("resolveOrCreateAskAiWorkspace", () => {
     expect(a).toEqual({ workspaceId: "w-new", cwd: "/host/app" });
     expect(b).toEqual({ workspaceId: "w-new", cwd: "/host/app" });
     expect(created).toBe(1);
+  });
+});
+
+describe("selectHerdrAIWorkspace", () => {
+  const sameCwdLivePanel: HerdrPanel = {
+    id: "w-captain:p1",
+    workspaceId: "w-captain",
+    workspace: "captain",
+    tab: "",
+    panel: "Captain pane",
+    cwd: "/host/app",
+    status: "idle",
+    focused: true,
+  };
+
+  test("locks a configured dedicated workspace identity ahead of a same-cwd live pane", () => {
+    expect(selectHerdrAIWorkspace("/host/app", [sameCwdLivePanel], {
+      workspaceId: "w-dedicated",
+      cwd: "/host/app",
+    })).toEqual({
+      workspaceId: "w-dedicated",
+      cwd: "/host/app",
+      ensuredWorkspaceId: "w-dedicated",
+    });
+  });
+
+  test("uses a same-cwd live pane only when no matching dedicated workspace exists", () => {
+    expect(selectHerdrAIWorkspace("/host/app", [sameCwdLivePanel], null)).toEqual({
+      workspaceId: "w-captain",
+      cwd: "/host/app",
+    });
+    expect(selectHerdrAIWorkspace("/other", [sameCwdLivePanel], {
+      workspaceId: "w-dedicated",
+      cwd: "/host/app",
+    })).toBeNull();
   });
 });
 

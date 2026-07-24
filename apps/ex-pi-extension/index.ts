@@ -15,7 +15,7 @@ type ExPlannotatorDependencies = {
 		ctx: ExtensionContext,
 		messages: ReturnType<typeof getRecentAssistantMessages>,
 	) => Promise<LiveMessageReviewServer>;
-	reportHerdr: (ctx: ExtensionContext, commands?: ReturnType<ExtensionAPI["getCommands"]>) => Promise<void>;
+	reportHerdr: (ctx: ExtensionContext, commands?: ReturnType<ExtensionAPI["getCommands"]>, agentSettled?: boolean) => Promise<void>;
 	releaseHerdr: (ctx: ExtensionContext) => Promise<void>;
 	pollHerdrFeedback: (ctx: ExtensionContext, sendUserMessage: (content: string, options: { deliverAs: "followUp" }) => void) => Promise<void>;
 	pollHerdrInstruction: (ctx: ExtensionContext, sendUserMessage: (content: string, options: { deliverAs: "followUp" }) => void) => Promise<void>;
@@ -31,7 +31,7 @@ export default function exPlannotator(
 ): void {
 	const dependencies: ExPlannotatorDependencies = {
 		startBrowser: startLiveMessageReviewBrowser,
-		reportHerdr: (ctx, commands) => reportHerdrSession(ctx, undefined, undefined, commands),
+		reportHerdr: (ctx, commands, agentSettled) => reportHerdrSession(ctx, undefined, undefined, commands, agentSettled),
 		releaseHerdr: releaseHerdrSession,
 		pollHerdrFeedback,
 		pollHerdrInstruction,
@@ -195,7 +195,10 @@ export default function exPlannotator(
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
-		void dependencies.reportHerdr(ctx, pi.getCommands());
+		// Publish a settled marker even when Pi failed before producing an
+		// assistant message. Herdr Ask AI uses it to terminate the browser SSE
+		// instead of leaving a failed model switch stuck until timeout.
+		void dependencies.reportHerdr(ctx, pi.getCommands(), true);
 		activeServer?.markAgentStopped?.();
 	});
 

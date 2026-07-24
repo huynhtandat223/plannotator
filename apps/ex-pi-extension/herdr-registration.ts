@@ -59,6 +59,8 @@ export type HerdrSessionRegistration = {
 	totalUsedTokens: number;
 	/** Context tokens represented by Pi's latest compaction summary. */
 	latestCompactionTokens?: number;
+	/** Pi has settled the current turn; failures may have no assistant message. */
+	agentSettled?: true;
 	/** Prevent a nested Pi child that inherited HERDR_PANE_ID from replacing its pane owner. */
 	isSubagent?: true;
 };
@@ -215,6 +217,7 @@ export function currentHerdrRegistration(
 	ctx: HerdrExtensionContext,
 	env: NodeJS.ProcessEnv = process.env,
 	commands: HerdrCommandCapability[] = [],
+	agentSettled = false,
 ): HerdrSessionRegistration | null {
 	const paneId = env.HERDR_PANE_ID?.trim();
 	if (env.HERDR_ENV !== "1" || !paneId) return null;
@@ -226,6 +229,7 @@ export function currentHerdrRegistration(
 		paneId,
 		sessionId: ctx.sessionManager.getSessionId(),
 		...(env.PI_SUBAGENT_CHILD === "1" ? { isSubagent: true as const } : {}),
+		...(agentSettled ? { agentSettled: true as const } : {}),
 		// Newest first, matching /ex-plannotator-last for the first entry while
 		// retaining a small structured history for the live workspace viewer.
 		messages: getActiveBranchAssistantMessages(ctx as ExtensionContext).slice(0, HERDR_LIVE_MESSAGE_LIMIT),
@@ -243,8 +247,9 @@ export async function reportHerdrSession(
 	fetcher: typeof fetch = fetch,
 	env: NodeJS.ProcessEnv = process.env,
 	commands: HerdrCommandCapability[] = [],
+	agentSettled = false,
 ): Promise<void> {
-	const registration = currentHerdrRegistration(ctx, env, commands);
+	const registration = currentHerdrRegistration(ctx, env, commands, agentSettled);
 	if (!registration || registration.isSubagent) return;
 	try {
 		await fetcher(`${loopbackServiceUrl(env)}/api/panel-session`, {

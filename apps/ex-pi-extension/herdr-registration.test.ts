@@ -32,6 +32,16 @@ describe("Herdr session enrichment", () => {
 		});
 	});
 
+	test("marks a settled failed turn without changing the normal registration", () => {
+		const registration = currentHerdrRegistration(
+			context() as never,
+			{ HERDR_ENV: "1", HERDR_PANE_ID: "w:p1" },
+			[],
+			true,
+		);
+		expect(registration?.agentSettled).toBe(true);
+	});
+
 	test("retains only the newest five structured assistant responses", () => {
 		const branch = Array.from({ length: 7 }, (_, index) => ({
 			id: `message-${index + 1}`,
