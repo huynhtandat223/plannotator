@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ExAICompanionCoordinator } from "./ex-ai-companion";
+import { ExAICompanionCoordinator, MAX_SUGGESTED_OPTIONS, parseSuggestedOptions } from "./ex-ai-companion";
 
 type Pane = { id: string; workspaceId?: string; cwd: string };
 type Registration = { sessionId: string; messages: Array<{ messageId: string; text: string }>; model?: string; commands?: Array<{ name: string; description?: string }> };
@@ -213,5 +213,90 @@ describe("Ex AI companion contract", () => {
       expect(fake.created).toEqual(["companion-1", "companion-2"]);
       expect((await service.state(main)).status).toBe("ready");
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("generates companion options for a main last-message boundary, de-dupes by boundary, and hides the generating turn from history", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ex-ai-companion-"));
+    try {
+      const fake = fakeBoundary();
+      // The companion replies with a numbered option list on its next send.
+      fake.boundary.send = async (paneId: string, prompt: string) => {
+        fake.sent.push({ paneId, prompt });
+        const registration = fake.registrations.get(paneId)!;
+        registration.messages.unshift({ messageId: `assistant-${fake.sent.length}`, text: "1. Ship it\n2. Ask for tests\n3. Request a rollback plan" });
+      };
+      const service = new ExAICompanionCoordinator(fake.boundary, dir);
+      const main = { paneId: "main", sessionId: "main-session" };
+      await service.start(main, { model: "provider/model", instruction: "Help" });
+
+      const first = await service.suggestOptions(main, "main-msg-1", "The build is green. What next?");
+      expect(first.suggestion?.boundaryId).toBe("main-msg-1");
+      expect(first.suggestion?.options).toEqual(["Ship it", "Ask for tests", "Request a rollback plan"]);
+      // The prompt carried the main last message to the companion.
+      expect(fake.sent[0].prompt).toContain("The build is green. What next?");
+      // The generating turn is not projected into Ex AI Chat history nor surfaced as activity.
+      expect(first.history).toEqual([]);
+
+      // Same boundary: no new companion send, options are reused.
+      const sentCount = fake.sent.length;
+      const repeat = await service.suggestOptions(main, "main-msg-1", "The build is green. What next?");
+      expect(fake.sent.length).toBe(sentCount);
+      expect(repeat.suggestion?.options).toEqual(["Ship it", "Ask for tests", "Request a rollback plan"]);
+
+      // A new boundary regenerates.
+      const next = await service.suggestOptions(main, "main-msg-2", "Tests pass now.");
+      expect(fake.sent.length).toBe(sentCount + 1);
+      expect(next.suggestion?.boundaryId).toBe("main-msg-2");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("selecting a companion option hands it off to the main session idempotently", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ex-ai-companion-"));
+    try {
+      const fake = fakeBoundary();
+      fake.boundary.send = async (paneId: string, prompt: string) => {
+        fake.sent.push({ paneId, prompt });
+        const registration = fake.registrations.get(paneId)!;
+        registration.messages.unshift({ messageId: `assistant-${fake.sent.length}`, text: "1. Approve\n2. Revise" });
+      };
+      const service = new ExAICompanionCoordinator(fake.boundary, dir);
+      const main = { paneId: "main", sessionId: "main-session" };
+      await service.start(main, { model: "provider/model", instruction: "Help" });
+      const state = await service.suggestOptions(main, "main-msg-1", "Ready for review.");
+      const chosen = state.suggestion!.options[0];
+      const requestId = `suggest:main-msg-1:0`;
+
+      const first = await service.handoff(main, requestId, chosen);
+      expect(fake.claims).toEqual(["Approve"]);
+      // One click = one delivery; a retry with the same requestId does not re-deliver.
+      const again = await service.handoff(main, requestId, chosen);
+      expect(fake.claims).toEqual(["Approve"]);
+      expect(again.deliveryId).toBe(first.deliveryId);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe("parseSuggestedOptions", () => {
+  test("extracts numbered options and trims markers and quotes", () => {
+    expect(parseSuggestedOptions('1. "Approve the plan"\n2. Ask for tests\n3. Reduce scope')).toEqual([
+      "Approve the plan", "Ask for tests", "Reduce scope",
+    ]);
+  });
+
+  test("tolerates preamble, bullets, and blank lines without discarding the batch", () => {
+    const raw = "Here are some options:\n\n- First idea\n\n- Second idea\n";
+    expect(parseSuggestedOptions(raw)).toEqual(["First idea", "Second idea"]);
+  });
+
+  test("falls back to non-empty lines when nothing is explicitly marked", () => {
+    expect(parseSuggestedOptions("Approve\nAsk for tests")).toEqual(["Approve", "Ask for tests"]);
+  });
+
+  test("de-duplicates and clamps to the small set, and never throws on empty input", () => {
+    expect(parseSuggestedOptions("")).toEqual([]);
+    const many = Array.from({ length: 10 }, (_, i) => `${i + 1}. Option ${i % 2}`).join("\n");
+    const parsed = parseSuggestedOptions(many);
+    expect(parsed).toEqual(["Option 0", "Option 1"]);
+    expect(parsed.length).toBeLessThanOrEqual(MAX_SUGGESTED_OPTIONS);
   });
 });

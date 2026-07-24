@@ -35,6 +35,10 @@ interface AppHeaderProps {
   isPanelOpen: boolean;
   aiAvailable: boolean;
   isAIChatOpen: boolean;
+  /** Live Herdr mode suppresses the Ask AI header entry point so Ex AI Chat is the
+   *  single header AI affordance. Ask AI transport/state/hooks stay intact; this only
+   *  hides its button. */
+  hideAskAIHeaderAction?: boolean;
   showExAIChat?: boolean;
   isExAIChatOpen?: boolean;
   aiHasMessages: boolean;
@@ -151,6 +155,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   isExiting,
   isPanelOpen,
   aiAvailable,
+  hideAskAIHeaderAction,
   isAIChatOpen,
   showExAIChat,
   isExAIChatOpen,
@@ -409,7 +414,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
           <HeaderTooltip label={isPanelOpen ? 'Hide annotations' : 'Show annotations'} />
           </span>
         )}
-        {!goalSetupMode && aiAvailable && (
+        {!goalSetupMode && aiAvailable && !hideAskAIHeaderAction && (
           <span className="group relative inline-flex">
           <button
             onClick={onAIChatToggle}

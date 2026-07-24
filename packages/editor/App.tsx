@@ -3975,6 +3975,37 @@ const App: React.FC = () => {
     setIsPanelOpen(true);
   }, [exAIEligible, exitWideMode, wideModeType]);
 
+  // Auto-generate companion response options when the paired main session is idle
+  // after its last assistant message. The last-message boundary is the assistant
+  // messageId; a new boundary (new response) re-triggers, but transient activity or
+  // repeated idle renders for the same boundary do not. Debounced so a burst of
+  // snapshot updates settles before we ask the companion once. The companion (not a
+  // template) produces the options; useExAIChat de-dupes by boundaryId server-side.
+  const exAISuggestBoundary = exAIChat.suggest;
+  const requestedSuggestBoundaryRef = useRef<string | null>(null);
+  const exAIChatStatus = exAIChat.state.status;
+  const exAIMainIdle = liveMessageReview
+    && !selectedLiveMessage?.isExAICompanion
+    && selectedLiveMessage?.agentStatus === 'idle';
+  const exAIBoundaryId = exAIMainIdle ? (selectedLiveMessage?.assistantMessageId ?? null) : null;
+  const exAIBoundaryText = exAIBoundaryId ? (selectedLiveMessage?.text ?? '') : '';
+  useEffect(() => {
+    if (exAIChatStatus !== 'ready') return;
+    if (!exAIEligible || !exAIBoundaryId || !exAIBoundaryText.trim()) return;
+    // Already generated (or in flight) for this exact last-message boundary.
+    if (exAIChat.state.suggestion?.boundaryId === exAIBoundaryId) return;
+    if (requestedSuggestBoundaryRef.current === exAIBoundaryId) return;
+    const timer = setTimeout(() => {
+      requestedSuggestBoundaryRef.current = exAIBoundaryId;
+      void exAISuggestBoundary(exAIBoundaryId, exAIBoundaryText).catch(() => {
+        // Allow a later boundary change (or the same one) to retry.
+        if (requestedSuggestBoundaryRef.current === exAIBoundaryId) requestedSuggestBoundaryRef.current = null;
+      });
+    }, 1200);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exAIChatStatus, exAIEligible, exAIBoundaryId, exAIBoundaryText, exAIChat.state.suggestion?.boundaryId, exAISuggestBoundary]);
+
   const openAIChat = useCallback(() => {
     if (wideModeType !== null) {
       exitWideMode({ restore: false, panelOpen: true });
@@ -4607,6 +4638,7 @@ const App: React.FC = () => {
           isExiting={isExiting}
           isPanelOpen={isPanelOpen && rightSidebarTab === 'annotations'}
           aiAvailable={canUseAskAI}
+          hideAskAIHeaderAction={liveMessageReview}
           isAIChatOpen={isPanelOpen && rightSidebarTab === 'ai'}
           showExAIChat={exAIEligible}
           isExAIChatOpen={isPanelOpen && rightSidebarTab === 'ex-ai'}
@@ -5372,7 +5404,7 @@ const App: React.FC = () => {
           {isPanelOpen && rightSidebarTab === 'ex-ai' && wideModeType === null && exAIEligible && (
             <aside data-ex-ai-chat="true" className={`border-l border-border/50 bg-card flex flex-col flex-shrink-0 ${isMobile ? 'fixed top-12 bottom-0 right-0 z-[60] w-full max-w-sm shadow-2xl' : ''}`} style={isMobile ? undefined : { width: `var(--rpanel-w, ${panelResize.width ?? 288}px)` }}>
               <div className="flex h-10 items-center justify-between border-b border-border/50 px-3"><h2 className="text-xs font-medium">Ex AI Chat</h2><div className="flex items-center gap-3">{(exAIChat.state.status === 'ready' || exAIChat.state.status === 'recovering') && <button onClick={() => setShowExAIStopConfirm(true)} className="text-xs text-destructive">Stop companion</button>}<button onClick={() => setIsPanelOpen(false)} aria-label="Hide Ex AI Chat" className="text-xs text-muted-foreground">Hide</button></div></div>
-              <ExAIChatPanel state={exAIChat.state} error={exAIChat.error} onStart={exAIChat.start} onSend={exAIChat.send} onHandoff={exAIChat.handoff} />
+              <ExAIChatPanel state={exAIChat.state} error={exAIChat.error} onStart={exAIChat.start} onSend={exAIChat.send} onHandoff={exAIChat.handoff} suggestBoundaryId={exAIBoundaryId} />
             </aside>
           )}
           </div>

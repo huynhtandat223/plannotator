@@ -2714,7 +2714,7 @@ async function serveExAICompanion(response: ServerResponse, url: URL): Promise<v
   });
 }
 
-async function mutateExAICompanion(request: IncomingMessage, response: ServerResponse, action: "start" | "turn" | "handoff" | "stop"): Promise<void> {
+async function mutateExAICompanion(request: IncomingMessage, response: ServerResponse, action: "start" | "turn" | "handoff" | "stop" | "suggest"): Promise<void> {
   if (!canWriteFeedback(request)) {
     writeJson(response, 403, { error: "Ex AI Chat requires a loopback, Tailscale, or write-token browser." });
     return;
@@ -2748,6 +2748,16 @@ async function mutateExAICompanion(request: IncomingMessage, response: ServerRes
       return;
     }
     writeJson(response, 202, await exAICompanions.sendTurn(main, turn));
+    return;
+  }
+  if (action === "suggest") {
+    const boundaryId = text(body?.boundaryId);
+    const lastMessage = text(body?.lastMessage);
+    if (!boundaryId || boundaryId.length > 200 || !lastMessage) {
+      writeJson(response, 400, { error: "A last-message boundary and text are required" });
+      return;
+    }
+    writeJson(response, 202, await exAICompanions.suggestOptions(main, boundaryId, lastMessage));
     return;
   }
   const requestId = text(body?.requestId);
@@ -2906,6 +2916,10 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
   }
   if (request.method === "POST" && url.pathname === "/api/ex-ai-companion/stop") {
     void mutateExAICompanion(request, response, "stop").catch((error: unknown) => writeJson(response, 409, { error: error instanceof Error ? error.message : "Could not stop Ex AI Chat" }));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/api/ex-ai-companion/suggest") {
+    void mutateExAICompanion(request, response, "suggest").catch((error: unknown) => writeJson(response, 409, { error: error instanceof Error ? error.message : "Could not generate Ex AI Chat options" }));
     return;
   }
   if (request.method === "POST" && url.pathname === "/api/ex-ai-companion/handoff") {
