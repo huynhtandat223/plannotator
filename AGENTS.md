@@ -602,6 +602,15 @@ bun run dev:vscode     # VS Code extension (watch mode)
 
 **Local `plannotator` command:** run `bun link` once in the checkout to make the global `plannotator` command use this repo's source (`apps/hook/server/index.ts`) instead of an installed release binary. Commands like `plannotator review` then reflect local changes immediately. Rebuild the bundled HTML when changing UI code (see Build below).
 
+## Testing
+
+```bash
+bun test                                   # default suite; DOM tests self-skip
+DOM_TESTS=1 bun test path/to/File.test.tsx # component tests that mount React
+```
+
+Tests that mount components are gated behind `DOM_TESTS=1` and call `test.skipIf(!hasDom)`, so they are skipped by a plain `bun test`. Set the flag **only for the specific DOM test files you are running**: the happy-dom preload registers global `window`/`fetch`, which breaks server-oriented tests, so `DOM_TESTS=1 bun test` across the whole repo fails in bulk by design. See `packages/ui/test-setup/happy-dom.ts` and any `*.test.tsx` for the pattern.
+
 ## Build
 
 ```bash

@@ -13,6 +13,18 @@ import {
   MESSAGE_PICKER_COUNT_OPTIONS,
   type MessagePickerCount,
 } from "../../utils/storage";
+import { CaptainEchoRow } from "./CaptainEchoRow";
+
+/**
+ * A captain-authored message this browser sent, echoed back for a two-sided
+ * transcript. Browser-local only: the host never stores captain turns, so these
+ * are not snapshot rows, carry no Pi identity, and are never annotation targets.
+ */
+export interface CaptainEcho {
+  id: string;
+  text: string;
+  timestamp?: string;
+}
 
 export interface PickerMessage {
   messageId: string;
@@ -67,6 +79,13 @@ interface MessagesBrowserProps {
   emptyLabel?: string;
   /** Ex-Plannotator's live compact history is chronological; normal hosts are newest-first. */
   chronological?: boolean;
+  /**
+   * Browser-local captain echoes to render above a snapshot row, keyed by that
+   * row's `messageId`. Kept out of `messages` on purpose: echoes must not shift
+   * `#N` numbering or consume the per-pane visible-count window, and they must
+   * never become selectable annotation targets.
+   */
+  captainEchoes?: ReadonlyMap<string, readonly CaptainEcho[]>;
 }
 
 // Hard cap for browsers where line-clamp is unavailable, and to avoid huge sidebar text nodes.
@@ -139,6 +158,7 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   listLabel = "Recent messages — newest first",
   emptyLabel = "No recent assistant messages found.",
   chronological = false,
+  captainEchoes,
 }) => {
   const [count, setCount] = React.useState<MessagePickerCount>(() => getMessagePickerCount());
   // Whether the user expanded the flat list past the count cap this session.
@@ -214,6 +234,20 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
     );
   };
 
+  /** Snapshot row preceded by any browser-local captain echoes anchored to it. */
+  const renderEntry = ({ msg, index }: IndexedMessage) => {
+    const echoes = captainEchoes?.get(msg.messageId);
+    if (!echoes || echoes.length === 0) return renderRow(msg, index);
+    return (
+      <React.Fragment key={`entry:${msg.messageId}`}>
+        {echoes.map((echo) => (
+          <CaptainEchoRow key={echo.id} text={echo.text} timestamp={formatTimestamp(echo.timestamp)} />
+        ))}
+        {renderRow(msg, index)}
+      </React.Fragment>
+    );
+  };
+
   // Grouped: herd/workspace remains a presentation boundary, while the count
   // applies independently to each Pi session. Flat callers keep one global list.
   // `index` stays global so `#N` numbering and the ★ marker remain stable.
@@ -265,10 +299,10 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
                 <div className="px-2 pt-2 pb-1 text-[9px] font-semibold uppercase tracking-wider text-muted-foreground truncate">
                   {group.label}
                 </div>
-                {group.entries.map(({ msg, index }) => renderRow(msg, index))}
+                {group.entries.map(renderEntry)}
               </div>
             ))
-          : flatShown!.map(({ msg, index }) => renderRow(msg, index))}
+          : flatShown!.map(renderEntry)}
         {(hiddenCount > 0 || expanded) && (
           <button
             type="button"

@@ -15,7 +15,7 @@ import { VersionBrowser } from "./VersionBrowser";
 import { FileBrowser, type FileEditStatus } from "./FileBrowser";
 import { GitChangesBrowser } from "./GitChangesBrowser";
 import { ArchiveBrowser, type ArchivedPlan } from "./ArchiveBrowser";
-import { MessagesBrowser, type PickerMessage } from "./MessagesBrowser";
+import { MessagesBrowser, type CaptainEcho, type PickerMessage } from "./MessagesBrowser";
 import { MessagesIcon } from "../icons/MessagesIcon";
 import { OverlayScrollArea } from "../OverlayScrollArea";
 import { ReviewAgentsIcon } from "../ReviewAgentsIcon";
@@ -79,6 +79,8 @@ interface SidebarContainerProps {
   selectedMessageId?: string | null;
   onSelectMessage?: (messageId: string) => void;
   messageAnnotationCounts?: Map<string, number>;
+  /** Browser-local captain echoes anchored to a snapshot row's `messageId`. */
+  messageCaptainEchoes?: ReadonlyMap<string, readonly CaptainEcho[]>;
   /** A newer response finished in another pane while the reviewer stayed here. */
   hasPendingResponse?: boolean;
   messagePickerLabels?: {
@@ -143,6 +145,7 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
   selectedMessageId,
   onSelectMessage,
   messageAnnotationCounts,
+  messageCaptainEchoes,
   hasPendingResponse,
   messagePickerLabels,
 }) => {
@@ -349,6 +352,7 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
             selectedMessageId={selectedMessageId ?? null}
             onSelect={onSelectMessage}
             annotationCounts={messageAnnotationCounts}
+            captainEchoes={messageCaptainEchoes}
             listLabel={pickerLabels.list}
             emptyLabel={pickerLabels.empty}
           />
@@ -431,6 +435,7 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
                   onClose();
                 }}
                 annotationCounts={messageAnnotationCounts}
+                captainEchoes={messageCaptainEchoes}
                 listLabel={pickerLabels.list}
                 emptyLabel={pickerLabels.empty}
               />
