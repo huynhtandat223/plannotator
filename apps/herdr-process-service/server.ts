@@ -1993,6 +1993,20 @@ async function readLiveState(): Promise<HerdrLiveState> {
 
 const liveSnapshotPublisher = new LiveSnapshotPublisher(readLiveState);
 
+// Backend-reachability liveness for /health. A dead `herdr api snapshot` used
+// to be invisible because /health only proved the HTTP process was up (the
+// 2026-07-25 outage: /health 200 while /api/plan 503'd for 30+ minutes). The
+// poll loop below records the outcome of each refresh here so /health can fail
+// when the Herdr backend has been unreachable.
+const backendLiveness = { lastOkMs: 0, lastError: null as string | null };
+function markBackendOk(): void {
+  backendLiveness.lastOkMs = Date.now();
+  backendLiveness.lastError = null;
+}
+function markBackendError(error: unknown): void {
+  backendLiveness.lastError = error instanceof Error ? error.message : String(error);
+}
+
 async function refreshLiveState(): Promise<PublishedLiveSnapshot<HerdrLiveState>> {
   const published = await liveSnapshotPublisher.refresh();
   // Fresh Herdr snapshots are liveness authority for durable Ex AI pair reconciliation.
@@ -2856,7 +2870,23 @@ function serveExternalAnnotationsStream(request: IncomingMessage, response: Serv
 function serve(request: IncomingMessage, response: ServerResponse): void {
   const url = new URL(request.url ?? "/", `http://${host}:${port}`);
   if (request.method === "GET" && url.pathname === "/health") {
-    writeJson(response, 200, { ok: true });
+    // Prove the Herdr backend is reachable, not just that this HTTP process is
+    // up. Before 2026-07-25 /health returned 200 while `herdr api snapshot`
+    // was refused for 30+ minutes, masking the outage. Treat a snapshot seen
+    // within the last few poll cycles as healthy; otherwise report 503 so an
+    // external check (or systemd) can act on a dead backend.
+    const HEALTH_STALE_MS = HERDR_SNAPSHOT_POLL_MS * 5;
+    const ageMs = backendLiveness.lastOkMs === 0 ? Infinity : Date.now() - backendLiveness.lastOkMs;
+    if (ageMs <= HEALTH_STALE_MS) {
+      writeJson(response, 200, { ok: true, backend: "ok", lastSnapshotAgeMs: ageMs });
+    } else {
+      writeJson(response, 503, {
+        ok: false,
+        backend: "unreachable",
+        lastSnapshotAgeMs: Number.isFinite(ageMs) ? ageMs : null,
+        error: backendLiveness.lastError ?? "herdr snapshot not yet observed",
+      });
+    }
     return;
   }
   if (request.method === "GET" && url.pathname === "/api/image") {
@@ -3044,8 +3074,11 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
 if (import.meta.main) {
   // Herdr's focus and pane status are the host's live selection authority.
   // One shared refresh loop publishes transitions to every connected browser.
-  void refreshLiveState().catch(() => {});
-  const refreshTimer = setInterval(() => void refreshLiveState().catch(() => {}), HERDR_SNAPSHOT_POLL_MS);
+  void refreshLiveState().then(markBackendOk).catch(markBackendError);
+  const refreshTimer = setInterval(
+    () => void refreshLiveState().then(markBackendOk).catch(markBackendError),
+    HERDR_SNAPSHOT_POLL_MS,
+  );
   const server = createServer(serve);
   server.on("close", () => {
     clearInterval(refreshTimer);
