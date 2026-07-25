@@ -347,9 +347,16 @@ const exAICompanions = new ExAICompanionCoordinator({
 }, exAICompanionDataDir);
 const exAIConfig = loadConfig().exAIChat;
 const DEFAULT_EX_AI_INSTRUCTION = "Act as a concise first-layer assistant for the paired main Pi session. Inspect the main transcript and workspace when useful. Give clear, actionable guidance. Do not modify files or send messages to the main session unless explicitly asked.";
+// Fire-and-forget at module load, so it must swallow its own failure like every
+// other `void` call here. setDefaults() lazily loads the companion store, which
+// reconciles against live panes via the `herdr` CLI — absent on any host that
+// merely imports this module (CI, or a dev box without Herdr installed). An
+// unhandled rejection there fails the whole test file, not just this call.
 void exAICompanions.setDefaults({
   model: exAIConfig?.model?.trim() ?? "",
   instruction: exAIConfig?.instruction?.trim() || DEFAULT_EX_AI_INSTRUCTION,
+}).catch(() => {
+  /* no live Herdr host to reconcile against; request paths surface their own errors */
 });
 // Full review feedback is preformatted Markdown from the existing review UI.
 // It deliberately reuses the same session-scoped instruction claim transport
