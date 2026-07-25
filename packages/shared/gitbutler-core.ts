@@ -37,7 +37,23 @@ const GITBUTLER_WORKSPACE_REFS = new Set([
 const STATUS_TIMEOUT_MS = 30_000;
 const VERSION_TIMEOUT_MS = 5_000;
 const OBJECT_ID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i;
-const STATUS_CACHE_MS = 5_000;
+const DEFAULT_STATUS_CACHE_MS = 5_000;
+
+/**
+ * How long one `but status` result is reused per (runtime, cwd).
+ *
+ * Overridable via PLANNOTATOR_GITBUTLER_STATUS_CACHE_MS so tests that must
+ * observe a topology change can shorten the window instead of hardcoding a
+ * copy of the default and sleeping past it. Hardcoded copies silently rot
+ * when the TTL is retuned (the 1s -> 5s change in #13 did exactly that).
+ */
+export function getGitButlerStatusCacheMs(): number {
+  const override = Number.parseInt(
+    process.env.PLANNOTATOR_GITBUTLER_STATUS_CACHE_MS ?? "",
+    10,
+  );
+  return Number.isFinite(override) && override >= 0 ? override : DEFAULT_STATUS_CACHE_MS;
+}
 
 /** Runtime operations needed by the shared GitButler provider. */
 export interface ReviewGitButlerRuntime extends ReviewGitRuntime {
@@ -270,7 +286,7 @@ async function loadStatus(runtime: ReviewGitButlerRuntime, cwd: string): Promise
     const resolved = await status;
     if (cache.get(cwd) === entry) {
       entry.inFlight = false;
-      entry.expiresAt = Date.now() + STATUS_CACHE_MS;
+      entry.expiresAt = Date.now() + getGitButlerStatusCacheMs();
     }
     return resolved;
   } catch (error) {

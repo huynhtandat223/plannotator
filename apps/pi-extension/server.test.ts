@@ -42,6 +42,14 @@ const originalSemPath = process.env.PLANNOTATOR_SEM_PATH;
 const originalDataDir = process.env.PLANNOTATOR_DATA_DIR;
 const originalFileBrowserLimit = process.env.PLANNOTATOR_FILE_BROWSER_MAX_FILES;
 const originalPath = process.env.PATH;
+const originalGitButlerStatusCache = process.env.PLANNOTATOR_GITBUTLER_STATUS_CACHE_MS;
+
+// Short GitButler status-cache window for tests that must observe a topology
+// change, plus the matching wait. Keeping both here means a future retune of
+// the production default cannot desync this test again.
+const GITBUTLER_TEST_STATUS_CACHE_MS = 250;
+const waitForGitButlerStatusCacheExpiry = (): Promise<void> =>
+  Bun.sleep(GITBUTLER_TEST_STATUS_CACHE_MS + 50);
 
 function makeTempDir(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -266,6 +274,11 @@ afterEach(() => {
   } else {
     process.env.PATH = originalPath;
   }
+  if (originalGitButlerStatusCache === undefined) {
+    delete process.env.PLANNOTATOR_GITBUTLER_STATUS_CACHE_MS;
+  } else {
+    process.env.PLANNOTATOR_GITBUTLER_STATUS_CACHE_MS = originalGitButlerStatusCache;
+  }
 
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
@@ -383,6 +396,11 @@ describe("pi review server", () => {
     ].join("\n"), "utf-8");
     chmodSync(butPath, 0o755);
     process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    // The provider caches `but status` per (runtime, cwd). This test mutates the
+    // fixture status twice and must see each change, so shrink the cache window
+    // rather than sleeping past the production default — the previous hardcoded
+    // 1_050ms sleeps went stale when the default TTL moved 1s -> 5s in #13.
+    process.env.PLANNOTATOR_GITBUTLER_STATUS_CACHE_MS = String(GITBUTLER_TEST_STATUS_CACHE_MS);
 
     const prepared = await prepareLocalReviewDiff({
       cwd: repoDir,
@@ -442,7 +460,7 @@ describe("pi review server", () => {
         upstreamCommits: [],
       });
       writeFileSync(statusPath, JSON.stringify(updatedStatus), "utf-8");
-      await Bun.sleep(1_050);
+      await waitForGitButlerStatusCacheExpiry();
 
       const refreshedResponse = await fetch(`${server.url}/api/diff/switch`, {
         method: "POST",
@@ -542,7 +560,7 @@ describe("pi review server", () => {
 
       updatedStatus.mergeBase.commitId = tip;
       writeFileSync(statusPath, JSON.stringify(updatedStatus), "utf-8");
-      await Bun.sleep(1_050);
+      await waitForGitButlerStatusCacheExpiry();
       const rebasedResponse = await fetch(`${server.url}/api/diff/switch`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
