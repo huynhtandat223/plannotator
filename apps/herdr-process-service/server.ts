@@ -113,7 +113,16 @@ export class LiveSnapshotPublisher<T> {
 // The packaged Ex-Plannotator editor owns every visual decision, including its
 // responsive/mobile behavior. This service supplies data only.
 const editorHtml = readFileSync(join(import.meta.dir, "..", "ex-pi-extension", "ex-plannotator.html"), "utf8");
-const reviewHtml = readFileSync(join(import.meta.dir, "..", "review", "dist", "index.html"), "utf8");
+
+// apps/review/dist is a build artifact (gitignored), unlike the committed
+// ex-plannotator.html above. Read it on first use, not at module load: this
+// module also exports pure helpers that tests import, and an eager read made
+// importing it throw ENOENT in any checkout that had not run the review build.
+let reviewHtmlCache: string | undefined;
+function loadReviewHtml(): string {
+  reviewHtmlCache ??= readFileSync(join(import.meta.dir, "..", "review", "dist", "index.html"), "utf8");
+  return reviewHtmlCache;
+}
 
 type HerdrReviewSnapshot = {
   /** Monotonic host snapshot version. The browser ignores stale SSE frames. */
@@ -338,9 +347,16 @@ const exAICompanions = new ExAICompanionCoordinator({
 }, exAICompanionDataDir);
 const exAIConfig = loadConfig().exAIChat;
 const DEFAULT_EX_AI_INSTRUCTION = "Act as a concise first-layer assistant for the paired main Pi session. Inspect the main transcript and workspace when useful. Give clear, actionable guidance. Do not modify files or send messages to the main session unless explicitly asked.";
+// Fire-and-forget at module load, so it must swallow its own failure like every
+// other `void` call here. setDefaults() lazily loads the companion store, which
+// reconciles against live panes via the `herdr` CLI — absent on any host that
+// merely imports this module (CI, or a dev box without Herdr installed). An
+// unhandled rejection there fails the whole test file, not just this call.
 void exAICompanions.setDefaults({
   model: exAIConfig?.model?.trim() ?? "",
   instruction: exAIConfig?.instruction?.trim() || DEFAULT_EX_AI_INSTRUCTION,
+}).catch(() => {
+  /* no live Herdr host to reconcile against; request paths surface their own errors */
 });
 // Full review feedback is preformatted Markdown from the existing review UI.
 // It deliberately reuses the same session-scoped instruction claim transport
@@ -2537,7 +2553,7 @@ async function openGitChangesReview(request: IncomingMessage, response: ServerRe
           port: 0,
           hostname: host,
           error: prepared.error,
-          htmlContent: reviewHtml,
+          htmlContent: loadReviewHtml(),
           origin: "pi",
           diffType: prepared.diffType,
           ...(pathspec ? { pathspec, reviewRoot: repoRoot } : {}),
