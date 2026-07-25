@@ -64,9 +64,9 @@ export function useExAIChat(main: ExAIIdentity | null) {
   // Asks the companion to read the main session's last message and propose response
   // options for a specific last-message boundary. Idempotent per boundary in the
   // coordinator; safe to call again if the main produces a new last message.
-  const suggest = useCallback(async (boundaryId: string, lastMessage: string) => {
-    if (!main) return;
-    try { setState(await request('/api/ex-ai-companion/suggest', 'POST', { ...main, boundaryId, lastMessage })); setError(null); }
+  const suggest = useCallback(async (boundaryId: string, lastMessage: string): Promise<ExAIChatState | undefined> => {
+    if (!main) return undefined;
+    try { const next = await request('/api/ex-ai-companion/suggest', 'POST', { ...main, boundaryId, lastMessage }); setState(next); setError(null); return next; }
     catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not generate options'); throw reason; }
   }, [main]);
   return { state, error, refresh, start, stop, send, handoff, suggest };

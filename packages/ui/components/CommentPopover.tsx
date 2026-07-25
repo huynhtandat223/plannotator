@@ -65,6 +65,15 @@ interface CommentPopoverProps {
   onRunLivePiCommand?: (command: string, args: string) => Promise<void>;
   /** Opt-in project file search for live-Pi Global Messages. */
   onSearchFileMentions?: (query: string) => Promise<string[]>;
+  /**
+   * Opt-in Ex AI Chat option pick-list for live global comments. Returns the
+   * companion's suggested reply options for the current pane boundary (shared
+   * per-boundary cache with the right-panel cards, so the companion is not asked
+   * twice). Picking an option INSERTS its text into the composer as editable
+   * draft at the cursor; it never sends. Absent by default so non-live comment
+   * surfaces are untouched.
+   */
+  onRequestOptions?: () => Promise<string[]>;
 }
 
 const MAX_POPOVER_WIDTH = 384;
@@ -129,6 +138,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   livePiCommands = [],
   onRunLivePiCommand,
   onSearchFileMentions,
+  onRequestOptions,
 }) => {
   const [mode, setMode] = useState<'popover' | 'dialog'>('popover');
   const initialDraft = draftKey ? draftStore.get(draftKey) : undefined;
@@ -139,6 +149,13 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   const [livePiCommandError, setLivePiCommandError] = useState<string | null>(null);
   const [fileSuggestions, setFileSuggestions] = useState<string[]>([]);
   const [isSearchingFiles, setIsSearchingFiles] = useState(false);
+  // In-composer Ex AI Chat option pick-list. Opt-in via onRequestOptions; picking an
+  // option INSERTS its text into the composer at the cursor as editable draft — it never
+  // sends. Absent for non-live comment surfaces, which never render the list.
+  const [optionList, setOptionList] = useState<string[] | null>(null);
+  const [isLoadingOptions, setIsLoadingOptions] = useState(false);
+  const [optionsError, setOptionsError] = useState<string | null>(null);
+  const [activeOptionIndex, setActiveOptionIndex] = useState(0);
   const [position, setPosition] = useState<{ top: number; left: number; flipAbove: boolean; width: number } | null>(null);
   // Direction of an open popover that has scrolled out of view, or null when on-screen.
   const [offscreen, setOffscreen] = useState<'above' | 'below' | null>(null);
@@ -180,6 +197,9 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     setSelectedLivePiCommand(null);
     setLivePiCommandError(null);
     setFileSuggestions([]);
+    setOptionList(null);
+    setOptionsError(null);
+    setIsLoadingOptions(false);
   }, [draftKey, initialText, allowImages]);
 
   useEffect(() => {
@@ -322,6 +342,51 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     });
   }, [text]);
 
+  // Fetch the companion's suggested options for the current boundary and open the
+  // inline pick-list. Shares the per-boundary suggestion cache with the right-panel
+  // cards (App wires this to useExAIChat.suggest), so the companion is not asked twice.
+  const handleRequestOptions = useCallback(async () => {
+    if (!onRequestOptions || isLoadingOptions) return;
+    setOptionsError(null);
+    setIsLoadingOptions(true);
+    try {
+      const options = await onRequestOptions();
+      setOptionList(options);
+      setActiveOptionIndex(0);
+      if (options.length === 0) setOptionsError('No options were suggested for this message yet.');
+    } catch (error) {
+      setOptionList(null);
+      setOptionsError(error instanceof Error ? error.message : 'Could not load options');
+    } finally {
+      setIsLoadingOptions(false);
+    }
+  }, [onRequestOptions, isLoadingOptions]);
+
+  // Insert the picked option into the composer as editable draft at the cursor.
+  // Non-destructive: never replaces an existing draft. Nothing is sent — the captain
+  // submits explicitly through the composer's single submit path.
+  const handleSelectOption = useCallback((option: string) => {
+    const textarea = textareaRef.current;
+    const start = textarea?.selectionStart ?? text.length;
+    const end = textarea?.selectionEnd ?? text.length;
+    const before = text.slice(0, start);
+    const after = text.slice(end);
+    // Space the insertion off adjacent text so a pick never fuses into a typed word.
+    const needsLeadingSep = before.length > 0 && !/\s$/.test(before);
+    const needsTrailingSep = after.length > 0 && !/^\s/.test(after);
+    const insertion = `${needsLeadingSep ? '\n' : ''}${option}${needsTrailingSep ? '\n' : ''}`;
+    const nextText = before + insertion + after;
+    const cursor = before.length + insertion.length;
+    setText(nextText);
+    setOptionList(null);
+    setOptionsError(null);
+    requestAnimationFrame(() => {
+      if (!textarea) return;
+      textarea.focus();
+      textarea.selectionStart = textarea.selectionEnd = cursor;
+    });
+  }, [text]);
+
   const handleSelectLivePiArgument = useCallback((argument: string) => {
     if (!commandForArguments) return;
     const nextText = `/${commandForArguments.name} ${argument}`;
@@ -381,6 +446,33 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   }, [allowImages, askAIContext, contextText, draftKey, isGlobal, onAskAI, onClose, onDraftChange, text]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Option pick-list navigation takes precedence while the list is open, mirroring
+    // the arrows/Enter/Esc contract of the livePiCommands list. Esc dismisses the list
+    // first (leaving the draft intact) before it closes the whole popover.
+    if (optionList && optionList.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setActiveOptionIndex((index) => (index + 1) % optionList.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setActiveOptionIndex((index) => (index - 1 + optionList.length) % optionList.length);
+        return;
+      }
+      if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.nativeEvent.isComposing) {
+        e.preventDefault();
+        handleSelectOption(optionList[activeOptionIndex]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        e.preventDefault();
+        setOptionList(null);
+        setOptionsError(null);
+        return;
+      }
+    }
     if (e.key === 'Escape') {
       e.stopPropagation();
       if (mode === 'dialog') {
@@ -476,6 +568,48 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     </>
   );
 
+  // Inline Ex AI Chat option pick-list. Keyboard-navigable like the Pi-command list
+  // (arrows / Enter / Esc). Each option is multi-line text, so it renders as stacked
+  // buttons, not a real <select>. Picking one INSERTS it into the composer at the
+  // cursor as editable draft — it never sends. Label makes the difference from the
+  // right-panel one-click-send cards visible.
+  const optionListBlock = onRequestOptions && optionList !== null && optionList.length > 0 && (
+    <div className="mt-2 overflow-hidden rounded-md border border-border bg-muted/30" role="listbox" aria-label="Ex AI Chat options (inserts for editing)">
+      <div className="border-b border-border px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground">
+        Pick to insert for editing — not sent until you submit
+      </div>
+      {optionList.map((option, index) => (
+        <button
+          key={`${index}:${option}`}
+          type="button"
+          role="option"
+          aria-selected={index === activeOptionIndex}
+          onPointerEnter={() => setActiveOptionIndex(index)}
+          onClick={() => handleSelectOption(option)}
+          className={`flex w-full whitespace-pre-wrap border-b border-border px-2.5 py-2 text-left text-xs text-foreground last:border-b-0 hover:bg-muted ${index === activeOptionIndex ? 'bg-muted' : ''}`}
+        >
+          {option}
+        </button>
+      ))}
+    </div>
+  );
+
+  const showOptionsAction = onRequestOptions && isGlobal && (
+    <>
+      <button
+        type="button"
+        onClick={() => void handleRequestOptions()}
+        disabled={isLoadingOptions}
+        className="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium rounded-md text-muted-foreground hover:text-primary hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        title="Show Ex AI Chat options and insert one for editing (does not send)"
+      >
+        <SparklesIcon className="w-3 h-3" />
+        {isLoadingOptions ? 'Loading…' : 'Show options'}
+      </button>
+      {optionsError && <span role="alert" className="text-xs text-destructive">{optionsError}</span>}
+    </>
+  );
+
   if (mode === 'dialog') {
     return createPortal(
       <div data-comment-popover="true" className="fixed inset-0 z-[100] flex items-center justify-center p-4">
@@ -535,6 +669,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
             {commandAutocomplete}
             {commandArgumentAutocomplete}
             {fileAutocomplete}
+            {optionListBlock}
           </div>
 
           {/* Footer */}
@@ -551,6 +686,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
             </div>
             <div className="flex items-center gap-3">
               {livePiCommandAction}
+              {showOptionsAction}
               {onAskAI && (
                 <button
                   onClick={handleAskAI}
@@ -661,6 +797,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
         {commandAutocomplete}
         {commandArgumentAutocomplete}
         {fileAutocomplete}
+        {optionListBlock}
       </div>
 
       {/* Footer */}
@@ -677,6 +814,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
         </div>
         <div className="flex items-center gap-3">
           {livePiCommandAction}
+          {showOptionsAction}
           {onAskAI && (
             <button
               onClick={handleAskAI}
