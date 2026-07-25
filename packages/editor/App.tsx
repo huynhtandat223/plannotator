@@ -1648,6 +1648,18 @@ const App: React.FC = () => {
       ? `msg:${selectedMessageId}`
       : `plan:${editGeneration}`;
 
+  // Global-comment draft key for live panes. Scoped to pane + Pi session, NOT
+  // message id, so the "Message Pi" composer's unsent text survives the keyed
+  // Viewer remount that fires when a real assistant response replaces the
+  // synthetic waiting document (viewerContentKey flips msg:<waiting> ->
+  // msg:<response>). Pane+session is the correct boundary: the codebase already
+  // treats a Pi-session change as the point to discard drafts
+  // (liveMessageScope.ts changedLivePaneSessionIds, "Draft annotations
+  // discarded" toast). Absent for non-live hosts, which keep today's behavior.
+  const globalCommentDraftKey = liveMessageReview && selectedLiveMessage?.paneId && selectedLiveMessage?.piSessionId
+    ? `live:${selectedLiveMessage.paneId}:${selectedLiveMessage.piSessionId}`
+    : undefined;
+
   // Track active section for TOC highlighting
   const headingCount = useMemo(() => blocks.filter(b => b.type === 'heading').length, [blocks]);
   const activeSection = useActiveSection(containerRef, headingCount, scrollViewport);
@@ -5241,6 +5253,7 @@ const App: React.FC = () => {
                     onSelectAnnotation={handleSelectAnnotation}
                     selectedAnnotationId={selectedAnnotationId}
                     isWaiting={sendsGlobalCommentAsUserMessage}
+                    globalCommentDraftKey={globalCommentDraftKey}
                     livePiCommands={liveMessageReview ? selectedLiveMessage?.commands ?? [] : []}
                     onSearchFileMentions={liveMessageReview ? async (query) => {
                       if (!selectedLiveMessage?.paneId) return [];
