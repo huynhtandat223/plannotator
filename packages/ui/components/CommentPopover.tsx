@@ -73,6 +73,17 @@ const GAP = 8;
 // Module-level draft store: survives popover unmount so reopening the same key restores in-progress text.
 const draftStore = new Map<string, { text: string; images: ImageAttachment[] }>();
 
+/**
+ * Whether a surviving draft exists for `draftKey`. Lets a host re-open the
+ * composer after a keyed remount so the reviewer keeps text *and* focus, not
+ * just the text. No key => never.
+ */
+export function hasCommentDraft(draftKey: string | undefined): boolean {
+  if (!draftKey) return false;
+  const draft = draftStore.get(draftKey);
+  return draft ? hasUnsavedCommentContent(draft.text, draft.images) : false;
+}
+
 /** Mirrors the latest text + images into `draftStore[draftKey]` so they outlive popover unmount. No-op without a key. */
 function useCommentDraftSync(draftKey: string | undefined, text: string, images: ImageAttachment[]) {
   useEffect(() => {

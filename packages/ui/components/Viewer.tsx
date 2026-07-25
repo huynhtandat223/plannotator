@@ -32,7 +32,7 @@ class ToolbarErrorBoundary extends React.Component<
   }
 }
 
-import { CommentPopover, type CommentAskAIHandler } from './CommentPopover';
+import { CommentPopover, hasCommentDraft, type CommentAskAIHandler } from './CommentPopover';
 import { TaterSpriteSitting } from './TaterSpriteSitting';
 import { AttachmentsButton } from './AttachmentsButton';
 import { MessagesIcon } from './icons/MessagesIcon';
@@ -125,6 +125,14 @@ interface ViewerProps {
   onRunLivePiCommand?: (command: string, args: string) => Promise<void>;
   /** Optional project-file lookup for Global Message @mentions. */
   onSearchFileMentions?: (query: string) => Promise<string[]>;
+  /**
+   * Opt-in draft key for the global-comment composer. When set, unsent text +
+   * images survive a keyed Viewer remount (live panes remount by selected
+   * message id) and the composer re-opens on mount if a draft exists, so the
+   * reviewer keeps both text and focus. Absent for non-live hosts, which keep
+   * today's behavior (no cross-remount persistence).
+   */
+  globalCommentDraftKey?: string;
 }
 
 export interface ViewerHandle {
@@ -210,11 +218,32 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   livePiCommands = [],
   onRunLivePiCommand,
   onSearchFileMentions,
+  globalCommentDraftKey,
 }, ref) => {
   const [copied, setCopied] = useState(false);
   const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null);
   const [locationHash, setLocationHash] = useState(() => window.location.hash);
   const globalCommentButtonRef = useRef<HTMLButtonElement>(null);
+
+  // Re-open the global-comment composer after a keyed remount when a surviving
+  // draft exists for this key. Live panes remount the Viewer subtree by
+  // selected-message id (web-highlighter mutates the DOM, so new content can't
+  // reconcile into the old tree); without this, the draft text survives in the
+  // module-level store but the composer stays closed and loses focus. Runs on
+  // mount and when the key changes; a manual close within one mount does not
+  // re-trigger it. No-op for non-live hosts (no draftKey).
+  useEffect(() => {
+    if (!hasCommentDraft(globalCommentDraftKey)) return;
+    if (!globalCommentButtonRef.current) return;
+    setViewerCommentPopover({
+      anchorEl: globalCommentButtonRef.current,
+      contextText: '',
+      isGlobal: true,
+    });
+    // Open exactly once per key mount. Intentionally excludes viewerCommentPopover
+    // so reopening does not fight a manual close.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [globalCommentDraftKey]);
 
   const handleCopyPlan = async () => {
     try {
@@ -924,6 +953,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             initialText={viewerCommentPopover.initialText}
             onSubmit={handleViewerCommentSubmit}
             onClose={handleViewerCommentClose}
+            draftKey={viewerCommentPopover.isGlobal ? globalCommentDraftKey : undefined}
             allowImages={allowImages}
             livePiCommands={viewerCommentPopover.isGlobal ? livePiCommands : []}
             onRunLivePiCommand={viewerCommentPopover.isGlobal ? onRunLivePiCommand : undefined}
