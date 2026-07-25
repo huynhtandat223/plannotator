@@ -4,7 +4,7 @@ import {
 	getRecentAssistantMessages,
 } from "./assistant-message.js";
 import { startLiveMessageReviewBrowser } from "./browser.js";
-import { formatLiveFeedbackBatch } from "./session.js";
+import { formatLiveFeedbackBatch, LIVE_RESPONSE_HISTORY_LIMIT } from "./session.js";
 import type { LiveMessageReviewServer } from "./server.js";
 import { beginHerdrTool, clearHerdrTools, endHerdrTool, EX_PLANNOTATOR_MODEL_COMMAND, EX_PLANNOTATOR_NEW_COMMAND, EX_PLANNOTATOR_RELOAD_COMMAND, pollHerdrFeedback, pollHerdrInstruction, releaseHerdrSession, reportHerdrSession } from "./herdr-registration.js";
 
@@ -180,7 +180,7 @@ export default function exPlannotator(
 			if (!session || activeServer !== session) return;
 			const activeBranchMessages = getActiveBranchAssistantMessages(ctx);
 			session.reconcile(
-				activeBranchMessages.slice(0, 25),
+				activeBranchMessages.slice(0, LIVE_RESPONSE_HISTORY_LIMIT),
 				activeBranchMessages.map((message) => message.messageId),
 			);
 		}, 0);

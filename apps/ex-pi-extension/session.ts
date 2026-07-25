@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { LIVE_MESSAGE_RETENTION } from "@plannotator/core/live-message-window";
 
-export const LIVE_RESPONSE_HISTORY_LIMIT = 4;
+/**
+ * Finalized assistant responses retained per live pane. Re-exported from the
+ * single shared constant so the extension, the server 400 bound, and the UI
+ * option ceiling can never drift apart again.
+ */
+export const LIVE_RESPONSE_HISTORY_LIMIT = LIVE_MESSAGE_RETENTION;
 
 export type LiveAssistantMessage = {
 	messageId: string;

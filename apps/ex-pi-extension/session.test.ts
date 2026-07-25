@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { LIVE_MESSAGE_RETENTION } from "@plannotator/core/live-message-window";
 import {
 	LIVE_RESPONSE_HISTORY_LIMIT,
 	createLiveMessageReviewSnapshot,
@@ -250,26 +251,37 @@ describe("LiveMessageReviewSession", () => {
 		expect(second).toBe(false);
 	});
 
-	test("keeps a compact chronological latest-four picker and makes a live response editable", () => {
-		const session = sessionWith(Array.from({ length: 6 }, (_, index) => ({
-			messageId: `m${6 - index}`,
-			text: `Response ${6 - index}`,
-		})));
+	test("keeps a chronological per-pane picker and makes a live response editable", () => {
+		// Derived from the shared retention constant rather than restating a
+		// number: a hardcoded literal here is what let the caps drift apart.
+		const total = LIVE_RESPONSE_HISTORY_LIMIT + 2;
+		const newestFirst = (count: number) => Array.from({ length: count }, (_, index) => ({
+			messageId: `m${count - index}`,
+			text: `Response ${count - index}`,
+		}));
+		// Oldest-to-newest window of the newest `LIMIT` of `count` responses.
+		const window = (count: number) => newestFirst(count)
+			.slice(0, LIVE_RESPONSE_HISTORY_LIMIT)
+			.map((message) => message.messageId)
+			.reverse();
+
+		const session = sessionWith(newestFirst(total));
 
 		let snapshot = session.snapshot();
-		expect(LIVE_RESPONSE_HISTORY_LIMIT).toBe(4);
-		expect(snapshot.messages.map((message) => message.messageId)).toEqual(["m3", "m4", "m5", "m6"]);
-		expect(snapshot.selectedMessageId).toBe("m6");
+		expect(LIVE_RESPONSE_HISTORY_LIMIT).toBe(LIVE_MESSAGE_RETENTION);
+		expect(snapshot.messages.map((message) => message.messageId)).toEqual(window(total));
+		expect(snapshot.selectedMessageId).toBe(`m${total}`);
 
-		session.reconcile([
-			{ messageId: "m7", text: "Response 7" },
-			...Array.from({ length: 6 }, (_, index) => ({ messageId: `m${6 - index}`, text: `Response ${6 - index}` })),
-	], ["m7", "m6", "m5", "m4", "m3", "m2", "m1"]);
+		const next = total + 1;
+		session.reconcile(
+			newestFirst(next),
+			newestFirst(next).map((message) => message.messageId),
+		);
 
 		snapshot = session.snapshot();
-		expect(snapshot.messages.map((message) => message.messageId)).toEqual(["m4", "m5", "m6", "m7"]);
-		expect(snapshot.selectedMessageId).toBe("m7");
-		expect(session.replaceDrafts("m7", [{ id: "editable" }])).toBe(true);
+		expect(snapshot.messages.map((message) => message.messageId)).toEqual(window(next));
+		expect(snapshot.selectedMessageId).toBe(`m${next}`);
+		expect(session.replaceDrafts(`m${next}`, [{ id: "editable" }])).toBe(true);
 	});
 
 	test("preserves a draft when a visible response is updated in place", async () => {
@@ -290,19 +302,25 @@ describe("LiveMessageReviewSession", () => {
 		}]);
 	});
 
-	test("retains and delivers a draft after its response leaves the compact picker", async () => {
-		const messages = Array.from({ length: 5 }, (_, index) => ({
-			messageId: `m${5 - index}`,
-			text: `Response ${5 - index}`,
+	test("retains and delivers a draft after its response leaves the per-pane window", async () => {
+		// The fixture must overflow the shared retention window, so it is sized
+		// from the constant instead of a literal that silently stops overflowing.
+		const total = LIVE_RESPONSE_HISTORY_LIMIT + 1;
+		const messages = Array.from({ length: total }, (_, index) => ({
+			messageId: `m${total - index}`,
+			text: `Response ${total - index}`,
 		}));
 		const session = sessionWith(messages);
+		// `m2` is the OLDEST initially visible response (the window holds the
+		// newest LIMIT of LIMIT+1), so it is the one pushed out by the next
+		// response. `m1` was never visible and is not what this test is about.
 		expect(session.replaceDrafts("m2", [{ id: "retained" }])).toBe(true);
 
-		session.reconcile(
-			[{ messageId: "m6", text: "Response 6" }, ...messages],
-			["m6", "m5", "m4", "m3", "m2", "m1"],
-		);
-		expect(session.snapshot().messages.map((message) => message.messageId)).toEqual(["m3", "m4", "m5", "m6"]);
+		const next = total + 1;
+		const withNewest = [{ messageId: `m${next}`, text: `Response ${next}` }, ...messages];
+		session.reconcile(withNewest, withNewest.map((message) => message.messageId));
+		// `m2` is now outside the visible window but its draft must survive.
+		expect(session.snapshot().messages.map((message) => message.messageId)).not.toContain("m2");
 
 		let delivered: LiveFeedbackBatchMessage[] = [];
 		expect(await session.submitFeedback(async (batch) => { delivered = batch.messages; })).toBe(true);
@@ -356,20 +374,26 @@ describe("LiveMessageReviewSession", () => {
 	});
 
 	test("retains attachments and linked-document drafts after their response leaves the compact picker", async () => {
-		const messages = Array.from({ length: 5 }, (_, index) => ({
-			messageId: `m${5 - index}`,
-			text: `Response ${5 - index}`,
+		// The window must actually overflow for "leaves the picker" to be under
+		// test, so the fixture is sized from the shared retention constant.
+		const total = LIVE_RESPONSE_HISTORY_LIMIT + 1;
+		const messages = Array.from({ length: total }, (_, index) => ({
+			messageId: `m${total - index}`,
+			text: `Response ${total - index}`,
 		}));
 		const session = sessionWith(messages);
+		// `m2` is the oldest initially visible response, so it is the one the next
+		// response evicts from the window.
 		session.replaceDrafts("m2", [], [], [{ path: "/tmp/mockup.png", name: "mockup" }], [{
 			filepath: "docs/design.md",
 			annotations: [{ id: "linked-draft", type: "COMMENT", originalText: "Original", text: "Clarify this" }],
 			globalAttachments: [{ path: "/tmp/linked.png", name: "linked" }],
 		}]);
 
+		const newest = { messageId: `m${total + 1}`, text: `Response ${total + 1}` };
 		session.reconcile(
-			[{ messageId: "m6", text: "Response 6" }, ...messages],
-			["m6", "m5", "m4", "m3", "m2", "m1"],
+			[newest, ...messages],
+			[newest.messageId, ...messages.map((message) => message.messageId)],
 		);
 
 		expect(session.snapshot().retainedMessages).toEqual([{ messageId: "m2", text: "Response 2" }]);
@@ -551,12 +575,13 @@ describe("Live Message Review Session snapshot", () => {
 		});
 	});
 
-	test("caps the initial active-branch snapshot at the compact latest-four history", () => {
-		const messages = Array.from({ length: 30 }, (_, index) => ({
+	test("caps the initial active-branch snapshot at the shared per-pane retention", () => {
+		const messages = Array.from({ length: LIVE_RESPONSE_HISTORY_LIMIT + 10 }, (_, index) => ({
 			messageId: String(index),
 			text: `Response ${index}`,
 		}));
 
-		expect(createLiveMessageReviewSnapshot(messages).messages).toEqual(messages.slice(0, 4).reverse());
+		expect(createLiveMessageReviewSnapshot(messages).messages)
+			.toEqual(messages.slice(0, LIVE_RESPONSE_HISTORY_LIMIT).reverse());
 	});
 });

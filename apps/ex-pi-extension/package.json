@@ -47,6 +47,7 @@
     "build:package": "bun run build && bun run build:plan"
   },
   "dependencies": {
+    "@plannotator/core": "workspace:*",
     "@plannotator/ui": "^0.28.0"
   },
   "peerDependencies": {

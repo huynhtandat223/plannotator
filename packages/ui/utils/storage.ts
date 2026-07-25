@@ -7,6 +7,8 @@
  * localhost:54322 share the same cookies.
  */
 
+import { LIVE_MESSAGE_RETENTION } from '@plannotator/core/live-message-window';
+
 const ONE_YEAR_SECONDS = 60 * 60 * 24 * 365;
 
 export interface StorageBackend {
@@ -117,25 +119,39 @@ export function setAutoCloseDelay(delay: AutoCloseDelay): void {
 }
 
 /**
- * Message picker default visible count.
- * Controls how many recent responses the sidebar shows before the
- * "Show older" toggle. 'all' disables collapsing. Default: 3.
+ * Message picker visible count — a PER-PANE quota, not a global list length.
+ *
+ * Each live pane keeps this many rows visible regardless of how noisy its
+ * neighbours are; `+N more` pages past it. 'all' shows every retained row.
+ *
+ * Only values the host can actually satisfy may be offered. The host retains
+ * LIVE_MESSAGE_RETENTION responses per pane, so every numeric option must be
+ * <= that ceiling; `10` was removed because no host ever retained that many.
+ * Default: 3.
  */
 const MESSAGE_PICKER_COUNT_KEY = 'plannotator-message-picker-count';
 
-export type MessagePickerCount = '1' | '3' | '5' | '10' | 'all';
+export type MessagePickerCount = '1' | '3' | '5' | 'all';
 
+const MESSAGE_PICKER_NUMERIC_OPTIONS = ['1', '3', '5'] as const;
+
+/**
+ * Numeric options are filtered against the single shared retention constant so
+ * the picker can never again advertise a window the host cannot fill.
+ */
 export const MESSAGE_PICKER_COUNT_OPTIONS: { value: MessagePickerCount; label: string }[] = [
-  { value: '1', label: '1' },
-  { value: '3', label: '3' },
-  { value: '5', label: '5' },
-  { value: '10', label: '10' },
+  ...MESSAGE_PICKER_NUMERIC_OPTIONS
+    .filter((value) => Number(value) <= LIVE_MESSAGE_RETENTION)
+    .map((value) => ({ value: value as MessagePickerCount, label: value })),
   { value: 'all', label: 'All' },
 ];
 
 export function getMessagePickerCount(): MessagePickerCount {
   const val = getItem(MESSAGE_PICKER_COUNT_KEY);
-  if (val === '1' || val === '3' || val === '5' || val === '10' || val === 'all') return val;
+  if (val === '1' || val === '3' || val === '5' || val === 'all') return val;
+  // '10' was an option the host could never satisfy. Migrate the stored value
+  // to the nearest honest window rather than silently falling back to default.
+  if (val === '10') return 'all';
   return '3';
 }
 
