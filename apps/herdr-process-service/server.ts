@@ -146,6 +146,8 @@ type HerdrReviewSnapshot = {
     description: string;
     paneLabel: string;
     paneDescription: string;
+    /** Herdr tab name for this pane; distinguishes panes sharing one workspace. */
+    paneTab?: string;
     /** Herdr's authoritative live state for the pane containing this response. */
     agentStatus: HerdrPanel["status"];
     /** Herdr's authoritative workspace root for the pane containing this response. */
@@ -242,6 +244,12 @@ export type HerdrActivityTrailEntry = {
   kind: "tool" | "subagent";
   name?: string;
   count: number;
+  /**
+   * Optional redacted, single-line, hard-truncated command summary for bash-like
+   * tools. Redaction + truncation happen at the Pi-extension source before this
+   * reaches the wire; never a full/raw command. Absent for non-bash tools.
+   */
+  command?: string;
 };
 
 /** Hard cap on published trail length; over-long trails are rejected by normalization. */
@@ -737,7 +745,11 @@ function normalizeActivityTrail(value: unknown): HerdrActivityTrailEntry[] | nul
     const name = text(entry.name)?.slice(0, 60) ?? undefined;
     const count = entry.count;
     if ((kind !== "tool" && kind !== "subagent") || typeof count !== "number" || !Number.isInteger(count) || count < 1 || count > 1000) continue;
-    entries.push({ kind, ...(name ? { name } : {}), count });
+    // Defense-in-depth: even though the extension redacts + truncates, hard-cap
+    // the command length again here and strip newlines so a single-line summary
+    // can never bloat the frame or inject control characters into the DOM.
+    const command = text(entry.command)?.replace(/\s+/g, " ").trim().slice(0, 120) || undefined;
+    entries.push({ kind, ...(name ? { name } : {}), count, ...(command ? { command } : {}) });
   }
   if (entries.length === 0) return null;
   return entries.length > HERDR_ACTIVITY_TRAIL_LIMIT ? entries.slice(-HERDR_ACTIVITY_TRAIL_LIMIT) : entries;
@@ -1600,6 +1612,10 @@ export function reviewSnapshotFromPanels(
       ? panel.tab
       : "";
     const paneDescription = [tabPart, panel.panel].filter(Boolean).join(" · ");
+    // Surface the tab name as a first-class field so the live-pane header chips can
+    // render workspace + tab and keep panes in the same workspace distinguishable.
+    // Fall back to the panel name so a pane without a distinct tab is still labelled.
+    const paneTab = (panel.tab && panel.tab.trim()) ? panel.tab.trim() : (panel.panel?.trim() || undefined);
     const responses = enrichments.get(panel.id)?.messages ?? [];
     if (responses.length === 0) {
       return [{
@@ -1611,6 +1627,7 @@ export function reviewSnapshotFromPanels(
         description: "No structured assistant response published yet",
         paneLabel,
         paneDescription,
+        ...(paneTab ? { paneTab } : {}),
         agentStatus: panel.status,
         cwd: panel.cwd,
         workspaceId: panel.workspaceId,
@@ -1639,6 +1656,7 @@ export function reviewSnapshotFromPanels(
       description: "Structured Pi assistant response",
       paneLabel,
       paneDescription,
+      ...(paneTab ? { paneTab } : {}),
       agentStatus: panel.status,
       cwd: panel.cwd,
       workspaceId: panel.workspaceId,

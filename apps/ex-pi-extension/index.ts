@@ -161,7 +161,7 @@ export default function exPlannotator(
 	});
 
 	pi.on("tool_execution_start", (event, ctx) => {
-		beginHerdrTool(ctx, event.toolCallId, event.toolName);
+		beginHerdrTool(ctx, event.toolCallId, event.toolName, event.args);
 		void dependencies.reportHerdr(ctx, pi.getCommands());
 	});
 
