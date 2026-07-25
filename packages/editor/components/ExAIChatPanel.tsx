@@ -3,12 +3,72 @@ import { OverlayScrollArea } from '@plannotator/ui/components/OverlayScrollArea'
 import { submitHint } from '@plannotator/ui/utils/platform';
 import type { ExAIChatState } from '../useExAIChat';
 
+/**
+ * Maps the coordinator's companion status into a legible handoff-state chip.
+ * Status is authoritative (`ExAICompanionState.status`); this only styles it.
+ * Exported so the eligibility/handoff-state test can assert the mapping without
+ * reaching into the render tree.
+ */
+export type ExAIStatusBadge = { label: string; tone: 'setup' | 'ready' | 'recovering' | 'closed'; hint: string };
+export const exAIStatusBadge = (status: ExAIChatState['status']): ExAIStatusBadge => {
+  switch (status) {
+    case 'ready':
+      return { label: 'Ready', tone: 'ready', hint: 'Companion is paired. Handoff into the main session is available.' };
+    case 'recovering':
+      return { label: 'Recovering', tone: 'recovering', hint: 'Reconnecting to the paired companion Pi session…' };
+    case 'retired':
+      return { label: 'Retired', tone: 'closed', hint: 'The paired main Pi session changed or closed.' };
+    case 'closed':
+      return { label: 'Closed', tone: 'closed', hint: 'The companion was closed in Herdr. Start again to create a replacement.' };
+    default:
+      return { label: 'Setup', tone: 'setup', hint: 'No companion yet. Start one to get suggested replies and handoff.' };
+  }
+};
+
+const badgeToneClass = (tone: ExAIStatusBadge['tone']): string =>
+  tone === 'ready'
+    ? 'border-primary/40 bg-primary/15 text-primary'
+    : tone === 'recovering'
+      ? 'border-warning/40 bg-warning/15 text-warning-foreground'
+      : tone === 'closed'
+        ? 'border-destructive/40 bg-destructive/15 text-destructive'
+        : 'border-border bg-muted/50 text-foreground/80';
+
+/** A compact, always-visible handoff-state header so the flow is legible in every state. */
+const ExAIStatusHeader: React.FC<{ state: ExAIChatState }> = ({ state }) => {
+  const badge = exAIStatusBadge(state.status);
+  return (
+    <div className="flex items-start gap-2 border-b border-border/60 px-3 py-2" data-ex-ai-status={state.status}>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <strong className="text-xs">Ex AI Companion</strong>
+          <span
+            role="status"
+            aria-live="polite"
+            className={`inline-flex items-center rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${badgeToneClass(badge.tone)}`}
+          >
+            {badge.label}
+          </span>
+        </div>
+        <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">{badge.hint}</p>
+        {state.pair && (
+          <p className="mt-0.5 truncate text-[10px] text-muted-foreground/80" title={state.pair.model}>
+            Paired companion · {state.pair.model}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+};
+
 export const ExAIChatPanel: React.FC<{
   state: ExAIChatState;
   error: string | null;
   onStart: (model: string, instruction: string) => Promise<void>;
   onSend: (text: string) => Promise<void>;
   onHandoff: (requestId: string, text: string) => Promise<void>;
+  /** The current main last-message boundary the suggestions target; informational. */
+  suggestBoundaryId?: string | null;
 }> = ({ state, error, onStart, onSend, onHandoff }) => {
   const [model, setModel] = useState(state.defaults?.model ?? state.pair?.model ?? '');
   const [instruction, setInstruction] = useState(state.defaults?.instruction ?? state.pair?.instruction ?? '');
@@ -35,21 +95,24 @@ export const ExAIChatPanel: React.FC<{
     setPending(true);
     try { await onSend(input.trim()); setInput(''); } finally { setPending(false); }
   };
-  if (state.status === 'setup' || state.status === 'closed') return <div className="flex h-full flex-col gap-3 p-4 text-xs">
-    <div><strong>Ex AI Chat</strong><p className="mt-1 text-muted-foreground">Start a normal Pi companion for this live session.</p></div>
-    {state.status === 'closed' && <p className="rounded border border-border p-2 text-muted-foreground">The companion was closed in Herdr. Start explicitly to create a replacement.</p>}
+  if (state.status === 'setup' || state.status === 'closed') return <div className="flex h-full flex-col text-xs">
+    <ExAIStatusHeader state={state} />
+    <div className="flex flex-col gap-3 p-4">
+    <p className="text-muted-foreground">Start a normal Pi companion for this live session. It reads the main session's last message and proposes replies you can hand off with one click.</p>
     <label>Model<select aria-label="Ex AI model" value={model} onChange={(event) => setModel(event.target.value)} className="mt-1 w-full rounded border border-border bg-background p-2">
       {state.models?.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
     </select></label>
     <label>Base instruction<textarea aria-label="Ex AI base instruction" value={instruction} onChange={(event) => setInstruction(event.target.value)} rows={6} className="mt-1 w-full rounded border border-border bg-transparent p-2" /></label>
-    <button disabled={!model.trim() || pending} onClick={() => void (async () => { setPending(true); try { await onStart(model, instruction); } finally { setPending(false); } })()} className="rounded bg-primary px-3 py-2 text-primary-foreground disabled:opacity-50">{pending ? 'Starting…' : 'Start'}</button>
+    <button disabled={!model.trim() || pending} onClick={() => void (async () => { setPending(true); try { await onStart(model, instruction); } finally { setPending(false); } })()} className="rounded bg-primary px-3 py-2 text-primary-foreground disabled:opacity-50">{pending ? 'Starting…' : state.status === 'closed' ? 'Start replacement' : 'Start'}</button>
     {error && <p role="alert" className="text-destructive">{error}</p>}
+    </div>
   </div>;
-  if (state.status === 'retired') return <div className="p-4 text-xs text-muted-foreground">The paired main Pi session changed or closed.</div>;
-  if (state.status === 'recovering') return <div className="p-4 text-xs text-muted-foreground">Reconnecting to the companion Pi session…</div>;
+  if (state.status === 'retired') return <div className="flex h-full flex-col text-xs"><ExAIStatusHeader state={state} /><div className="p-4 text-muted-foreground">The paired main Pi session changed or closed. Select a live pane to start a new companion.</div></div>;
+  if (state.status === 'recovering') return <div className="flex h-full flex-col text-xs"><ExAIStatusHeader state={state} /><div className="p-4 text-muted-foreground">Reconnecting to the companion Pi session…</div></div>;
   return <div className="flex h-full flex-col">
+    <ExAIStatusHeader state={state} />
     {suggestion && suggestion.options.length > 0 && <div className="border-b border-border/50 p-3" data-ex-ai-options="true">
-      <p className="mb-2 text-[11px] font-medium text-muted-foreground">Suggested replies to the main session</p>
+      <p className="mb-2 text-[11px] font-medium text-muted-foreground">Suggested replies to the main session — click to hand off</p>
       <div className="space-y-2">{suggestion.options.map((option, index) => {
         const requestId = `suggest:${suggestion.boundaryId}:${index}`;
         const sent = sentOptions.has(requestId);
@@ -57,9 +120,10 @@ export const ExAIChatPanel: React.FC<{
       })}</div>
     </div>}
     <OverlayScrollArea className="min-h-0 flex-1"><div className="space-y-3 p-3">
+      {state.history.length === 0 && <p className="text-[11px] text-muted-foreground">No companion turns yet. Ask below, or hand off a suggested reply above.</p>}
       {state.history.map((entry, index) => entry.kind === 'activity'
         ? <details key={index} className="rounded border border-border p-2 text-xs text-muted-foreground"><summary>{entry.text}</summary></details>
-        : <div key={index} className="rounded border border-border/50 p-2.5 text-xs"><p className="whitespace-pre-wrap">{entry.text}</p>{entry.kind === 'assistant' && <button className="mt-2 text-primary" onClick={() => { setDraft(entry.text); setHandoffId(crypto.randomUUID()); }}>Send to main session</button>}</div>)}
+        : <div key={index} className={`rounded border p-2.5 text-xs ${entry.kind === 'user' ? 'ml-6 border-primary/30 bg-primary/[0.06]' : 'mr-6 border-border/50'}`}><span className="mb-0.5 block text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">{entry.kind === 'user' ? 'You' : 'Companion'}</span><p className="whitespace-pre-wrap">{entry.text}</p>{entry.kind === 'assistant' && <button className="mt-2 text-primary" onClick={() => { setDraft(entry.text); setHandoffId(crypto.randomUUID()); }}>Send to main session</button>}</div>)}
     </div></OverlayScrollArea>
     {draft !== null && <div className="border-t border-border p-2"><textarea aria-label="Send to main session" value={draft} onChange={(event) => setDraft(event.target.value)} className="w-full rounded border border-border bg-transparent p-2 text-xs" /><button disabled={pending} onClick={() => void (async () => { if (!handoffId) return; setPending(true); try { await onHandoff(handoffId, draft); setDraft(null); setHandoffId(null); } finally { setPending(false); } })()} className="mt-1 rounded bg-primary px-2 py-1 text-xs text-primary-foreground disabled:opacity-50">Confirm send</button></div>}
     <div className="border-t border-border p-2"><div className="flex gap-2"><textarea aria-label="Ask Ex AI Chat" value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void submit(); } }} className="min-h-10 flex-1 rounded border border-border bg-transparent p-2 text-xs" placeholder="Ask the companion…" /><button disabled={!input.trim() || pending} onClick={() => void submit()} className="rounded bg-primary px-3 text-xs text-primary-foreground disabled:opacity-50">Send</button></div><p className="mt-1 text-[10px] text-muted-foreground">{submitHint}</p>{error && <p role="alert" className="text-xs text-destructive">{error}</p>}</div>

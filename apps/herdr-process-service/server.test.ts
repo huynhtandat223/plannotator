@@ -856,6 +856,35 @@ describe("panelsFromSnapshot", () => {
     });
   });
 
+  test("passes the ordered names-only activity trail through to every response in a pane", () => {
+    const panels: HerdrPanel[] = [
+      { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
+    ];
+    const enrichments = new Map<string, PanelSessionEnrichment>([["w:p1", {
+      paneId: "w:p1",
+      sessionId: "session-1",
+      commands: [],
+      activity: { kind: "tool", name: "bash", count: 1 },
+      activityTrail: [
+        { kind: "tool", name: "read", count: 1 },
+        { kind: "tool", name: "grep", count: 3 },
+        { kind: "subagent", name: "subagent", count: 1 },
+        { kind: "tool", name: "bash", count: 1 },
+      ],
+      totalUsedTokens: 1_000,
+      messages: [{ messageId: "assistant-1", text: "Response" }],
+    }]]);
+
+    expect(reviewSnapshotFromPanels(panels, null, enrichments).messages[0]).toMatchObject({
+      activityTrail: [
+        { kind: "tool", name: "read", count: 1 },
+        { kind: "tool", name: "grep", count: 3 },
+        { kind: "subagent", name: "subagent", count: 1 },
+        { kind: "tool", name: "bash", count: 1 },
+      ],
+    });
+  });
+
   test("selects the newest response in the focused pane by default", () => {
     const panels: HerdrPanel[] = [
       { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },

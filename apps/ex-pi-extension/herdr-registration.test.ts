@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { beginHerdrTool, currentHerdrRegistration, endHerdrTool, HERDR_LIVE_MESSAGE_LIMIT, pollHerdrFeedback, pollHerdrInstruction, releaseHerdrSession, reportHerdrSession } from "./herdr-registration";
+import { beginHerdrTool, clearHerdrTools, currentHerdrRegistration, endHerdrTool, HERDR_ACTIVITY_TRAIL_LIMIT, HERDR_LIVE_MESSAGE_LIMIT, pollHerdrFeedback, pollHerdrInstruction, releaseHerdrSession, reportHerdrSession, resetHerdrActivityTrail } from "./herdr-registration";
 
 function context() {
 	return {
@@ -127,6 +127,54 @@ describe("Herdr session enrichment", () => {
 			activity: { kind: "subagent", count: 1 },
 		});
 		endHerdrTool(context, "tool-1");
+	});
+
+	test("builds an ordered names-only activity trail, collapsing repeats", () => {
+		const sessionManager = { getSessionId: () => "session-trail", getEntries: () => [], getBranch: () => [] };
+		const ctx = { sessionManager, model: { id: "cx/gpt-5.6-terra", contextWindow: 1_050_000 } } as never;
+		resetHerdrActivityTrail(ctx);
+		beginHerdrTool(ctx, "t1", "read");
+		endHerdrTool(ctx, "t1");
+		beginHerdrTool(ctx, "t2", "grep");
+		endHerdrTool(ctx, "t2");
+		beginHerdrTool(ctx, "t3", "grep");
+		endHerdrTool(ctx, "t3");
+		beginHerdrTool(ctx, "t4", "grep");
+		beginHerdrTool(ctx, "t5", "subagent");
+		const registration = currentHerdrRegistration(ctx, { HERDR_ENV: "1", HERDR_PANE_ID: "w:p1" });
+		expect(registration?.activityTrail).toEqual([
+			{ kind: "tool", name: "read", count: 1 },
+			{ kind: "tool", name: "grep", count: 3 },
+			{ kind: "subagent", name: "subagent", count: 1 },
+		]);
+		clearHerdrTools(ctx);
+	});
+
+	test("bounds the trail so long turns cannot blow up the SSE frame", () => {
+		const sessionManager = { getSessionId: () => "session-bound", getEntries: () => [], getBranch: () => [] };
+		const ctx = { sessionManager, model: { id: "cx/gpt-5.6-terra", contextWindow: 1_050_000 } } as never;
+		resetHerdrActivityTrail(ctx);
+		// Distinct names so nothing collapses; exceed the cap by 5.
+		const total = HERDR_ACTIVITY_TRAIL_LIMIT + 5;
+		for (let i = 0; i < total; i += 1) {
+			beginHerdrTool(ctx, `t${i}`, `tool-${i}`);
+			endHerdrTool(ctx, `t${i}`);
+		}
+		const trail = currentHerdrRegistration(ctx, { HERDR_ENV: "1", HERDR_PANE_ID: "w:p1" })?.activityTrail;
+		expect(trail).toHaveLength(HERDR_ACTIVITY_TRAIL_LIMIT);
+		// The OLDEST entries are dropped: the trail keeps the most recent tools.
+		expect(trail?.[trail.length - 1]).toEqual({ kind: "tool", name: `tool-${total - 1}`, count: 1 });
+		expect(trail?.[0]).toEqual({ kind: "tool", name: `tool-${total - HERDR_ACTIVITY_TRAIL_LIMIT}`, count: 1 });
+		clearHerdrTools(ctx);
+	});
+
+	test("resetHerdrActivityTrail starts a fresh trail per turn", () => {
+		const sessionManager = { getSessionId: () => "session-reset", getEntries: () => [], getBranch: () => [] };
+		const ctx = { sessionManager, model: { id: "cx/gpt-5.6-terra", contextWindow: 1_050_000 } } as never;
+		beginHerdrTool(ctx, "t1", "read");
+		endHerdrTool(ctx, "t1");
+		resetHerdrActivityTrail(ctx);
+		expect(currentHerdrRegistration(ctx, { HERDR_ENV: "1", HERDR_PANE_ID: "w:p1" })?.activityTrail).toBeUndefined();
 	});
 
 	test("does nothing outside a Herdr pane", () => {

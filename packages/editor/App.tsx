@@ -167,6 +167,7 @@ import {
   type CaptainEchoStore,
 } from './liveCaptainEcho';
 import { deriveLiveActivityChip, type LiveActivityChip as LiveActivityChipData } from './liveActivityChip';
+import { deriveLiveActivityTrail, formatLiveActivityTrail, formatTrailStep, type LiveActivityTrailStep } from './liveActivityTrail';
 
 type NoteAutoSaveResults = {
   obsidian?: boolean;
@@ -340,6 +341,39 @@ const LiveActivityChip = ({ chip }: { chip: LiveActivityChipData }) => {
     >
       <span aria-hidden="true">{chip.glyph}</span>
       <span>{chip.label}</span>
+    </span>
+  );
+};
+
+// Ordered names-only activity trail for the current turn, e.g. `read → grep ×3 →
+// edit → bash`. Driven entirely by `activityTrail` already on the wire (see
+// liveActivityTrail.ts + apps/ex-pi-extension/herdr-registration.ts). NAMES ONLY:
+// no tool inputs/outputs are ever surfaced here. The full arrow-joined summary is
+// the accessible label so AT users get the sequence, not disconnected tokens.
+const LiveActivityTrail = ({ steps }: { steps: LiveActivityTrailStep[] }) => {
+  if (steps.length === 0) return null;
+  const summary = formatLiveActivityTrail(steps);
+  return (
+    <span
+      className="min-w-0 inline-flex flex-wrap items-center gap-1"
+      aria-label={`Tools used this turn: ${summary}`}
+      title={summary}
+    >
+      {steps.map((step, index) => (
+        <React.Fragment key={`${step.label}:${index}`}>
+          {index > 0 && <span aria-hidden="true" className="text-muted-foreground/50">→</span>}
+          <span
+            aria-hidden="true"
+            className={`inline-flex items-center rounded px-1 py-0.5 text-[10px] font-medium tabular-nums ${
+              step.isSubagent
+                ? 'border border-primary/30 bg-primary/10 text-primary'
+                : 'border border-border bg-muted/50 text-foreground/80'
+            }`}
+          >
+            {formatTrailStep(step)}
+          </span>
+        </React.Fragment>
+      ))}
     </span>
   );
 };
@@ -1694,6 +1728,16 @@ const App: React.FC = () => {
   const captainEchoAnchors = React.useMemo(
     () => (liveMessageReview ? buildCaptainEchoAnchors(recentMessages, captainEchoes) : new Map()),
     [liveMessageReview, recentMessages, captainEchoes],
+  );
+
+  // The live transcript reads top-to-bottom oldest-first (a real chat history),
+  // while the wire delivers responses newest-first. Reverse only for the live
+  // sidebar display; `recentMessages` stays newest-first everywhere else so
+  // selection, `#N` numbering, and echo anchoring (keyed by messageId, order-
+  // independent) are all untouched. Non-live surfaces keep the newest-first list.
+  const sidebarMessages = React.useMemo(
+    () => (liveMessageReview ? [...recentMessages].reverse() : recentMessages),
+    [liveMessageReview, recentMessages],
   );
 
   // Context-aware back label for linked doc navigation
@@ -4876,6 +4920,7 @@ const App: React.FC = () => {
           const agentStatus = selectedMessage?.agentStatus;
           const agentStatusLabel = agentStatus ? agentStatus[0].toUpperCase() + agentStatus.slice(1) : null;
           const activityChip = deriveLiveActivityChip({ agentStatus, activity: selectedMessage?.activity, reviewRoundStatus: status });
+          const activityTrailSteps = deriveLiveActivityTrail(selectedMessage?.activityTrail);
           const paneMetadata = livePaneMetadata(selectedMessage);
           return <div className={`border-b px-4 py-2 text-xs flex flex-wrap items-center gap-x-3 gap-y-1 flex-shrink-0 ${
             status === 'delivery_failed'
@@ -4908,6 +4953,7 @@ const App: React.FC = () => {
             {(agentStatusLabel || activityChip) && (
               <span className="ml-auto flex shrink-0 items-center gap-2">
                 {activityChip && <LiveActivityChip chip={activityChip} />}
+                {liveMessageReview && !liveWorkspaceMode && <LiveActivityTrail steps={activityTrailSteps} />}
                 {agentStatusLabel && <span className={`shrink-0 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${agentStatus === 'working' ? 'border-primary/30 bg-primary/10 text-foreground' : agentStatus === 'blocked' ? 'border-warning/30 bg-warning/10 text-warning-foreground' : 'border-border bg-muted/40 text-muted-foreground'}`}><span aria-hidden="true">●</span>{agentStatusLabel}</span>}
               </span>
             )}
@@ -5066,11 +5112,13 @@ const App: React.FC = () => {
                 }}
                 isLoadingArchive={archive.isLoading}
                 showMessagesTab={annotateSource === 'message' && recentMessages.length > 1}
-                messages={recentMessages}
+                messages={sidebarMessages}
                 selectedMessageId={selectedMessageId}
                 onSelectMessage={handleSelectMessage}
                 messageAnnotationCounts={activeMessageAnnotationCounts}
                 captainEchoes={captainEchoAnchors}
+                messagesChronological={liveMessageReview}
+                messagesChatLayout={liveMessageReview}
                 hasPendingResponse={pendingResponseMessageId !== null}
                 messagePickerLabels={liveWorkspaceMode ? {
                   tab: 'Workspaces',
