@@ -81,6 +81,10 @@ interface SidebarContainerProps {
   messageAnnotationCounts?: Map<string, number>;
   /** Browser-local captain echoes anchored to a snapshot row's `messageId`. */
   messageCaptainEchoes?: ReadonlyMap<string, readonly CaptainEcho[]>;
+  /** Ex-Plannotator's live picker is oldest-first; normal hosts are newest-first. */
+  messagesChronological?: boolean;
+  /** Render the live picker as a two-sided chat transcript (agent left, captain right). */
+  messagesChatLayout?: boolean;
   /** A newer response finished in another pane while the reviewer stayed here. */
   hasPendingResponse?: boolean;
   messagePickerLabels?: {
@@ -146,6 +150,8 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
   onSelectMessage,
   messageAnnotationCounts,
   messageCaptainEchoes,
+  messagesChronological,
+  messagesChatLayout,
   hasPendingResponse,
   messagePickerLabels,
 }) => {
@@ -353,6 +359,8 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
             onSelect={onSelectMessage}
             annotationCounts={messageAnnotationCounts}
             captainEchoes={messageCaptainEchoes}
+            chronological={messagesChronological}
+            chatLayout={messagesChatLayout}
             listLabel={pickerLabels.list}
             emptyLabel={pickerLabels.empty}
           />
@@ -436,6 +444,8 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
                 }}
                 annotationCounts={messageAnnotationCounts}
                 captainEchoes={messageCaptainEchoes}
+                chronological={messagesChronological}
+                chatLayout={messagesChatLayout}
                 listLabel={pickerLabels.list}
                 emptyLabel={pickerLabels.empty}
               />

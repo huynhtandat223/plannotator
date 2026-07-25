@@ -49,6 +49,29 @@ export type HerdrActivity = {
 	count: number;
 };
 
+/**
+ * One entry in the per-turn ordered activity trail. Carries the tool/subagent
+ * NAME only — never inputs or outputs (that would require extending the capture
+ * layer and is out of scope). Consecutive uses of the same tool are collapsed
+ * into `count` (e.g. `grep ×3`) so the trail stays compact and the SSE frame
+ * small. The trail is bounded by {@link HERDR_ACTIVITY_TRAIL_LIMIT}.
+ */
+export type HerdrActivityTrailEntry = {
+	kind: "tool" | "subagent";
+	name?: string;
+	count: number;
+};
+
+/**
+ * Hard cap on trail entries published per turn. Keeps the enrichment frame
+ * bounded regardless of how many tools a long turn runs; when exceeded the
+ * OLDEST entries are dropped so the trail always reflects the most recent work.
+ */
+export const HERDR_ACTIVITY_TRAIL_LIMIT = 16;
+
+/** Hard cap on a single trail entry's name so one long tool name cannot bloat the frame. */
+export const ACTIVITY_TRAIL_NAME_MAX = 60;
+
 export type HerdrSessionRegistration = {
 	paneId: string;
 	sessionId: string;
@@ -60,6 +83,13 @@ export type HerdrSessionRegistration = {
 	model?: HerdrModel;
 	/** Running tool or subagent activity, refreshed at tool lifecycle boundaries. */
 	activity?: HerdrActivity;
+	/**
+	 * Ordered trail of tools/subagents started during the current turn, oldest
+	 * first, bounded by {@link HERDR_ACTIVITY_TRAIL_LIMIT}. Consecutive identical
+	 * tools are collapsed into `count`. Cleared when the turn ends so it always
+	 * describes the in-progress (or most recently completed) turn. Names only.
+	 */
+	activityTrail?: HerdrActivityTrailEntry[];
 	/** Cumulative model tokens charged over the complete Pi session. */
 	totalUsedTokens: number;
 	/** Context tokens represented by Pi's latest compaction summary. */
@@ -86,6 +116,46 @@ type SessionEntryWithUsage = {
 
 type ModelChangeEntry = { type?: unknown; provider?: unknown; modelId?: unknown };
 const activeToolCallsBySession = new Map<string, Map<string, string>>();
+
+/**
+ * Ordered names-only activity trail per session, oldest first. Appended when a
+ * tool/subagent starts; consecutive identical tools are collapsed into `count`
+ * (so `grep grep grep` becomes `grep ×3`). Bounded to
+ * {@link HERDR_ACTIVITY_TRAIL_LIMIT}: past the cap the OLDEST entry is dropped so
+ * the trail keeps describing the most recent work and the SSE frame stays small.
+ * Cleared at each turn boundary so a fresh turn starts an empty trail.
+ */
+const activityTrailBySession = new Map<string, HerdrActivityTrailEntry[]>();
+
+function trailKind(toolName: string): HerdrActivityTrailEntry["kind"] {
+	return toolName === "subagent" ? "subagent" : "tool";
+}
+
+function appendActivityTrail(sessionId: string, toolName: string): void {
+	const name = toolName.slice(0, ACTIVITY_TRAIL_NAME_MAX);
+	const kind = trailKind(toolName);
+	const trail = activityTrailBySession.get(sessionId) ?? [];
+	const last = trail[trail.length - 1];
+	// Collapse an immediately repeated tool of the same kind/name into a count.
+	if (last && last.kind === kind && last.name === name) {
+		last.count += 1;
+	} else {
+		trail.push({ kind, name, count: 1 });
+		// Drop from the front so the trail always reflects the most recent tools.
+		while (trail.length > HERDR_ACTIVITY_TRAIL_LIMIT) trail.shift();
+	}
+	activityTrailBySession.set(sessionId, trail);
+}
+
+function currentActivityTrail(ctx: HerdrExtensionContext): HerdrActivityTrailEntry[] | undefined {
+	const trail = activityTrailBySession.get(ctx.sessionManager.getSessionId());
+	return trail && trail.length > 0 ? trail.map((entry) => ({ ...entry })) : undefined;
+}
+
+/** Reset the per-turn trail. Called at turn boundaries so each turn starts fresh. */
+export function resetHerdrActivityTrail(ctx: HerdrExtensionContext): void {
+	activityTrailBySession.delete(ctx.sessionManager.getSessionId());
+}
 
 function currentModel(ctx: HerdrExtensionContext): HerdrModel | undefined {
 	if (ctx.model?.id) return {
@@ -120,6 +190,7 @@ export function beginHerdrTool(ctx: HerdrExtensionContext, toolCallId: string, t
 	const activeTools = activeToolCallsBySession.get(sessionId) ?? new Map<string, string>();
 	activeTools.set(toolCallId, toolName);
 	activeToolCallsBySession.set(sessionId, activeTools);
+	appendActivityTrail(sessionId, toolName);
 }
 
 export function endHerdrTool(ctx: HerdrExtensionContext, toolCallId: string): void {
@@ -131,7 +202,9 @@ export function endHerdrTool(ctx: HerdrExtensionContext, toolCallId: string): vo
 }
 
 export function clearHerdrTools(ctx: HerdrExtensionContext): void {
-	activeToolCallsBySession.delete(ctx.sessionManager.getSessionId());
+	const sessionId = ctx.sessionManager.getSessionId();
+	activeToolCallsBySession.delete(sessionId);
+	activityTrailBySession.delete(sessionId);
 }
 
 function contextWindowFromSession(ctx: HerdrExtensionContext): number | undefined {
@@ -229,6 +302,7 @@ export function currentHerdrRegistration(
 	const usage = contextUsage(ctx);
 	const model = currentModel(ctx);
 	const activity = currentActivity(ctx);
+	const activityTrail = currentActivityTrail(ctx);
 	const compactedTokens = latestCompactionTokens(ctx);
 	return {
 		paneId,
@@ -243,6 +317,7 @@ export function currentHerdrRegistration(
 		...(usage ? { contextUsage: usage } : {}),
 		...(model ? { model } : {}),
 		...(activity ? { activity } : {}),
+		...(activityTrail ? { activityTrail } : {}),
 		...(compactedTokens !== undefined ? { latestCompactionTokens: compactedTokens } : {}),
 	};
 }

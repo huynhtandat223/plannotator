@@ -152,6 +152,8 @@ type HerdrReviewSnapshot = {
     model?: HerdrModel;
     /** Current tool/subagent activity reported by the Pi extension. */
     activity?: HerdrActivity;
+    /** Ordered names-only trail of tools/subagents used in the current turn. */
+    activityTrail?: HerdrActivityTrailEntry[];
     /** Cumulative model tokens charged over the complete Pi session. */
     totalUsedTokens?: number;
     /** Context tokens represented by the latest Pi compaction summary. */
@@ -207,6 +209,16 @@ export type HerdrActivity = {
   count: number;
 };
 
+/** One names-only step in the ordered per-turn activity trail (no payloads). */
+export type HerdrActivityTrailEntry = {
+  kind: "tool" | "subagent";
+  name?: string;
+  count: number;
+};
+
+/** Hard cap on published trail length; over-long trails are rejected by normalization. */
+export const HERDR_ACTIVITY_TRAIL_LIMIT = 16;
+
 export type PanelSessionEnrichment = {
   paneId: string;
   sessionId: string;
@@ -215,6 +227,8 @@ export type PanelSessionEnrichment = {
   contextUsage?: HerdrContextUsage;
   model?: HerdrModel;
   activity?: HerdrActivity;
+  /** Ordered names-only trail of tools/subagents used in the current turn, oldest first. */
+  activityTrail?: HerdrActivityTrailEntry[];
   /** Optional while an already-running, pre-metadata Pi extension republishs. */
   totalUsedTokens?: number;
   latestCompactionTokens?: number;
@@ -626,6 +640,26 @@ function normalizeActivity(value: unknown): HerdrActivity | null {
   const count = activity.count;
   if ((kind !== "tool" && kind !== "subagent") || typeof count !== "number" || !Number.isInteger(count) || count < 1 || count > 100) return null;
   return { kind, ...(name ? { name } : {}), count };
+}
+
+// Names-only ordered trail. Bounded and payload-free by construction: an
+// over-long array is truncated to the most recent HERDR_ACTIVITY_TRAIL_LIMIT
+// entries rather than rejected, and any malformed entry is dropped, so a stray
+// frame can never grow unbounded or wedge the whole enrichment.
+function normalizeActivityTrail(value: unknown): HerdrActivityTrailEntry[] | null {
+  if (!Array.isArray(value)) return null;
+  const entries: HerdrActivityTrailEntry[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const entry = item as Record<string, unknown>;
+    const kind = entry.kind;
+    const name = text(entry.name)?.slice(0, 60) ?? undefined;
+    const count = entry.count;
+    if ((kind !== "tool" && kind !== "subagent") || typeof count !== "number" || !Number.isInteger(count) || count < 1 || count > 1000) continue;
+    entries.push({ kind, ...(name ? { name } : {}), count });
+  }
+  if (entries.length === 0) return null;
+  return entries.length > HERDR_ACTIVITY_TRAIL_LIMIT ? entries.slice(-HERDR_ACTIVITY_TRAIL_LIMIT) : entries;
 }
 
 function normalizeModel(value: unknown): HerdrModel | null {
@@ -1269,6 +1303,12 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
     writeJson(response, 400, { error: "Invalid Pi activity" });
     return;
   }
+  const activityTrailValue = body?.activityTrail;
+  const activityTrail = activityTrailValue === undefined ? undefined : normalizeActivityTrail(activityTrailValue);
+  if (activityTrailValue !== undefined && !activityTrail) {
+    writeJson(response, 400, { error: "Invalid Pi activity trail" });
+    return;
+  }
   const totalUsedTokens = body?.totalUsedTokens;
   if (totalUsedTokens !== undefined && (typeof totalUsedTokens !== "number" || !Number.isFinite(totalUsedTokens) || totalUsedTokens < 0)) {
     writeJson(response, 400, { error: "Invalid Pi total token usage" });
@@ -1299,6 +1339,7 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
     ...(contextUsage ? { contextUsage } : {}),
     ...(model ? { model } : {}),
     ...(activity ? { activity } : {}),
+    ...(activityTrail ? { activityTrail } : {}),
     ...(typeof compactedTokens === "number" ? { latestCompactionTokens: compactedTokens } : {}),
     ...(agentSettled ? { agentSettled: true } : {}),
   };
@@ -1495,6 +1536,7 @@ export function reviewSnapshotFromPanels(
         ...(enrichments.get(panel.id)?.contextUsage ? { contextUsage: enrichments.get(panel.id)!.contextUsage } : {}),
         ...(enrichments.get(panel.id)?.model ? { model: enrichments.get(panel.id)!.model } : {}),
         ...(enrichments.get(panel.id)?.activity ? { activity: enrichments.get(panel.id)!.activity } : {}),
+        ...(enrichments.get(panel.id)?.activityTrail ? { activityTrail: enrichments.get(panel.id)!.activityTrail } : {}),
         ...(enrichments.get(panel.id)?.totalUsedTokens !== undefined ? { totalUsedTokens: enrichments.get(panel.id)!.totalUsedTokens } : {}),
         ...(enrichments.get(panel.id)?.latestCompactionTokens !== undefined ? { latestCompactionTokens: enrichments.get(panel.id)!.latestCompactionTokens } : {}),
         ...(panel.gitBranch ? { gitBranch: panel.gitBranch } : {}),
@@ -1521,6 +1563,7 @@ export function reviewSnapshotFromPanels(
       ...(enrichments.get(panel.id)?.contextUsage ? { contextUsage: enrichments.get(panel.id)!.contextUsage } : {}),
       ...(enrichments.get(panel.id)?.model ? { model: enrichments.get(panel.id)!.model } : {}),
       ...(enrichments.get(panel.id)?.activity ? { activity: enrichments.get(panel.id)!.activity } : {}),
+      ...(enrichments.get(panel.id)?.activityTrail ? { activityTrail: enrichments.get(panel.id)!.activityTrail } : {}),
       ...(enrichments.get(panel.id)?.totalUsedTokens !== undefined ? { totalUsedTokens: enrichments.get(panel.id)!.totalUsedTokens } : {}),
       ...(enrichments.get(panel.id)?.latestCompactionTokens !== undefined ? { latestCompactionTokens: enrichments.get(panel.id)!.latestCompactionTokens } : {}),
       ...(panel.gitBranch ? { gitBranch: panel.gitBranch } : {}),

@@ -6,7 +6,7 @@ import {
 import { startLiveMessageReviewBrowser } from "./browser.js";
 import { formatLiveFeedbackBatch, LIVE_RESPONSE_HISTORY_LIMIT } from "./session.js";
 import type { LiveMessageReviewServer } from "./server.js";
-import { beginHerdrTool, clearHerdrTools, endHerdrTool, EX_PLANNOTATOR_MODEL_COMMAND, EX_PLANNOTATOR_NEW_COMMAND, EX_PLANNOTATOR_RELOAD_COMMAND, pollHerdrFeedback, pollHerdrInstruction, releaseHerdrSession, reportHerdrSession } from "./herdr-registration.js";
+import { beginHerdrTool, clearHerdrTools, endHerdrTool, EX_PLANNOTATOR_MODEL_COMMAND, EX_PLANNOTATOR_NEW_COMMAND, EX_PLANNOTATOR_RELOAD_COMMAND, pollHerdrFeedback, pollHerdrInstruction, releaseHerdrSession, reportHerdrSession, resetHerdrActivityTrail } from "./herdr-registration.js";
 
 export const EX_PLANNOTATOR_COMMAND = "ex-plannotator-last";
 
@@ -190,6 +190,9 @@ export default function exPlannotator(
 	// each lifecycle event so its in-memory enrichment returns without requiring
 	// the user to restart the active Pi pane.
 	pi.on("agent_start", (_event, ctx) => {
+		// A fresh agent run is a new turn: start its activity trail empty so the
+		// live pane's ordered trail describes only the in-progress turn's work.
+		resetHerdrActivityTrail(ctx);
 		void dependencies.reportHerdr(ctx, pi.getCommands());
 		activeServer?.markAgentStarted?.();
 	});

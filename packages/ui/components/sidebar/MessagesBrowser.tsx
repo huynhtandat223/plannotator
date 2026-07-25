@@ -60,6 +60,12 @@ export interface PickerMessage {
   model?: { id: string; provider?: string; name?: string };
   /** Current tool or subagent activity reported by the Pi extension. */
   activity?: { kind: 'tool' | 'subagent'; name?: string; count: number };
+  /**
+   * Ordered names-only trail of tools/subagents used in the current turn,
+   * oldest first. Names only — never any tool input/output payload. Bounded by
+   * the extension so SSE frames stay small.
+   */
+  activityTrail?: Array<{ kind: 'tool' | 'subagent'; name?: string; count: number }>;
   /** Cumulative model tokens charged over the complete Pi session. */
   totalUsedTokens?: number;
   /** Context tokens represented by the latest Pi compaction summary. */
@@ -79,6 +85,14 @@ interface MessagesBrowserProps {
   emptyLabel?: string;
   /** Ex-Plannotator's live compact history is chronological; normal hosts are newest-first. */
   chronological?: boolean;
+  /**
+   * Ex-Plannotator's live pane renders a two-sided chat transcript: agent
+   * responses as left-aligned bubbles, captain echoes as right-aligned bubbles.
+   * Optional so every non-live surface keeps the compact list rows unchanged.
+   * Annotation semantics are identical either way — only the agent response
+   * rows are selectable buttons; echoes are never annotation targets.
+   */
+  chatLayout?: boolean;
   /**
    * Browser-local captain echoes to render above a snapshot row, keyed by that
    * row's `messageId`. Kept out of `messages` on purpose: echoes must not shift
@@ -200,6 +214,7 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   listLabel = "Recent messages — newest first",
   emptyLabel = "No recent assistant messages found.",
   chronological = false,
+  chatLayout = false,
   captainEchoes,
 }) => {
   const [count, setCount] = React.useState<MessagePickerCount>(() => getMessagePickerCount());
@@ -275,9 +290,50 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
 
   const renderRow = (msg: PickerMessage, idx: number) => {
     const isSelected = msg.messageId === selectedMessageId;
-    const isDefault = idx === 0;
+    // The ★ marks the default annotation target (the latest response): the last
+    // row in a chronological transcript, the first row in a newest-first list.
+    const isDefault = idx === latestIndex;
     const ts = formatTimestamp(msg.timestamp);
     const annotationCount = annotationCounts?.get(msg.messageId) ?? 0;
+    // Chat layout: the agent turn is a left-aligned bubble. It is STILL a
+    // <button> and still the annotation target — only its shape changes, so the
+    // picker and annotation semantics are untouched.
+    if (chatLayout) {
+      return (
+        <div key={msg.messageId} className="flex w-full justify-start">
+          <button
+            ref={idx === latestIndex ? latestRowRef : undefined}
+            onClick={() => onSelect(msg.messageId)}
+            aria-current={isSelected ? "true" : undefined}
+            aria-pressed={isSelected}
+            className={`max-w-[85%] text-left rounded-lg rounded-bl-sm px-2.5 py-1.5 text-xs transition-colors border ${
+              isSelected
+                ? "bg-primary/10 text-primary border-primary/40"
+                : "bg-muted/40 text-foreground border-border/60 hover:bg-muted/70"
+            }`}
+          >
+            <span className="flex items-center gap-1.5 mb-0.5">
+              <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
+                {msg.isExAICompanion ? "Ex AI" : "Agent"}
+              </span>
+              <span className="font-mono text-[9px] text-muted-foreground/70">#{idx + 1}{isDefault ? " \u2605" : ""}</span>
+              {annotationCount > 0 && (
+                <span
+                  className="ml-auto min-w-4 h-4 px-1 rounded-full bg-primary/10 text-primary border border-primary/30 text-[9px] font-semibold inline-flex items-center justify-center"
+                  title={`${annotationCount} annotation${annotationCount === 1 ? "" : "s"}`}
+                >
+                  {annotationCount}
+                </span>
+              )}
+            </span>
+            <span className="block line-clamp-3 leading-snug whitespace-pre-wrap">
+              {msg.label ?? previewText(msg.text)}
+            </span>
+            {ts && <span className="block text-[10px] text-muted-foreground mt-0.5">{ts}</span>}
+          </button>
+        </div>
+      );
+    }
     return (
       <button
         key={msg.messageId}
@@ -324,16 +380,29 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
     );
   };
 
-  /** Snapshot row preceded by any browser-local captain echoes anchored to it. */
+  /**
+   * Snapshot row plus any browser-local captain echoes anchored to it. Echoes
+   * anchor to the NEWEST agent row of their pane. In the newest-first picker
+   * that row sits at the top, so echoes render above it. In the chronological
+   * chat transcript that row sits at the bottom and a captain echo is a prompt
+   * sent AFTER the latest response, so echoes render below it instead — keeping
+   * the two-sided transcript in true chronological order.
+   */
   const renderEntry = ({ msg, index }: IndexedMessage) => {
     const echoes = captainEchoes?.get(msg.messageId);
     if (!echoes || echoes.length === 0) return renderRow(msg, index);
+    // Echoes are stored newest-first. The newest-first picker renders them as
+    // stored; the chronological transcript reverses to oldest-first so the
+    // captain's latest prompt sits at the very bottom, next to the newest turn.
+    const orderedEchoes = chronological ? [...echoes].reverse() : echoes;
+    const echoRows = orderedEchoes.map((echo) => (
+      <CaptainEchoRow key={echo.id} text={echo.text} timestamp={formatTimestamp(echo.timestamp)} variant={chatLayout ? "bubble" : "row"} />
+    ));
     return (
       <React.Fragment key={`entry:${msg.messageId}`}>
-        {echoes.map((echo) => (
-          <CaptainEchoRow key={echo.id} text={echo.text} timestamp={formatTimestamp(echo.timestamp)} />
-        ))}
+        {!chronological && echoRows}
         {renderRow(msg, index)}
+        {chronological && echoRows}
       </React.Fragment>
     );
   };
@@ -343,14 +412,24 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   // `index` stays global so `#N` numbering and the ★ marker remain stable.
   const indexedAll: IndexedMessage[] = messages.map((msg, index) => ({ msg, index }));
   let hiddenCount = 0;
+  // The budget keeps the NEWEST rows. Newest-first callers keep the head; a
+  // chronological (oldest-first) transcript keeps the tail so the latest turn
+  // always stays visible and older turns are what `+N more` reveals.
+  const withinBudget = (seen: number, total: number): boolean =>
+    chronological ? seen >= total - rowBudget : seen < rowBudget;
   const herdGroups = groupedByPane
     ? groupByHerd(indexedAll).map((group) => {
+        const totalsBySession = new Map<string, number>();
+        for (const { msg } of group.entries) {
+          const key = sessionKey(msg);
+          totalsBySession.set(key, (totalsBySession.get(key) ?? 0) + 1);
+        }
         const seenBySession = new Map<string, number>();
         const entries = group.entries.filter(({ msg }) => {
           const key = sessionKey(msg);
           const seen = seenBySession.get(key) ?? 0;
           seenBySession.set(key, seen + 1);
-          return seen < rowBudget;
+          return withinBudget(seen, totalsBySession.get(key) ?? 0);
         });
         hiddenCount += group.entries.length - entries.length;
         return { ...group, entries };
@@ -358,7 +437,11 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
     : null;
   const flatShown = herdGroups
     ? null
-    : indexedAll.slice(0, rowBudget === Number.POSITIVE_INFINITY ? indexedAll.length : rowBudget);
+    : rowBudget === Number.POSITIVE_INFINITY
+      ? indexedAll
+      : chronological
+        ? indexedAll.slice(Math.max(0, indexedAll.length - rowBudget))
+        : indexedAll.slice(0, rowBudget);
   if (flatShown) hiddenCount = messages.length - flatShown.length;
 
   return (
