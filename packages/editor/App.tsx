@@ -4094,6 +4094,25 @@ const App: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [exAIChatStatus, exAIEligible, exAIBoundaryId, exAIBoundaryText, exAIChat.state.suggestion?.boundaryId, exAISuggestBoundary]);
 
+  // In-composer Ex AI Chat option pick-list (live global comment box). Fetches the
+  // companion's suggested reply options for the current last-message boundary and
+  // returns them for the popover to render. Shares the per-boundary suggestion cache
+  // with the right-panel cards: if this boundary is already generated we return the
+  // cache without a second call, and suggestOptions de-dupes server-side
+  // (ex-ai-companion.ts) so the companion is never asked twice. Picking inserts for
+  // editing in the composer; nothing sends here.
+  const exAICurrentSuggestion = exAIChat.state.suggestion;
+  const onRequestGlobalCommentOptions = useCallback(async (): Promise<string[]> => {
+    if (!exAIEligible) throw new Error('Ex AI Chat is unavailable for this pane.');
+    if (exAIChatStatus !== 'ready') throw new Error('Start an Ex AI companion first.');
+    if (!exAIBoundaryId || !exAIBoundaryText.trim()) {
+      throw new Error('Wait for the paired session to finish its latest response.');
+    }
+    if (exAICurrentSuggestion?.boundaryId === exAIBoundaryId) return exAICurrentSuggestion.options;
+    const next = await exAISuggestBoundary(exAIBoundaryId, exAIBoundaryText);
+    return next?.suggestion?.boundaryId === exAIBoundaryId ? next.suggestion.options : [];
+  }, [exAIEligible, exAIChatStatus, exAIBoundaryId, exAIBoundaryText, exAICurrentSuggestion, exAISuggestBoundary]);
+
   const openAIChat = useCallback(() => {
     if (wideModeType !== null) {
       exitWideMode({ restore: false, panelOpen: true });
@@ -5337,6 +5356,7 @@ const App: React.FC = () => {
                     selectedAnnotationId={selectedAnnotationId}
                     isWaiting={sendsGlobalCommentAsUserMessage}
                     globalCommentDraftKey={globalCommentDraftKey}
+                    onRequestGlobalCommentOptions={exAIEligible ? onRequestGlobalCommentOptions : undefined}
                     livePiCommands={liveMessageReview ? selectedLiveMessage?.commands ?? [] : []}
                     onSearchFileMentions={liveMessageReview ? async (query) => {
                       if (!selectedLiveMessage?.paneId) return [];

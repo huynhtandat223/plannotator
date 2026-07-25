@@ -126,6 +126,14 @@ interface ViewerProps {
   /** Optional project-file lookup for Global Message @mentions. */
   onSearchFileMentions?: (query: string) => Promise<string[]>;
   /**
+   * Optional Ex AI Chat option pick-list for the global-comment composer. When
+   * set, the live global comment box offers a "Show options" action that fetches
+   * the companion's suggested reply options (shared per-boundary cache with the
+   * right-panel cards); picking one INSERTS its text into the composer as editable
+   * draft — it never sends. Absent for non-live hosts, which keep today's behavior.
+   */
+  onRequestGlobalCommentOptions?: () => Promise<string[]>;
+  /**
    * Opt-in draft key for the global-comment composer. When set, unsent text +
    * images survive a keyed Viewer remount (live panes remount by selected
    * message id) and the composer re-opens on mount if a draft exists, so the
@@ -218,6 +226,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   livePiCommands = [],
   onRunLivePiCommand,
   onSearchFileMentions,
+  onRequestGlobalCommentOptions,
   globalCommentDraftKey,
 }, ref) => {
   const [copied, setCopied] = useState(false);
@@ -958,6 +967,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             livePiCommands={viewerCommentPopover.isGlobal ? livePiCommands : []}
             onRunLivePiCommand={viewerCommentPopover.isGlobal ? onRunLivePiCommand : undefined}
             onSearchFileMentions={viewerCommentPopover.isGlobal ? onSearchFileMentions : undefined}
+            onRequestOptions={viewerCommentPopover.isGlobal ? onRequestGlobalCommentOptions : undefined}
             onAskAI={onAskAI}
             askAIContext={{
               kind: viewerCommentPopover.isGlobal ? 'general' : 'selection',
