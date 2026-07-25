@@ -67,7 +67,8 @@
     "./port-range": "./port-range.ts",
     "./plan-review-lifecycle": "./plan-review-lifecycle.ts",
     "./review-profiles": "./review-profiles.ts",
-    "./commit-avatars": "./commit-avatars.ts"
+    "./commit-avatars": "./commit-avatars.ts",
+    "./context-handoff-threshold": "./context-handoff-threshold.ts"
   },
   "dependencies": {
     "@plannotator/core": "workspace:*",

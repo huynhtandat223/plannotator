@@ -87,7 +87,20 @@ export const LivePaneChipButton = ({
             {chip.activity.glyph}
           </span>
         )}
-        <span className="min-w-0 truncate">{chip.label}</span>
+        {chip.workspaceShared && chip.workspace && chip.tab ? (
+          // Every visible chip shares one workspace, so the identical `workspace ·`
+          // prefix is redundant noise that squeezes out the distinguishing tab.
+          // De-emphasize the prefix and give the tab the space. The full
+          // `workspace · tab` still lives in the button title + sr-only text.
+          <span className="inline-flex min-w-0 items-baseline gap-1">
+            <span aria-hidden="true" className="shrink-0 truncate text-muted-foreground/40 max-w-[4rem]">
+              {chip.workspace} ·
+            </span>
+            <span className="min-w-0 truncate">{chip.tab}</span>
+          </span>
+        ) : (
+          <span className="min-w-0 truncate">{chip.label}</span>
+        )}
         {chip.branch && (
           <span className="inline-flex shrink-0 items-center gap-0.5 text-muted-foreground/70">
             <span aria-hidden="true">⎇</span>
@@ -160,18 +173,24 @@ export const LivePaneChipsRow = ({
   sources,
   selectedMessageId,
   reviewRoundStatus,
+  contextHandoffHighPercent,
   onSelect,
 }: {
   sources: PaneChipSource[];
   selectedMessageId: string | null;
   reviewRoundStatus?: string | null;
+  contextHandoffHighPercent?: number;
   onSelect: (messageId: string) => void;
 }) => {
   const [showAll, setShowAll] = React.useState(false);
   const [openCommandsPaneId, setOpenCommandsPaneId] = React.useState<string | null>(null);
   const { visible, overflow } = React.useMemo(
-    () => deriveLivePaneChips(sources, { selectedMessageId, reviewRoundStatus }),
-    [sources, selectedMessageId, reviewRoundStatus],
+    () => deriveLivePaneChips(sources, {
+      selectedMessageId,
+      reviewRoundStatus,
+      ctxWarnThreshold: contextHandoffHighPercent,
+    }),
+    [sources, selectedMessageId, reviewRoundStatus, contextHandoffHighPercent],
   );
   const handleToggleCommands = React.useCallback(
     (paneId: string) => setOpenCommandsPaneId((current) => (current === paneId ? null : paneId)),

@@ -167,3 +167,39 @@ test('reviewRoundStatus only affects the selected pane chip', () => {
   expect(sel.activity?.label).toBe('Waiting on you');
   expect(other.activity?.label).toBe('Idle');
 });
+
+test('workspaceShared flags when every chip shares one workspace', () => {
+  const { visible } = deriveLivePaneChips([
+    pane({ messageId: 'm1', paneId: 'p1', paneLabel: 'firstmate', paneTab: 'a' }),
+    pane({ messageId: 'm2', paneId: 'p2', paneLabel: 'firstmate', paneTab: 'b' }),
+  ]);
+  expect(visible.every((c) => c.workspaceShared)).toBe(true);
+});
+
+test('workspaceShared is false when workspaces differ', () => {
+  const { visible } = deriveLivePaneChips([
+    pane({ messageId: 'm1', paneId: 'p1', paneLabel: 'firstmate', paneTab: 'a' }),
+    pane({ messageId: 'm2', paneId: 'p2', paneLabel: 'other-ws', paneTab: 'b' }),
+  ]);
+  expect(visible.every((c) => !c.workspaceShared)).toBe(true);
+});
+
+test('workspaceShared is false for a single pane (nothing to de-duplicate)', () => {
+  const { visible } = deriveLivePaneChips([
+    pane({ messageId: 'm1', paneId: 'p1', paneLabel: 'firstmate', paneTab: 'a' }),
+  ]);
+  expect(visible[0].workspaceShared).toBe(false);
+});
+
+test('CTX warning threshold now matches the shared handoff high-water default', () => {
+  // The chip tone default flips at the SAME high-water percent the #26 handoff
+  // banner uses, so at the boundary the chip and the banner agree.
+  const below = deriveLivePaneChips([
+    pane({ messageId: 'm1', paneId: 'p1', contextUsage: { tokens: 71, contextWindow: 100, percent: 71 } }),
+  ]);
+  const at = deriveLivePaneChips([
+    pane({ messageId: 'm2', paneId: 'p2', contextUsage: { tokens: 72, contextWindow: 100, percent: 72 } }),
+  ]);
+  expect(below.visible[0].contextWarning).toBe(false);
+  expect(at.visible[0].contextWarning).toBe(true);
+});

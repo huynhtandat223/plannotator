@@ -856,6 +856,11 @@ describe("panelsFromSnapshot", () => {
     });
   });
 
+  test("publishes the effective context-handoff high-water threshold", () => {
+    const snapshot = reviewSnapshotFromPanels([], null, new Map(), new Map(), 80);
+    expect(snapshot.contextHandoffHighPercent).toBe(80);
+  });
+
   test("passes an optional per-pane context-handoff warning through to every response in a pane", () => {
     const panels: HerdrPanel[] = [
       { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
