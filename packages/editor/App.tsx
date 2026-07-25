@@ -156,6 +156,7 @@ import { reconcileSourceDocuments, type SourceDocumentReconcileEvent } from './s
 import { dirnameBrowserPath, normalizeBrowserPath, pathIsInsideDir } from './sourceDocumentPaths';
 import { pickRestoredSingleFileDraftToDisplay } from './draftRestoreSelection';
 import { changedLivePaneSessionIds, discardMessageStatesForChangedPanes, reconcileLiveMessageSelection } from './liveMessageScope';
+import { deriveLiveActivityChip, type LiveActivityChip as LiveActivityChipData } from './liveActivityChip';
 
 type NoteAutoSaveResults = {
   obsidian?: boolean;
@@ -221,7 +222,6 @@ type LivePaneMeta = {
   context?: LivePaneContext;
   used?: string;
   compacted?: string;
-  activity?: string;
   isEmpty: boolean;
 };
 
@@ -244,12 +244,10 @@ const livePaneMetadata = (message: PickerMessage | undefined): LivePaneMeta => {
   }
   if (typeof message.totalUsedTokens === 'number') meta.used = formatTokenCount(message.totalUsedTokens);
   if (typeof message.latestCompactionTokens === 'number') meta.compacted = formatTokenCount(message.latestCompactionTokens);
-  if (message.activity) {
-    meta.activity = message.activity.kind === 'subagent'
-      ? `subagent${message.activity.count === 1 ? '' : ` ×${message.activity.count}`}`
-      : `${message.activity.name ?? 'tool'}${message.activity.count === 1 ? '' : ` ×${message.activity.count}`}`;
-  }
-  meta.isEmpty = !meta.model && !meta.gitBranch && !meta.context && !meta.used && !meta.compacted && !meta.activity;
+  // Live tool/subagent activity is intentionally NOT surfaced here anymore: it is
+  // promoted into the dedicated LiveActivityChip next to the status pill so the same
+  // signal is not rendered twice (see deriveLiveActivityChip / liveActivityChip.ts).
+  meta.isEmpty = !meta.model && !meta.gitBranch && !meta.context && !meta.used && !meta.compacted;
   return meta;
 };
 
@@ -308,7 +306,30 @@ const LivePaneMetaBar = ({ meta }: { meta: LivePaneMeta }) => {
           <span className="font-medium tabular-nums text-foreground/90">{meta.compacted}</span>
         </span>
       )}
-      {meta.activity && <span className="text-muted-foreground/70">{meta.activity}</span>}
+    </span>
+  );
+};
+
+// Live "currently doing" chip: promotes agentStatus + activity into a single legible,
+// high-contrast signal next to the coarse status pill. Meaning is carried by the text
+// label (not colour/glyph alone), and the chip announces changes politely to AT.
+const LiveActivityChip = ({ chip }: { chip: LiveActivityChipData }) => {
+  const toneClass =
+    chip.tone === 'active'
+      ? 'border-primary/40 bg-primary/15 text-foreground'
+      : chip.tone === 'waiting'
+        ? 'border-warning/40 bg-warning/15 text-warning-foreground'
+        : chip.tone === 'blocked'
+          ? 'border-destructive/40 bg-destructive/15 text-destructive'
+          : 'border-border bg-muted/50 text-foreground/80';
+  return (
+    <span
+      role="status"
+      aria-live="polite"
+      className={`shrink-0 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${toneClass}`}
+    >
+      <span aria-hidden="true">{chip.glyph}</span>
+      <span>{chip.label}</span>
     </span>
   );
 };
@@ -4780,6 +4801,7 @@ const App: React.FC = () => {
           const selectedMessage = recentMessages.find((message) => message.messageId === selectedMessageId);
           const agentStatus = selectedMessage?.agentStatus;
           const agentStatusLabel = agentStatus ? agentStatus[0].toUpperCase() + agentStatus.slice(1) : null;
+          const activityChip = deriveLiveActivityChip({ agentStatus, activity: selectedMessage?.activity, reviewRoundStatus: status });
           const paneMetadata = livePaneMetadata(selectedMessage);
           return <div className={`border-b px-4 py-2 text-xs flex flex-wrap items-center gap-x-3 gap-y-1 flex-shrink-0 ${
             status === 'delivery_failed'
@@ -4809,7 +4831,12 @@ const App: React.FC = () => {
                 )}
               </span>
             )}
-            {agentStatusLabel && <span className={`ml-auto shrink-0 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${agentStatus === 'working' ? 'border-primary/30 bg-primary/10 text-foreground' : agentStatus === 'blocked' ? 'border-warning/30 bg-warning/10 text-warning-foreground' : 'border-border bg-muted/40 text-muted-foreground'}`}><span aria-hidden="true">●</span>{agentStatusLabel}</span>}
+            {(agentStatusLabel || activityChip) && (
+              <span className="ml-auto flex shrink-0 items-center gap-2">
+                {activityChip && <LiveActivityChip chip={activityChip} />}
+                {agentStatusLabel && <span className={`shrink-0 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${agentStatus === 'working' ? 'border-primary/30 bg-primary/10 text-foreground' : agentStatus === 'blocked' ? 'border-warning/30 bg-warning/10 text-warning-foreground' : 'border-border bg-muted/40 text-muted-foreground'}`}><span aria-hidden="true">●</span>{agentStatusLabel}</span>}
+              </span>
+            )}
             {(status === 'waiting' || status === 'agent_stopped' || status === 'delivery_failed') && (
               <div className="ml-auto flex items-center gap-2 shrink-0">
                 {status === 'delivery_failed' && <button type="button" onClick={() => { if (planReview) void handlePlanReviewAction('/api/session/feedback/retry'); else void handleLiveReviewAction('/api/session/feedback/retry'); }} disabled={isLiveReviewActionPending} className="rounded border border-current/30 px-2 py-1 font-medium hover:bg-background/40 disabled:cursor-not-allowed disabled:opacity-50">Retry</button>}
