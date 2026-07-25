@@ -2,7 +2,12 @@ import { afterEach, expect, test } from 'bun:test';
 import React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { MessagesBrowser } from './MessagesBrowser';
+import {
+  MessagesBrowser,
+  MESSAGE_PAGE_STEP,
+  anchoredScrollTop,
+  resolveRowBudget,
+} from './MessagesBrowser';
 import { resetStorageBackend, setStorageBackend, setMessagePickerCount } from '../../utils/storage';
 
 const hasDom = typeof document !== 'undefined';
@@ -54,7 +59,7 @@ test.skipIf(!hasDom)('renders an accessible chronological response picker with a
   expect(selected!.textContent).toContain('Newest response');
 });
 
-test.skipIf(!hasDom)('collapses to the default count and expands via the toggle', async () => {
+test.skipIf(!hasDom)('collapses to the default quota and pages incrementally', async () => {
   useMemoryStorage();
   host = document.createElement('div');
   document.body.append(host);
@@ -67,16 +72,18 @@ test.skipIf(!hasDom)('collapses to the default count and expands via the toggle'
     root!.render(<MessagesBrowser messages={messages} selectedMessageId="m1" onSelect={() => {}} />);
   });
 
-  // Default count is 3 → 3 rows shown + 1 toggle button.
-  const toggle = Array.from(host.querySelectorAll('button')).find((b) =>
-    (b.textContent ?? '').includes('Show 3 older'),
+  // Default quota is 3 → 3 rows shown + one `+N more` pager.
+  const pager = Array.from(host.querySelectorAll('button')).find((b) =>
+    (b.textContent ?? '').includes('more'),
   );
-  expect(toggle).toBeTruthy();
+  expect(pager).toBeTruthy();
+  expect(pager!.textContent).toContain('+3 more');
   expect(host.textContent).toContain('Response 3');
   expect(host.textContent).not.toContain('Response 4');
 
+  // Paging is incremental, not all-or-nothing: one click reveals the page step.
   await act(async () => {
-    toggle!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    pager!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   });
   expect(host.textContent).toContain('Response 6');
   expect(host.textContent).toContain('Show fewer');
@@ -133,7 +140,7 @@ test.skipIf(!hasDom)('caps the visible count independently for sessions in the s
   expect(host.textContent).toContain('session beta latest');
   expect(host.textContent).not.toContain('session alpha older');
   expect(host.textContent).not.toContain('session beta older');
-  expect(host.textContent).toContain('Show 2 older');
+  expect(host.textContent).toContain('+2 more');
 });
 
 test.skipIf(!hasDom)('falls back to pane identity and expands all hidden session responses', async () => {
@@ -160,7 +167,7 @@ test.skipIf(!hasDom)('falls back to pane identity and expands all hidden session
   expect(host.textContent).not.toContain('pane alpha older');
   expect(host.textContent).not.toContain('pane beta older');
   const toggle = Array.from(host.querySelectorAll('button')).find((button) =>
-    (button.textContent ?? '').includes('Show 2 older'),
+    (button.textContent ?? '').includes('+2 more'),
   );
   expect(toggle).toBeTruthy();
 
@@ -200,7 +207,7 @@ test.skipIf(!hasDom)('keeps the global count for non-live message lists', async 
 
   expect(host.textContent).toContain('flat latest');
   expect(host.textContent).not.toContain('flat older');
-  expect(host.textContent).toContain('Show 1 older');
+  expect(host.textContent).toContain('+1 more');
 });
 
 test.skipIf(!hasDom)('renders an accessible empty response state', async () => {
@@ -213,4 +220,108 @@ test.skipIf(!hasDom)('renders an accessible empty response state', async () => {
   });
 
   expect(host.textContent).toContain('No recent assistant messages found.');
+});
+
+test.skipIf(!hasDom)('offers only per-pane quotas the host can satisfy, with no inert 10', async () => {
+  useMemoryStorage();
+  host = document.createElement('div');
+  document.body.append(host);
+  root = createRoot(host);
+  await act(async () => {
+    root!.render(<MessagesBrowser
+      messages={[{ messageId: 'm1', text: 'only' }]}
+      selectedMessageId="m1"
+      onSelect={() => {}}
+    />);
+  });
+
+  const select = host.querySelector('select');
+  expect(select).not.toBeNull();
+  // The label must state the per-pane truth rather than a vague "Show".
+  expect(select!.getAttribute('aria-label')).toBe('Responses to show per pane');
+  expect(host.textContent).toContain('Per pane:');
+  const options = Array.from(select!.querySelectorAll('option')).map((o) => o.textContent);
+  expect(options).toEqual(['1', '3', '5', 'All']);
+  expect(options).not.toContain('10');
+});
+
+test.skipIf(!hasDom)('keeps paging progress when the per-pane quota changes', async () => {
+  useMemoryStorage();
+  setMessagePickerCount('1');
+  host = document.createElement('div');
+  document.body.append(host);
+  root = createRoot(host);
+  const messages = Array.from({ length: 9 }, (_, i) => ({
+    messageId: `m${i + 1}`,
+    text: `Response ${i + 1}`,
+  }));
+  await act(async () => {
+    root!.render(<MessagesBrowser messages={messages} selectedMessageId="m1" onSelect={() => {}} />);
+  });
+
+  // Quota 1 → one row, rest paged.
+  expect(host.textContent).toContain('Response 1');
+  expect(host.textContent).not.toContain('Response 2');
+
+  const more = Array.from(host.querySelectorAll('button')).find((b) =>
+    (b.textContent ?? '').includes('more'),
+  );
+  await act(async () => {
+    more!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  // 1 quota + 5 paged = 6 rows.
+  expect(host.textContent).toContain('Response 6');
+  expect(host.textContent).not.toContain('Response 7');
+
+  // Raising the quota must COMPOSE with paging, not reset it: 3 + 5 = 8.
+  const select = host.querySelector('select')!;
+  await act(async () => {
+    select.value = '3';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  expect(host.textContent).toContain('Response 8');
+  expect(host.textContent).not.toContain('Response 9');
+});
+
+test.skipIf(!hasDom)('treats All as absolute regardless of paging', async () => {
+  useMemoryStorage();
+  setMessagePickerCount('all');
+  host = document.createElement('div');
+  document.body.append(host);
+  root = createRoot(host);
+  const messages = Array.from({ length: 7 }, (_, i) => ({
+    messageId: `m${i + 1}`,
+    text: `Response ${i + 1}`,
+  }));
+  await act(async () => {
+    root!.render(<MessagesBrowser messages={messages} selectedMessageId="m1" onSelect={() => {}} />);
+  });
+
+  expect(host.textContent).toContain('Response 7');
+  // Nothing is hidden, so no paging affordance should be offered at all.
+  expect(host.textContent).not.toContain('more');
+});
+
+test('anchors the viewport so an incoming SSE frame never scrolls the reader', () => {
+  // A reader parked mid-list: the list grows above them by 120px, so the
+  // anchor must add exactly that back to keep the same rows on screen.
+  expect(anchoredScrollTop({ scrollTop: 400, scrollHeight: 1000 }, 1120)).toBe(520);
+  // Shrinking (a pane closed) must not leave a gap past the new bottom.
+  expect(anchoredScrollTop({ scrollTop: 400, scrollHeight: 1000 }, 900)).toBe(300);
+  // No height change → no movement.
+  expect(anchoredScrollTop({ scrollTop: 400, scrollHeight: 1000 }, 1000)).toBe(400);
+  // A reader at the top is "following latest"; moving them would BE the bug.
+  expect(anchoredScrollTop({ scrollTop: 0, scrollHeight: 1000 }, 1400)).toBe(0);
+  // Compensation can never scroll to a negative offset.
+  expect(anchoredScrollTop({ scrollTop: 40, scrollHeight: 1000 }, 200)).toBe(0);
+});
+
+test('composes the row budget from the quota plus paged rows', () => {
+  expect(resolveRowBudget('3', 0)).toBe(3);
+  // Paging is additive to the quota, never a replacement for it.
+  expect(resolveRowBudget('3', MESSAGE_PAGE_STEP)).toBe(3 + MESSAGE_PAGE_STEP);
+  expect(resolveRowBudget('1', MESSAGE_PAGE_STEP * 2)).toBe(1 + MESSAGE_PAGE_STEP * 2);
+  // `All` is absolute and unaffected by paging state.
+  expect(resolveRowBudget('all', 0)).toBe(Number.POSITIVE_INFINITY);
+  expect(resolveRowBudget('all', MESSAGE_PAGE_STEP)).toBe(Number.POSITIVE_INFINITY);
 });

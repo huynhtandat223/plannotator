@@ -17,6 +17,7 @@
     "./favicon": "./favicon.ts",
     "./feedback-templates": "./feedback-templates.ts",
     "./goal-setup": "./goal-setup.ts",
+    "./live-message-window": "./live-message-window.ts",
     "./open-in-apps": "./open-in-apps.ts",
     "./project": "./project.ts",
     "./source-save": "./source-save.ts",

@@ -1,6 +1,7 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { createServer } from "node:http";
 import { startLiveMessageReviewServer, type LiveMessageReviewServer } from "./server";
+import { LIVE_RESPONSE_HISTORY_LIMIT } from "./session";
 import type { LiveMessageReviewSnapshot, LiveFeedbackBatch } from "./session";
 
 const servers: LiveMessageReviewServer[] = [];
@@ -55,13 +56,16 @@ describe("Live Message Review Session server", () => {
 		expect(page.status).toBe(200);
 		expect(await page.text()).toContain("Ex-Plannotator");
 
+		// The visible window is the newest `LIVE_RESPONSE_HISTORY_LIMIT` responses,
+		// published oldest-first, so the selected entry is the last of that slice.
+		const visible = messages.slice(0, LIVE_RESPONSE_HISTORY_LIMIT).reverse();
 		const response = await fetch(`${server.url}/api/session`);
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual({
 			revision: 0,
-			messages: messages.slice(0, 4).reverse(),
+			messages: visible,
 			retainedMessages: [],
-			selectedMessageId: "message-1",
+			selectedMessageId: visible.at(-1)!.messageId,
 			unreadMessageIds: [],
 			draftsByMessageId: {},
 			codeDraftsByMessageId: {},
@@ -117,19 +121,23 @@ describe("Live Message Review Session server", () => {
 		});
 	});
 
-	test("serves the compact latest-four picker oldest-to-newest with the newest response selected", async () => {
-		const messages = Array.from({ length: 6 }, (_, index) => ({
-			messageId: `m${6 - index}`,
-			text: `Response ${6 - index}`,
+	test("serves the per-pane picker oldest-to-newest with the newest response selected", async () => {
+		// Overflow the shared retention window so the slice is genuinely exercised.
+		const total = LIVE_RESPONSE_HISTORY_LIMIT + 2;
+		const messages = Array.from({ length: total }, (_, index) => ({
+			messageId: `m${total - index}`,
+			text: `Response ${total - index}`,
 		}));
 		const server = await startLiveMessageReviewServer({ htmlContent: "<!doctype html>", messages });
 		servers.push(server);
 
+		// The picker keeps the newest `LIMIT`, published oldest-first.
+		const expected = messages.slice(0, LIVE_RESPONSE_HISTORY_LIMIT).reverse();
 		const response = await fetch(`${server.url}/api/plan`);
 		expect(await response.json()).toMatchObject({
-			recentMessages: [messages[3], messages[2], messages[1], messages[0]],
-			selectedMessageId: "m6",
-			plan: "Response 6",
+			recentMessages: expected,
+			selectedMessageId: `m${total}`,
+			plan: `Response ${total}`,
 		});
 	});
 

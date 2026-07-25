@@ -1,10 +1,15 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { LIVE_MESSAGE_RETENTION } from "@plannotator/core/live-message-window";
 import { getActiveBranchAssistantMessages } from "./assistant-message.js";
 import { formatLiveFeedbackBatch, type LiveFeedbackBatch } from "./session.js";
 
 const DEFAULT_HERDR_SERVICE_URL = "http://127.0.0.1:19432";
-/** Number of finalized structured assistant responses retained per live pane. */
-export const HERDR_LIVE_MESSAGE_LIMIT = 5;
+/**
+ * Number of finalized structured assistant responses retained per live pane.
+ * Anchored to the single shared retention constant so the extension, the
+ * server 400 bound, and the UI option ceiling stay aligned.
+ */
+export const HERDR_LIVE_MESSAGE_LIMIT = LIVE_MESSAGE_RETENTION;
 
 function loopbackServiceUrl(env: NodeJS.ProcessEnv): string {
 	const value = env.EX_PLANNOTATOR_HERDR_SERVICE_URL?.trim() || DEFAULT_HERDR_SERVICE_URL;

@@ -114,6 +114,48 @@ function resolveVisibleCount(count: MessagePickerCount): number {
   return count === "all" ? Number.POSITIVE_INFINITY : Number(count);
 }
 
+/** Rows revealed per `+N more` click. */
+export const MESSAGE_PAGE_STEP = 5;
+
+/**
+ * Per-pane row budget: the selected quota plus any rows the reader has paged
+ * in. Paging composes with the quota instead of overriding it, so changing the
+ * quota never discards paging progress and `All` stays absolute.
+ */
+export function resolveRowBudget(count: MessagePickerCount, pagedRows: number): number {
+  const quota = resolveVisibleCount(count);
+  return quota === Number.POSITIVE_INFINITY ? quota : quota + pagedRows;
+}
+
+/**
+ * Scroll offset that keeps the reader's viewport visually still when a live
+ * frame changes the list's height. Returns the new `scrollTop` to apply.
+ *
+ * Only growth above the viewport is compensated. A reader parked at the very
+ * top (scrollTop 0) is intentionally left alone: that is the "following the
+ * latest" position, and moving them would be the bug, not the fix.
+ */
+export function anchoredScrollTop(
+  previous: { scrollTop: number; scrollHeight: number },
+  nextScrollHeight: number,
+): number {
+  if (previous.scrollTop <= 0) return previous.scrollTop;
+  const delta = nextScrollHeight - previous.scrollHeight;
+  if (delta === 0) return previous.scrollTop;
+  return Math.max(0, previous.scrollTop + delta);
+}
+
+/** Nearest scrollable ancestor, so anchoring works without owning the scroller. */
+function scrollableAncestor(node: HTMLElement | null): HTMLElement | null {
+  let element = node?.parentElement ?? null;
+  while (element) {
+    const overflowY = window.getComputedStyle(element).overflowY;
+    if (/(auto|scroll|overlay)/.test(overflowY)) return element;
+    element = element.parentElement;
+  }
+  return null;
+}
+
 /** Original-list position retained so `#N` numbering and the ★ default marker
  * stay stable even after rows are clustered into herd sections. */
 interface IndexedMessage {
@@ -161,13 +203,56 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   captainEchoes,
 }) => {
   const [count, setCount] = React.useState<MessagePickerCount>(() => getMessagePickerCount());
-  // Whether the user expanded the flat list past the count cap this session.
-  const [expanded, setExpanded] = React.useState(false);
+  // Rows paged in past the per-pane quota. Additive, and deliberately NOT
+  // reset when the quota changes: the reader's paging is their own state.
+  const [pagedRows, setPagedRows] = React.useState(0);
 
   const handleCountChange = React.useCallback((next: MessagePickerCount) => {
     setCount(next);
     setMessagePickerCount(next);
-    setExpanded(false);
+  }, []);
+
+  const rootRef = React.useRef<HTMLDivElement | null>(null);
+  const latestRowRef = React.useRef<HTMLButtonElement | null>(null);
+  const scrollMetricsRef = React.useRef<{ scrollTop: number; scrollHeight: number } | null>(null);
+  const [isAwayFromLatest, setIsAwayFromLatest] = React.useState(false);
+
+  // An arriving SSE frame must never move the viewport under the reader.
+  // Height growth above the viewport is compensated before paint.
+  React.useLayoutEffect(() => {
+    const scroller = scrollableAncestor(rootRef.current);
+    if (!scroller) return;
+    const previous = scrollMetricsRef.current;
+    if (previous) {
+      const next = anchoredScrollTop(previous, scroller.scrollHeight);
+      if (next !== scroller.scrollTop) scroller.scrollTop = next;
+    }
+    scrollMetricsRef.current = { scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight };
+  }, [messages, count, pagedRows]);
+
+  // Track whether the latest row has scrolled out of view, which is what makes
+  // the explicit `Jump to latest` affordance necessary rather than decorative.
+  React.useEffect(() => {
+    const scroller = scrollableAncestor(rootRef.current);
+    if (!scroller) return;
+    const sync = () => {
+      scrollMetricsRef.current = { scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight };
+      const row = latestRowRef.current;
+      if (!row) {
+        setIsAwayFromLatest(false);
+        return;
+      }
+      const rowBox = row.getBoundingClientRect();
+      const scrollerBox = scroller.getBoundingClientRect();
+      setIsAwayFromLatest(rowBox.bottom < scrollerBox.top || rowBox.top > scrollerBox.bottom);
+    };
+    sync();
+    scroller.addEventListener("scroll", sync, { passive: true });
+    return () => scroller.removeEventListener("scroll", sync);
+  }, [messages, count, pagedRows]);
+
+  const jumpToLatest = React.useCallback(() => {
+    latestRowRef.current?.scrollIntoView({ block: "nearest" });
   }, []);
 
   if (messages.length === 0) {
@@ -182,7 +267,11 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   // In that mode we cluster rows under herd/workspace section headers instead
   // of repeating the workspace name inline on every row.
   const groupedByPane = messages.some((message) => message.paneId !== undefined);
-  const visibleCount = resolveVisibleCount(count);
+  // Per-pane budget = selected quota + rows the reader paged in.
+  const rowBudget = resolveRowBudget(count, pagedRows);
+  // The newest response: last row when the host is chronological (live panes),
+  // first row otherwise. This is the scroll anchor and `Jump to latest` target.
+  const latestIndex = chronological ? messages.length - 1 : 0;
 
   const renderRow = (msg: PickerMessage, idx: number) => {
     const isSelected = msg.messageId === selectedMessageId;
@@ -192,6 +281,7 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
     return (
       <button
         key={msg.messageId}
+        ref={idx === latestIndex ? latestRowRef : undefined}
         onClick={() => onSelect(msg.messageId)}
         aria-current={isSelected ? "true" : undefined}
         aria-pressed={isSelected}
@@ -256,32 +346,34 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   const herdGroups = groupedByPane
     ? groupByHerd(indexedAll).map((group) => {
         const seenBySession = new Map<string, number>();
-        const entries = expanded ? group.entries : group.entries.filter(({ msg }) => {
+        const entries = group.entries.filter(({ msg }) => {
           const key = sessionKey(msg);
           const seen = seenBySession.get(key) ?? 0;
           seenBySession.set(key, seen + 1);
-          return seen < visibleCount;
+          return seen < rowBudget;
         });
         hiddenCount += group.entries.length - entries.length;
         return { ...group, entries };
       })
     : null;
-  const flatShown = herdGroups ? null : indexedAll.slice(0, expanded ? indexedAll.length : visibleCount);
+  const flatShown = herdGroups
+    ? null
+    : indexedAll.slice(0, rowBudget === Number.POSITIVE_INFINITY ? indexedAll.length : rowBudget);
   if (flatShown) hiddenCount = messages.length - flatShown.length;
 
   return (
-    <div className="p-2">
+    <div className="p-2" ref={rootRef}>
       <div className="px-2 pt-1 pb-2 flex items-center justify-between gap-2">
         <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
           {chronological ? "Recent responses — oldest first" : listLabel}
         </span>
         <label className="flex items-center gap-1 text-[10px] text-muted-foreground shrink-0">
-          <span className="sr-only">Messages to show</span>
-          <span aria-hidden="true">Show</span>
+          <span className="sr-only">Responses to show per pane</span>
+          <span aria-hidden="true">Per pane:</span>
           <select
             value={count}
             onChange={(event) => handleCountChange(event.target.value as MessagePickerCount)}
-            aria-label="Number of recent responses to show"
+            aria-label="Responses to show per pane"
             className="rounded border border-border bg-transparent px-1 py-0.5 text-[10px] text-foreground focus:outline-none focus:ring-1 focus:ring-primary/40"
           >
             {MESSAGE_PICKER_COUNT_OPTIONS.map((option) => (
@@ -292,6 +384,15 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
           </select>
         </label>
       </div>
+      {isAwayFromLatest && (
+        <button
+          type="button"
+          onClick={jumpToLatest}
+          className="w-full mb-1 px-2 py-1 rounded text-[10px] font-medium text-primary border border-primary/30 bg-primary/10 hover:bg-primary/20 transition-colors"
+        >
+          Jump to latest
+        </button>
+      )}
       <div className="space-y-0.5">
         {herdGroups
           ? herdGroups.map((group) => (
@@ -303,14 +404,22 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
               </div>
             ))
           : flatShown!.map(renderEntry)}
-        {(hiddenCount > 0 || expanded) && (
+        {hiddenCount > 0 && (
           <button
             type="button"
-            onClick={() => setExpanded((prev) => !prev)}
-            aria-expanded={expanded}
+            onClick={() => setPagedRows((prev) => prev + MESSAGE_PAGE_STEP)}
             className="w-full text-left px-2 py-1 rounded text-[10px] font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
           >
-            {expanded ? "Show fewer" : `Show ${hiddenCount} older`}
+            +{Math.min(hiddenCount, MESSAGE_PAGE_STEP)} more
+          </button>
+        )}
+        {pagedRows > 0 && (
+          <button
+            type="button"
+            onClick={() => setPagedRows(0)}
+            className="w-full text-left px-2 py-1 rounded text-[10px] font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+          >
+            Show fewer
           </button>
         )}
       </div>

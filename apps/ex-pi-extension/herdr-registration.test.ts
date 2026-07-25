@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { beginHerdrTool, currentHerdrRegistration, endHerdrTool, pollHerdrFeedback, pollHerdrInstruction, releaseHerdrSession, reportHerdrSession } from "./herdr-registration";
+import { beginHerdrTool, currentHerdrRegistration, endHerdrTool, HERDR_LIVE_MESSAGE_LIMIT, pollHerdrFeedback, pollHerdrInstruction, releaseHerdrSession, reportHerdrSession } from "./herdr-registration";
 
 function context() {
 	return {
@@ -42,8 +42,12 @@ describe("Herdr session enrichment", () => {
 		expect(registration?.agentSettled).toBe(true);
 	});
 
-	test("retains only the newest five structured assistant responses", () => {
-		const branch = Array.from({ length: 7 }, (_, index) => ({
+	test("retains only the newest responses allowed by the shared retention cap", () => {
+		// Sized from the shared constant so raising retention cannot leave this
+		// test asserting a stale window; the cap itself is asserted in
+		// packages/core/live-message-window.test.ts.
+		const total = HERDR_LIVE_MESSAGE_LIMIT + 2;
+		const branch = Array.from({ length: total }, (_, index) => ({
 			id: `message-${index + 1}`,
 			type: "message",
 			message: { role: "assistant", content: [{ type: "text", text: `Response ${index + 1}` }] },
@@ -56,9 +60,12 @@ describe("Herdr session enrichment", () => {
 			},
 		} as never, { HERDR_ENV: "1", HERDR_PANE_ID: "w:p1" });
 
-		expect(registration?.messages.map((message) => message.messageId)).toEqual([
-			"message-7", "message-6", "message-5", "message-4", "message-3",
-		]);
+		// Newest-first, exactly `HERDR_LIVE_MESSAGE_LIMIT` entries.
+		const expected = Array.from(
+			{ length: HERDR_LIVE_MESSAGE_LIMIT },
+			(_, index) => `message-${total - index}`,
+		);
+		expect(registration?.messages.map((message) => message.messageId)).toEqual(expected);
 	});
 
 	test("publishes context usage and the latest compaction token count", () => {

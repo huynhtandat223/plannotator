@@ -14,6 +14,7 @@ import {
   type SinceBaseSections,
 } from "../../packages/shared/review-core";
 import type { WorkspaceStatusPayload } from "../../packages/core/workspace-status-types";
+import { LIVE_MESSAGE_RETENTION } from "../../packages/core/live-message-window";
 import {
   filterWorkspaceStatusForDirectory,
   getWorkspaceStatusForDirectory,
@@ -45,9 +46,9 @@ const host = process.env.PLANNOTATOR_HERDR_HOST ?? "0.0.0.0";
 // loopback-only because they carry the local Pi session identity.
 const browserWriteToken = process.env.PLANNOTATOR_HERDR_WRITE_TOKEN?.trim() || null;
 const MAX_ACTION_REQUEST_BODY_BYTES = 16_384;
-/** Up to five finalized assistant responses, delivered only from a local Pi pane. */
+/** Up to `LIVE_MESSAGE_RETENTION` finalized assistant responses, delivered only from a local Pi pane. */
 export const MAX_PANEL_SESSION_BODY_BYTES = 1_000_000;
-export const HERDR_LIVE_MESSAGE_LIMIT = 5;
+export const HERDR_LIVE_MESSAGE_LIMIT = LIVE_MESSAGE_RETENTION;
 // Focus/status transitions are human-paced, not sub-second events. A 2s poll
 // cuts the per-tick `herdr api snapshot` + per-panel `git branch` subprocess
 // load ~2.6x versus the old 750ms cadence while staying responsive. Read-only
