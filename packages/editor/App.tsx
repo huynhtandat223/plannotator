@@ -156,6 +156,16 @@ import { reconcileSourceDocuments, type SourceDocumentReconcileEvent } from './s
 import { dirnameBrowserPath, normalizeBrowserPath, pathIsInsideDir } from './sourceDocumentPaths';
 import { pickRestoredSingleFileDraftToDisplay } from './draftRestoreSelection';
 import { changedLivePaneSessionIds, discardMessageStatesForChangedPanes, reconcileLiveMessageSelection } from './liveMessageScope';
+import {
+  appendCaptainEcho,
+  buildCaptainEchoAnchors,
+  captainEchoScopeKey,
+  discardCaptainEchoesForPanes,
+  loadCaptainEchoes,
+  pruneCaptainEchoes,
+  saveCaptainEchoes,
+  type CaptainEchoStore,
+} from './liveCaptainEcho';
 import { deriveLiveActivityChip, type LiveActivityChip as LiveActivityChipData } from './liveActivityChip';
 
 type NoteAutoSaveResults = {
@@ -571,6 +581,23 @@ const App: React.FC = () => {
   const [liveMessageSelectionPinned, setLiveMessageSelectionPinned] = useState(false);
   const [liveMessageReviewReloadOnSelection, setLiveMessageReviewReloadOnSelection] = useState(true);
   const [liveMessageReviewReadOnly, setLiveMessageReviewReadOnly] = useState(false);
+  // Browser-local echo of messages this browser sent to a live pane, so the
+  // transcript reads two-sided. The host never stores captain turns (its pending
+  // instruction is destroyed on claim for at-most-once delivery), so this is the
+  // only record — sessionStorage-backed, pane+Pi-session scoped, and discarded at
+  // the same session boundary as drafts. See liveCaptainEcho.ts.
+  const [captainEchoes, setCaptainEchoes] = useState<CaptainEchoStore>(() => loadCaptainEchoes());
+  const captainEchoesRef = useRef(captainEchoes);
+  const updateCaptainEchoes = React.useCallback(
+    (update: (store: CaptainEchoStore) => CaptainEchoStore) => {
+      const next = update(captainEchoesRef.current);
+      if (next === captainEchoesRef.current) return;
+      captainEchoesRef.current = next;
+      saveCaptainEchoes(next);
+      setCaptainEchoes(next);
+    },
+    [],
+  );
   // Opt-in only: Plan Review is served by Ex-Plannotator's mixed-source session.
   // Last never receives this capability and retains its existing data flow.
   const [planReview, setPlanReview] = useState<PlanReviewCapability | null>(null);
@@ -1377,10 +1404,17 @@ const App: React.FC = () => {
         changedPaneIds,
       );
       setCachedMessageAnnotationCounts(buildMessageAnnotationCounts(messageStateCacheRef.current));
+      // The local captain echo rides the same retention story as drafts: a new Pi
+      // session in this pane means its prior turns no longer describe what the
+      // agent can see, so they are discarded at this one boundary.
+      updateCaptainEchoes((store) => discardCaptainEchoesForPanes(store, changedPaneIds));
       toast('Draft annotations discarded', {
         description: 'The Pi session changed in this pane, so its prior review drafts cannot be sent to the new session.',
       });
     }
+    // Panes that vanished from the snapshot can never render their echo again;
+    // drop them so a long-lived tab holds no orphan prompt text.
+    updateCaptainEchoes((store) => pruneCaptainEchoes(store, snapshot.messages));
 
     // Advance before scheduling React state. EventSource messages are allowed
     // to arrive back-to-back, and each must compare with this accepted snapshot
@@ -1427,7 +1461,7 @@ const App: React.FC = () => {
       toast('Agent response received', { description: 'Reloading the latest review state.' });
       window.location.reload();
     }
-  }, [selectedMessageId, recentMessages, followNextPaneResponse, liveMessageSelectionPinned, saveCurrentMessageState, linkedDocHook.restoreSession, liveMessageReviewReloadOnSelection, handleSelectMessage]);
+  }, [selectedMessageId, recentMessages, followNextPaneResponse, liveMessageSelectionPinned, saveCurrentMessageState, linkedDocHook.restoreSession, liveMessageReviewReloadOnSelection, handleSelectMessage, updateCaptainEchoes]);
 
   const handleLiveReviewAction = React.useCallback(async (
     path: '/api/session/feedback/retry' | '/api/session/resume' | '/api/session/cancel-waiting',
@@ -1652,6 +1686,15 @@ const App: React.FC = () => {
       flashTimerRef.current = setTimeout(() => setHighlightedFiles(undefined), 1200);
     });
   }, [allAnnotationCounts, openSidebarTab, sidebar, hasFileAnnotations]);
+
+  // Render-time overlay only: echo entries are attached to the snapshot row they
+  // belong above, never merged into `recentMessages`. Keeping the snapshot list
+  // untouched is what guarantees echo rows cannot be selected, cannot shift row
+  // numbering, and cannot become annotation targets.
+  const captainEchoAnchors = React.useMemo(
+    () => (liveMessageReview ? buildCaptainEchoAnchors(recentMessages, captainEchoes) : new Map()),
+    [liveMessageReview, recentMessages, captainEchoes],
+  );
 
   // Context-aware back label for linked doc navigation
   const backLabel = annotateSource === 'folder' ? 'file list'
@@ -3362,6 +3405,18 @@ const App: React.FC = () => {
           throw new Error(body.error || 'Failed to send message to Pi');
         }
         setFollowNextPaneResponse({ paneId: selectedLiveMessage.paneId, latestMessageId: selectedLiveMessage.messageId });
+        // Echo the sent text locally so the transcript reads two-sided. This is
+        // the browser's own record: the host destroys the pending instruction on
+        // claim and never publishes captain turns, and we deliberately do not ask
+        // it to. Scoped to pane + Pi session, exactly like the draft key above.
+        if (selectedLiveMessage.piSessionId) {
+          const scopeKey = captainEchoScopeKey(selectedLiveMessage.paneId, selectedLiveMessage.piSessionId);
+          updateCaptainEchoes((store) => appendCaptainEcho(store, scopeKey, {
+            id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+            text: content,
+            timestamp: new Date().toISOString(),
+          }));
+        }
         dismissDraft();
         toast('Message sent to Pi', { description: 'Waiting for its response.' });
         setIsSubmitting(false);
@@ -4996,6 +5051,7 @@ const App: React.FC = () => {
                 selectedMessageId={selectedMessageId}
                 onSelectMessage={handleSelectMessage}
                 messageAnnotationCounts={activeMessageAnnotationCounts}
+                captainEchoes={captainEchoAnchors}
                 hasPendingResponse={pendingResponseMessageId !== null}
                 messagePickerLabels={liveWorkspaceMode ? {
                   tab: 'Workspaces',
