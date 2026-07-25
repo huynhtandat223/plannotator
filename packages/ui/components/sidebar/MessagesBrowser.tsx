@@ -44,6 +44,14 @@ export interface PickerMessage {
   paneLabel?: string;
   /** Optional host-provided pane detail for grouped message pickers. */
   paneDescription?: string;
+  /**
+   * Optional host-provided Herdr tab name for this pane. Distinct from
+   * {@link paneLabel} (workspace): panes in the same workspace share a
+   * workspace label but have different tabs, so the live-pane header chips use
+   * this to make each pane individually identifiable. Optional so non-live
+   * surfaces are untouched.
+   */
+  paneTab?: string;
   /** Optional host-provided authoritative live agent state. */
   agentStatus?: 'working' | 'idle' | 'blocked' | 'unknown';
   /** Optional host-provided workspace root for the pane containing this response. */
@@ -77,7 +85,18 @@ export interface PickerMessage {
    * oldest first. Names only — never any tool input/output payload. Bounded by
    * the extension so SSE frames stay small.
    */
-  activityTrail?: Array<{ kind: 'tool' | 'subagent'; name?: string; count: number }>;
+  activityTrail?: Array<{
+    kind: 'tool' | 'subagent';
+    name?: string;
+    count: number;
+    /**
+     * Optional redacted, single-line, hard-truncated command summary for
+     * bash-like tools (e.g. `npm test`). Redaction + truncation are applied at
+     * the source before it reaches the wire; never a full/raw command. Absent
+     * for non-bash tools, which stay names-only.
+     */
+    command?: string;
+  }>;
   /** Cumulative model tokens charged over the complete Pi session. */
   totalUsedTokens?: number;
   /** Context tokens represented by the latest Pi compaction summary. */

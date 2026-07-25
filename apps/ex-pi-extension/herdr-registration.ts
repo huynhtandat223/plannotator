@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { LIVE_MESSAGE_RETENTION } from "@plannotator/core/live-message-window";
 import { getActiveBranchAssistantMessages } from "./assistant-message.js";
+import { commandSummaryFromArgs } from "./commandSummary.js";
 import { formatLiveFeedbackBatch, type LiveFeedbackBatch } from "./session.js";
 
 const DEFAULT_HERDR_SERVICE_URL = "http://127.0.0.1:19432";
@@ -60,6 +61,12 @@ export type HerdrActivityTrailEntry = {
 	kind: "tool" | "subagent";
 	name?: string;
 	count: number;
+	/**
+	 * Optional redacted, single-line, hard-truncated command summary for bash-like
+	 * tools (see commandSummary.ts). Applied at THIS source before it reaches the
+	 * wire; never a full/raw command, never logged. Absent for non-bash tools.
+	 */
+	command?: string;
 };
 
 /**
@@ -131,16 +138,18 @@ function trailKind(toolName: string): HerdrActivityTrailEntry["kind"] {
 	return toolName === "subagent" ? "subagent" : "tool";
 }
 
-function appendActivityTrail(sessionId: string, toolName: string): void {
+function appendActivityTrail(sessionId: string, toolName: string, command?: string): void {
 	const name = toolName.slice(0, ACTIVITY_TRAIL_NAME_MAX);
 	const kind = trailKind(toolName);
 	const trail = activityTrailBySession.get(sessionId) ?? [];
 	const last = trail[trail.length - 1];
 	// Collapse an immediately repeated tool of the same kind/name into a count.
-	if (last && last.kind === kind && last.name === name) {
+	// A distinct command summary breaks the collapse so each bash invocation keeps
+	// its own line — the whole point of surfacing recent commands.
+	if (last && last.kind === kind && last.name === name && last.command === command) {
 		last.count += 1;
 	} else {
-		trail.push({ kind, name, count: 1 });
+		trail.push({ kind, name, count: 1, ...(command ? { command } : {}) });
 		// Drop from the front so the trail always reflects the most recent tools.
 		while (trail.length > HERDR_ACTIVITY_TRAIL_LIMIT) trail.shift();
 	}
@@ -185,12 +194,16 @@ function currentActivity(ctx: HerdrExtensionContext): HerdrActivity | undefined 
 	return { kind: "tool", name, count: activeTools.size };
 }
 
-export function beginHerdrTool(ctx: HerdrExtensionContext, toolCallId: string, toolName: string): void {
+export function beginHerdrTool(ctx: HerdrExtensionContext, toolCallId: string, toolName: string, args?: unknown): void {
 	const sessionId = ctx.sessionManager.getSessionId();
 	const activeTools = activeToolCallsBySession.get(sessionId) ?? new Map<string, string>();
 	activeTools.set(toolCallId, toolName);
 	activeToolCallsBySession.set(sessionId, activeTools);
-	appendActivityTrail(sessionId, toolName);
+	// Redacted, single-line, hard-truncated command summary for bash-like tools
+	// ONLY; every other tool stays names-only. Redaction happens in commandSummary
+	// before the string is retained anywhere. Raw commands are never stored/logged.
+	const command = commandSummaryFromArgs(toolName, args);
+	appendActivityTrail(sessionId, toolName, command);
 }
 
 export function endHerdrTool(ctx: HerdrExtensionContext, toolCallId: string): void {

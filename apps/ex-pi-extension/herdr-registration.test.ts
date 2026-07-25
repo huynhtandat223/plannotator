@@ -150,6 +150,29 @@ describe("Herdr session enrichment", () => {
 		clearHerdrTools(ctx);
 	});
 
+	test("attaches a redacted command summary to bash tool entries only", () => {
+		const sessionManager = { getSessionId: () => "session-cmd", getEntries: () => [], getBranch: () => [] };
+		const ctx = { sessionManager, model: { id: "cx/gpt-5.6-terra", contextWindow: 1_050_000 } } as never;
+		resetHerdrActivityTrail(ctx);
+		// A bash tool carries a redacted, single-line command; distinct commands do NOT collapse.
+		beginHerdrTool(ctx, "t1", "bash", { command: "npm test" });
+		endHerdrTool(ctx, "t1");
+		beginHerdrTool(ctx, "t2", "bash", { command: "export API_KEY=sk_livesecretvalue123456" });
+		endHerdrTool(ctx, "t2");
+		// A non-bash tool stays names-only even if args happen to carry a command.
+		beginHerdrTool(ctx, "t3", "read", { command: "cat secrets.env" });
+		endHerdrTool(ctx, "t3");
+		const trail = currentHerdrRegistration(ctx, { HERDR_ENV: "1", HERDR_PANE_ID: "w:p1" })?.activityTrail;
+		expect(trail).toEqual([
+			{ kind: "tool", name: "bash", count: 1, command: "npm test" },
+			{ kind: "tool", name: "bash", count: 1, command: expect.stringContaining("‹redacted›") },
+			{ kind: "tool", name: "read", count: 1 },
+		]);
+		// The raw secret never reaches the wire.
+		expect(trail?.[1]?.command).not.toContain("sk_livesecretvalue123456");
+		clearHerdrTools(ctx);
+	});
+
 	test("bounds the trail so long turns cannot blow up the SSE frame", () => {
 		const sessionManager = { getSessionId: () => "session-bound", getEntries: () => [], getBranch: () => [] };
 		const ctx = { sessionManager, model: { id: "cx/gpt-5.6-terra", contextWindow: 1_050_000 } } as never;

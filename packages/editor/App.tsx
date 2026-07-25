@@ -168,6 +168,7 @@ import {
 } from './liveCaptainEcho';
 import { deriveLiveActivityChip, type LiveActivityChip as LiveActivityChipData } from './liveActivityChip';
 import { deriveLiveActivityTrail, formatLiveActivityTrail, formatTrailStep, type LiveActivityTrailStep } from './liveActivityTrail';
+import { LivePaneChipsRow } from './LivePaneChipsRow';
 
 type NoteAutoSaveResults = {
   obsidian?: boolean;
@@ -397,32 +398,62 @@ const LiveActivityChip = ({ chip }: { chip: LiveActivityChipData }) => {
 // Ordered names-only activity trail for the current turn, e.g. `read → grep ×3 →
 // edit → bash`. Driven entirely by `activityTrail` already on the wire (see
 // liveActivityTrail.ts + apps/ex-pi-extension/herdr-registration.ts). NAMES ONLY:
-// no tool inputs/outputs are ever surfaced here. The full arrow-joined summary is
-// the accessible label so AT users get the sequence, not disconnected tokens.
+// no tool inputs/outputs are ever surfaced here.
+//
+// Per captain feedback the inline render is the LATEST step only (the full chain
+// was too verbose/redundant); the complete arrow-joined chain is revealed on
+// demand behind a `⋯` expand affordance. The full summary remains the accessible
+// label so AT users always get the whole sequence, not disconnected tokens.
+const stepChipClass = (isSubagent: boolean): string =>
+  `inline-flex items-center rounded px-1 py-0.5 text-[10px] font-medium tabular-nums ${
+    isSubagent
+      ? 'border border-primary/30 bg-primary/10 text-primary'
+      : 'border border-border bg-muted/50 text-foreground/80'
+  }`;
+
 const LiveActivityTrail = ({ steps }: { steps: LiveActivityTrailStep[] }) => {
+  const [expanded, setExpanded] = React.useState(false);
   if (steps.length === 0) return null;
   const summary = formatLiveActivityTrail(steps);
+  const latest = steps[steps.length - 1];
+  const hasHistory = steps.length > 1;
   return (
     <span
-      className="min-w-0 inline-flex flex-wrap items-center gap-1"
+      className="relative min-w-0 inline-flex flex-wrap items-center gap-1"
       aria-label={`Tools used this turn: ${summary}`}
       title={summary}
     >
-      {steps.map((step, index) => (
-        <React.Fragment key={`${step.label}:${index}`}>
-          {index > 0 && <span aria-hidden="true" className="text-muted-foreground/50">→</span>}
-          <span
-            aria-hidden="true"
-            className={`inline-flex items-center rounded px-1 py-0.5 text-[10px] font-medium tabular-nums ${
-              step.isSubagent
-                ? 'border border-primary/30 bg-primary/10 text-primary'
-                : 'border border-border bg-muted/50 text-foreground/80'
-            }`}
-          >
-            {formatTrailStep(step)}
-          </span>
-        </React.Fragment>
-      ))}
+      <span aria-hidden="true" className={stepChipClass(latest.isSubagent)}>
+        {formatTrailStep(latest)}
+      </span>
+      {hasHistory && (
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          aria-label={`Show all tools used this turn: ${summary}`}
+          title="Show full activity this turn"
+          className="inline-flex shrink-0 items-center rounded border border-border px-1 text-[10px] font-medium text-muted-foreground hover:bg-muted/60"
+        >
+          <span aria-hidden="true">⋯</span>
+        </button>
+      )}
+      {expanded && hasHistory && (
+        <span
+          role="group"
+          aria-label={`Tools used this turn: ${summary}`}
+          className="absolute right-0 top-full z-30 mt-1 flex max-w-[24rem] flex-wrap items-center gap-1 rounded border border-border bg-popover p-2 shadow-md"
+        >
+          {steps.map((step, index) => (
+            <React.Fragment key={`${step.label}:${index}`}>
+              {index > 0 && <span aria-hidden="true" className="text-muted-foreground/50">→</span>}
+              <span aria-hidden="true" className={stepChipClass(step.isSubagent)}>
+                {formatTrailStep(step)}
+              </span>
+            </React.Fragment>
+          ))}
+        </span>
+      )}
     </span>
   );
 };
@@ -4985,6 +5016,14 @@ const App: React.FC = () => {
             <span className="font-medium text-foreground">Sent to agent.</span>{" "}
             Keep this window open while it runs. Close Plannotator when you're done.
           </div>
+        )}
+        {liveMessageReview && (
+          <LivePaneChipsRow
+            sources={recentMessages}
+            selectedMessageId={selectedMessageId}
+            reviewRoundStatus={liveReviewRoundStatus}
+            onSelect={handleSelectMessage}
+          />
         )}
         {(liveMessageReview || planReview) && (() => {
           const status = planReview?.snapshot.reviewRoundStatus ?? liveReviewRoundStatus;

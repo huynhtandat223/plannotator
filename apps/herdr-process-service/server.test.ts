@@ -911,6 +911,37 @@ describe("panelsFromSnapshot", () => {
     });
   });
 
+  test("surfaces the Herdr tab name as a first-class paneTab so same-workspace panes are distinguishable", () => {
+    const panels: HerdrPanel[] = [
+      { id: "w:p1", workspace: "firstmate", tab: "t3H", panel: "Pane p1", cwd: "/fm", status: "working", focused: true },
+      { id: "w:p2", workspace: "firstmate", tab: "", panel: "Coordinator", cwd: "/fm", status: "idle", focused: false },
+    ];
+    const snapshot = reviewSnapshotFromPanels(panels);
+    expect(snapshot.messages[0]).toMatchObject({ paneLabel: "firstmate", paneTab: "t3H" });
+    // No distinct tab → fall back to the panel name so the chip is still labelled.
+    expect(snapshot.messages[1]).toMatchObject({ paneLabel: "firstmate", paneTab: "Coordinator" });
+  });
+
+  test("passes an already-redacted trail command summary through to every response in a pane", () => {
+    const panels: HerdrPanel[] = [
+      { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
+    ];
+    const enrichments = new Map<string, PanelSessionEnrichment>([["w:p1", {
+      paneId: "w:p1",
+      sessionId: "session-1",
+      commands: [],
+      activityTrail: [
+        { kind: "tool", name: "bash", count: 1, command: "npm test" },
+      ],
+      totalUsedTokens: 1_000,
+      messages: [{ messageId: "assistant-1", text: "Response" }],
+    }]]);
+
+    expect(reviewSnapshotFromPanels(panels, null, enrichments).messages[0]).toMatchObject({
+      activityTrail: [{ kind: "tool", name: "bash", count: 1, command: "npm test" }],
+    });
+  });
+
   test("selects the newest response in the focused pane by default", () => {
     const panels: HerdrPanel[] = [
       { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
