@@ -56,6 +56,10 @@ interface CommentPopoverProps {
   onAskAI?: CommentAskAIHandler;
   askAIContext?: CommentAskAIContext;
   askAIDisabled?: boolean;
+  /** Optional one-click delivery for Global Comment. Returning false keeps the draft open. */
+  onSend?: (text: string, images?: ImageAttachment[]) => boolean | void | Promise<boolean | void>;
+  /** Whether a Send delivery is currently in flight (disables the Send button). */
+  isSending?: boolean;
   /**
    * Opt-in autocomplete for an existing global-comment flow. Raw text remains
    * a comment unless the reviewer explicitly chooses a listed command and
@@ -127,6 +131,8 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   isGlobal,
   initialText = '',
   onSubmit,
+  onSend,
+  isSending = false,
   onDraftChange,
   onClose,
   draftKey,
@@ -320,6 +326,20 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     }
   }, [text, images, onSubmit, draftKey, allowImages, allowEmptySubmit, initialText, hasUnsavedContent]);
 
+  const handleSend = useCallback(async () => {
+    if (!onSend || isSending || text.trim().length === 0) {
+      textareaRef.current?.focus();
+      return;
+    }
+    const delivered = await onSend(text, allowImages && images.length > 0 ? images : undefined);
+    if (delivered === false) {
+      textareaRef.current?.focus();
+      return;
+    }
+    if (draftKey) draftStore.delete(draftKey);
+    onDraftChange?.('', allowImages ? [] : undefined);
+  }, [allowImages, draftKey, images, isSending, onDraftChange, onSend, text]);
+
   const handleTextChange = useCallback((nextText: string) => {
     setText(nextText);
     setLivePiCommandError(null);
@@ -484,7 +504,8 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     }
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
       e.preventDefault();
-      handleSubmit();
+      if (isGlobal && onSend) void handleSend();
+      else handleSubmit();
     }
   };
 
@@ -497,7 +518,10 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   const canSubmit =
     hasUnsavedContent ||
     (allowEmptySubmit && initialText.trim().length > 0);
-  const canAskAI = !!onAskAI && !askAIDisabled && text.trim().length > 0;
+  const useSendButton = isGlobal && !!onSend;
+  const showAskAI = !isGlobal && !!onAskAI;
+  const canAskAI = showAskAI && !askAIDisabled && text.trim().length > 0;
+  const canSend = useSendButton && !isSending && text.trim().length > 0;
   const canRunLivePiCommand = selectedCommandIsCurrent && !!onRunLivePiCommand && !isRunningLivePiCommand;
 
   const commandAutocomplete = matchingLivePiCommands.length > 0 && (
@@ -610,6 +634,46 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     </>
   );
 
+  const primaryAction = useSendButton ? (
+    <button
+      onClick={() => void handleSend()}
+      disabled={!canSend}
+      aria-busy={isSending}
+      className="px-3 py-1.5 text-xs font-medium rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
+      title={canSend ? 'Send this comment to the agent' : 'Type a comment to send'}
+    >
+      {isSending ? 'Sending...' : 'Send'}
+    </button>
+  ) : (
+    <button
+      onClick={handleSubmit}
+      disabled={!canSubmit}
+      className="px-3 py-1.5 text-xs font-medium rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
+    >
+      {isGlobal ? 'Add' : 'Save'}
+    </button>
+  );
+
+  const footerActions = (
+    <>
+      {livePiCommandAction}
+      {showOptionsAction}
+      {showAskAI && (
+        <button
+          onClick={handleAskAI}
+          disabled={!canAskAI}
+          className="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium rounded-md text-muted-foreground hover:text-primary hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          title={canAskAI ? 'Ask AI this question' : 'Type a question to ask AI'}
+        >
+          <SparklesIcon className="w-3 h-3" />
+          Ask AI
+        </button>
+      )}
+      <span className="text-[10px] text-muted-foreground">{submitHint}</span>
+      {primaryAction}
+    </>
+  );
+
   if (mode === 'dialog') {
     return createPortal(
       <div data-comment-popover="true" className="fixed inset-0 z-[100] flex items-center justify-center p-4">
@@ -685,27 +749,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
               )}
             </div>
             <div className="flex items-center gap-3">
-              {livePiCommandAction}
-              {showOptionsAction}
-              {onAskAI && (
-                <button
-                  onClick={handleAskAI}
-                  disabled={!canAskAI}
-                  className="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium rounded-md text-muted-foreground hover:text-primary hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                  title={canAskAI ? 'Ask AI this question' : 'Type a question to ask AI'}
-                >
-                  <SparklesIcon className="w-3 h-3" />
-                  Ask AI
-                </button>
-              )}
-              <span className="text-[10px] text-muted-foreground">{submitHint}</span>
-              <button
-                onClick={handleSubmit}
-                disabled={!canSubmit}
-                className="px-3 py-1.5 text-xs font-medium rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
-              >
-                {isGlobal ? 'Add' : 'Save'}
-              </button>
+              {footerActions}
             </div>
           </div>
         </div>
@@ -813,27 +857,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
           )}
         </div>
         <div className="flex items-center gap-3">
-          {livePiCommandAction}
-          {showOptionsAction}
-          {onAskAI && (
-            <button
-              onClick={handleAskAI}
-              disabled={!canAskAI}
-              className="inline-flex items-center gap-1 px-2 py-1.5 text-xs font-medium rounded-md text-muted-foreground hover:text-primary hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              title={canAskAI ? 'Ask AI this question' : 'Type a question to ask AI'}
-            >
-              <SparklesIcon className="w-3 h-3" />
-              Ask AI
-            </button>
-          )}
-          <span className="text-[10px] text-muted-foreground">{submitHint}</span>
-          <button
-            onClick={handleSubmit}
-            disabled={!canSubmit}
-            className="px-3 py-1.5 text-xs font-medium rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
-          >
-            {isGlobal ? 'Add' : 'Save'}
-          </button>
+          {footerActions}
         </div>
       </div>
       </div>
