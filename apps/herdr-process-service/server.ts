@@ -38,6 +38,12 @@ import { isWithinProjectRoot, resolveCodeFile } from "../../packages/shared/reso
 import { createAIEndpoints, ProviderRegistry, SessionManager } from "../../packages/ai/index";
 import { HerdrPiProvider, HERDR_PI_PROVIDER_ID, type HerdrPiGateway } from "./herdr-pi-provider";
 import { discoverPiModels } from "./pi-models";
+import {
+  contextHandoffConfigFromEnv,
+  evaluateThreshold,
+  INITIAL_CONTEXT_HANDOFF_STATE,
+  type ContextHandoffState,
+} from "./context-handoff";
 const execFileAsync = promisify(execFile);
 const port = parsePort(process.env.PLANNOTATOR_HERDR_PORT ?? "19432");
 const host = process.env.PLANNOTATOR_HERDR_HOST ?? "0.0.0.0";
@@ -148,6 +154,8 @@ type HerdrReviewSnapshot = {
     commands?: HerdrCommandCapability[];
     /** Pi-reported active context usage; null tokens are intentionally unknown. */
     contextUsage?: HerdrContextUsage;
+    /** Context-window handoff warning; present only while this pane is warning. */
+    contextHandoff?: HerdrContextHandoff;
     /** Current model selected in the Pi session. */
     model?: HerdrModel;
     /** Current tool/subagent activity reported by the Pi extension. */
@@ -195,6 +203,26 @@ export type HerdrContextUsage = {
   tokens: number | null;
   contextWindow: number;
   percent: number | null;
+};
+
+/**
+ * Per-pane context-window handoff warning, published only for live panes whose
+ * context usage crossed the high-water threshold (see context-handoff.ts). This
+ * is a WARNING affordance only: the captain triggers the actual handoff
+ * manually. Optional field — absent on any pane not currently warning, so
+ * non-live surfaces and un-crossed panes are untouched.
+ */
+export type HerdrContextHandoff = {
+  /** The threshold was crossed (sustained) and a warning should show. */
+  warn: boolean;
+  /** The percent that triggered the warning (for the legible reason/tooltip). */
+  percent: number | null;
+  /** True only when the pane registered a usable handoff-class Pi command. */
+  canManualHandoff: boolean;
+  /** The registered handoff command name to fire, when canManualHandoff. */
+  command?: string;
+  /** Monotonic id of this crossing; distinguishes one warning from the next. */
+  crossingSeq: number;
 };
 
 export type HerdrModel = {
@@ -360,6 +388,59 @@ const exAICompanions = new ExAICompanionCoordinator({
     return deliveryId;
   },
 }, exAICompanionDataDir);
+// Context-window handoff threshold detector. Per-pane Schmitt-trigger state
+// lives here (single long-lived process), advanced on the existing 2s snapshot
+// refresh — no new poll loop. Never sends a command: it only detects the
+// crossing and publishes a warning; the captain fires the handoff manually.
+const contextHandoffConfig = contextHandoffConfigFromEnv();
+const contextHandoffStates = new Map<string, ContextHandoffState>();
+
+// A pane can fire a manual handoff only if it registered a handoff-class Pi
+// slash command (see the repo fixture `handoff-to-continue`). We match on the
+// `handoff` token so a host that names the command differently still works;
+// `commandDelivery` remains the authority that refuses an unregistered command.
+function handoffCommandFor(commands: readonly HerdrCommandCapability[] | undefined): string | undefined {
+  if (!commands) return undefined;
+  const exact = commands.find((capability) => capability.name === "handoff-to-continue");
+  if (exact) return exact.name;
+  const fuzzy = commands.find((capability) => /handoff/i.test(capability.name));
+  return fuzzy?.name;
+}
+
+/**
+ * Advance the per-pane handoff detector for every live pane on the current
+ * snapshot and return the warning to publish per pane. Panes that are not
+ * currently warning produce no entry (the field stays absent). Detector state
+ * for panes that have gone away is pruned so a re-used paneId re-arms cleanly.
+ */
+function evaluateContextHandoffs(
+  panels: ReadonlyArray<HerdrPanel>,
+  enrichments: ReadonlyMap<string, PanelSessionEnrichment>,
+): Map<string, HerdrContextHandoff> {
+  const result = new Map<string, HerdrContextHandoff>();
+  const livePaneIds = new Set(panels.map((panel) => panel.id));
+  for (const paneId of contextHandoffStates.keys()) {
+    if (!livePaneIds.has(paneId)) contextHandoffStates.delete(paneId);
+  }
+  for (const panel of panels) {
+    const registration = enrichments.get(panel.id);
+    const percent = registration?.contextUsage?.percent ?? null;
+    const prev = contextHandoffStates.get(panel.id) ?? INITIAL_CONTEXT_HANDOFF_STATE;
+    const { nextState } = evaluateThreshold(prev, percent, contextHandoffConfig);
+    contextHandoffStates.set(panel.id, nextState);
+    if (!nextState.warned) continue;
+    const command = handoffCommandFor(registration?.commands);
+    result.set(panel.id, {
+      warn: true,
+      percent: registration?.contextUsage?.percent ?? null,
+      canManualHandoff: command !== undefined,
+      ...(command ? { command } : {}),
+      crossingSeq: nextState.crossingSeq,
+    });
+  }
+  return result;
+}
+
 const exAIConfig = loadConfig().exAIChat;
 const DEFAULT_EX_AI_INSTRUCTION = "Act as a concise first-layer assistant for the paired main Pi session. Inspect the main transcript and workspace when useful. Give clear, actionable guidance. Do not modify files or send messages to the main session unless explicitly asked.";
 // Fire-and-forget at module load, so it must swallow its own failure like every
@@ -1504,6 +1585,7 @@ export function reviewSnapshotFromPanels(
   panels: HerdrPanel[],
   preferredPanelId: string | null = null,
   enrichments: ReadonlyMap<string, PanelSessionEnrichment> = new Map(),
+  handoffs: ReadonlyMap<string, HerdrContextHandoff> = new Map(),
 ): HerdrReviewSnapshot {
   const livePaneIds = new Set(panels.map((panel) => panel.id));
   const isCompanionPane = (paneId: string) => exAICompanions.isCompanionPane(paneId);
@@ -1541,6 +1623,7 @@ export function reviewSnapshotFromPanels(
         ...(enrichments.get(panel.id)?.latestCompactionTokens !== undefined ? { latestCompactionTokens: enrichments.get(panel.id)!.latestCompactionTokens } : {}),
         ...(panel.gitBranch ? { gitBranch: panel.gitBranch } : {}),
         ...(isCompanionPane(panel.id) ? { isExAICompanion: true } : {}),
+        ...(handoffs.get(panel.id) ? { contextHandoff: handoffs.get(panel.id)! } : {}),
       }];
     }
     return responses.map((response, index) => ({
@@ -1568,6 +1651,7 @@ export function reviewSnapshotFromPanels(
       ...(enrichments.get(panel.id)?.latestCompactionTokens !== undefined ? { latestCompactionTokens: enrichments.get(panel.id)!.latestCompactionTokens } : {}),
       ...(panel.gitBranch ? { gitBranch: panel.gitBranch } : {}),
       ...(isCompanionPane(panel.id) ? { isExAICompanion: true } : {}),
+      ...(handoffs.get(panel.id) ? { contextHandoff: handoffs.get(panel.id)! } : {}),
     }));
   });
   const selectedMessage = selected
@@ -2031,7 +2115,10 @@ async function readLiveState(): Promise<HerdrLiveState> {
     })),
     enrichPanelSessionMetadata(panelSessions),
   ]);
-  return { panels: panelsWithGitBranches, snapshot: reviewSnapshotFromPanels(panelsWithGitBranches, null, enrichedSessions) };
+  // Advance the per-pane context-handoff detector on this same tick (no extra
+  // poll loop) and publish any resulting warnings into the snapshot.
+  const handoffs = evaluateContextHandoffs(panelsWithGitBranches, enrichedSessions);
+  return { panels: panelsWithGitBranches, snapshot: reviewSnapshotFromPanels(panelsWithGitBranches, null, enrichedSessions, handoffs) };
 }
 
 const liveSnapshotPublisher = new LiveSnapshotPublisher(readLiveState);

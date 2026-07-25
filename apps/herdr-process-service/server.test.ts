@@ -856,6 +856,32 @@ describe("panelsFromSnapshot", () => {
     });
   });
 
+  test("passes an optional per-pane context-handoff warning through to every response in a pane", () => {
+    const panels: HerdrPanel[] = [
+      { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
+      { id: "w:p2", workspace: "two", tab: "", panel: "Pane p2", cwd: "/two", status: "idle", focused: false },
+    ];
+    const enrichments = new Map<string, PanelSessionEnrichment>([
+      ["w:p1", { paneId: "w:p1", sessionId: "session-1", commands: [], contextUsage: { tokens: 150_000, contextWindow: 200_000, percent: 75 }, messages: [{ messageId: "assistant-1", text: "Response" }] }],
+      ["w:p2", { paneId: "w:p2", sessionId: "session-2", commands: [], messages: [{ messageId: "assistant-2", text: "Other" }] }],
+    ]);
+    const handoffs = new Map([
+      ["w:p1", { warn: true, percent: 75, canManualHandoff: true, command: "handoff-to-continue", crossingSeq: 1 }],
+    ]);
+
+    const snapshot = reviewSnapshotFromPanels(panels, null, enrichments, handoffs);
+    const warned = snapshot.messages.find((message) => message.paneId === "w:p1");
+    const unwarned = snapshot.messages.find((message) => message.paneId === "w:p2");
+    expect(warned).toMatchObject({
+      contextHandoff: { warn: true, percent: 75, canManualHandoff: true, command: "handoff-to-continue", crossingSeq: 1 },
+    });
+    // Panes not in the handoff map carry no field, so un-crossed panes are untouched.
+    expect(unwarned && "contextHandoff" in unwarned).toBe(false);
+    // Absent handoff map (the default) leaves every message untouched.
+    const bare = reviewSnapshotFromPanels(panels, null, enrichments);
+    expect(bare.messages.every((message) => !("contextHandoff" in message))).toBe(true);
+  });
+
   test("passes the ordered names-only activity trail through to every response in a pane", () => {
     const panels: HerdrPanel[] = [
       { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },

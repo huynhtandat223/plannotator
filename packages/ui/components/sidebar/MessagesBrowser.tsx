@@ -56,6 +56,18 @@ export interface PickerMessage {
   commands?: Array<{ name: string; description?: string; source: 'extension' | 'prompt' | 'skill'; arguments?: string[] }>;
   /** Pi-reported active context usage; null tokens are intentionally unknown. */
   contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
+  /**
+   * Context-window handoff warning for this live pane. Present only when the
+   * pane crossed the high-water threshold (see herdr context-handoff detector).
+   * A WARNING affordance only: the captain fires the handoff manually.
+   */
+  contextHandoff?: {
+    warn: boolean;
+    percent: number | null;
+    canManualHandoff: boolean;
+    command?: string;
+    crossingSeq: number;
+  };
   /** Current model selected in the Pi session. */
   model?: { id: string; provider?: string; name?: string };
   /** Current tool or subagent activity reported by the Pi extension. */

@@ -293,6 +293,55 @@ const LivePaneContextBar = ({ context }: { context: LivePaneContext }) => {
   );
 };
 
+type LivePaneHandoff = {
+  warn: boolean;
+  percent: number | null;
+  canManualHandoff: boolean;
+  command?: string;
+  crossingSeq: number;
+};
+
+// Context-high handoff warning: shown on a pane whose context usage crossed the
+// high-water threshold (server-side detector). It is a WARNING only — the
+// captain fires the handoff MANUALLY via the button. The button is disabled
+// with a legible reason when the pane registered no handoff-class Pi command.
+// Uses the existing CTX critical color language (destructive) so it reads at a
+// glance alongside the context bar.
+const LivePaneHandoffWarning = ({
+  handoff,
+  onHandoff,
+  pending,
+}: {
+  handoff: LivePaneHandoff;
+  onHandoff: (command: string) => void;
+  pending: boolean;
+}) => {
+  if (!handoff.warn) return null;
+  const pctLabel = handoff.percent === null ? '' : ` (${handoff.percent.toFixed(0)}%)`;
+  const reason = handoff.canManualHandoff
+    ? `Context high${pctLabel} — hand off now?`
+    : `Context high${pctLabel} — this pane registered no handoff command.`;
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-0.5 text-destructive"
+      role="status"
+      title={reason}
+    >
+      <span aria-hidden="true">⚠</span>
+      <span className="font-medium">Context high{pctLabel}</span>
+      <button
+        type="button"
+        onClick={() => { if (handoff.command) onHandoff(handoff.command); }}
+        disabled={!handoff.canManualHandoff || pending}
+        title={handoff.canManualHandoff ? 'Hand off this session now' : 'No handoff command registered for this pane'}
+        className="rounded border border-destructive/40 px-1.5 py-0.5 font-medium hover:bg-destructive/20 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        Hand off
+      </button>
+    </span>
+  );
+};
+
 // Structured status-bar renderer: muted labels, promoted numbers, context bar.
 const LivePaneMetaBar = ({ meta }: { meta: LivePaneMeta }) => {
   if (meta.isEmpty) return null;
@@ -1528,6 +1577,30 @@ const App: React.FC = () => {
       toast.error('Plan Review action failed', { description: error instanceof Error ? error.message : String(error) });
     } finally {
       setIsLiveReviewActionPending(false);
+    }
+  }, []);
+
+  // Manual context-handoff trigger. Fires the pane's registered handoff-class
+  // Pi slash command via the same real /api/command path used by the command
+  // palette. Never auto-invoked: the captain clicks the "Hand off" button.
+  const [isHandoffPending, setIsHandoffPending] = useState(false);
+  const handleContextHandoff = React.useCallback(async (paneId: string, command: string) => {
+    setIsHandoffPending(true);
+    try {
+      const response = await fetch('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paneId, command, args: '' }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error || 'Failed to run handoff command');
+      }
+      toast(`Handing off — /${command}`, { description: 'Pi will run the handoff in this pane.' });
+    } catch (error) {
+      toast.error('Handoff failed', { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setIsHandoffPending(false);
     }
   }, []);
 
@@ -4949,6 +5022,13 @@ const App: React.FC = () => {
                   <>Ready to review {planReview ? 'responses and Plan Files.' : 'responses.'}</>
                 )}
               </span>
+            )}
+            {liveMessageReview && selectedMessage?.contextHandoff?.warn && selectedMessage.paneId && (
+              <LivePaneHandoffWarning
+                handoff={selectedMessage.contextHandoff}
+                pending={isHandoffPending}
+                onHandoff={(command) => { void handleContextHandoff(selectedMessage.paneId!, command); }}
+              />
             )}
             {(agentStatusLabel || activityChip) && (
               <span className="ml-auto flex shrink-0 items-center gap-2">
