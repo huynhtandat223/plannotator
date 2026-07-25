@@ -131,6 +131,20 @@ interface MessagesBrowserProps {
    * never become selectable annotation targets.
    */
   captainEchoes?: ReadonlyMap<string, readonly CaptainEcho[]>;
+  /**
+   * Opt-in infinite-scroll for browsing history in a bounded scroll region
+   * (the live Messages tab). When enabled the row budget:
+   *   1. auto-fills until the list overflows its scroller, so there is a real
+   *      scroll region to drag/wheel/keyboard through instead of a 3-row stub
+   *      that only grows via `+N more`; and
+   *   2. pages in older rows as the reader scrolls toward the history edge
+   *      (the top in a chronological transcript, the bottom otherwise).
+   * The `+N more` button remains as a fallback. Optional and defaulted-off so
+   * every other consumer (annotate-last picker, etc.) is unchanged, and it
+   * composes with the existing `pagedRows` state so the SSE scroll-anchor and
+   * `Jump to latest` guarantees are preserved.
+   */
+  autoLoadOnScroll?: boolean;
 }
 
 // Hard cap for browsers where line-clamp is unavailable, and to avoid huge sidebar text nodes.
@@ -159,8 +173,33 @@ function resolveVisibleCount(count: MessagePickerCount): number {
   return count === "all" ? Number.POSITIVE_INFINITY : Number(count);
 }
 
-/** Rows revealed per `+N more` click. */
+/** Rows revealed per `+N more` click, and per auto-load step when scrolling. */
 export const MESSAGE_PAGE_STEP = 5;
+
+/**
+ * Distance (px) from the history edge at which auto-load pages in older rows,
+ * and the slack allowed when deciding the list "overflows" its scroller. Large
+ * enough that momentum/keyboard scrolling loads the next page before the reader
+ * hits a hard stop, small enough not to page in eagerly on a barely-tall list.
+ */
+export const MESSAGE_AUTOLOAD_THRESHOLD_PX = 96;
+
+/**
+ * Whether the reader has scrolled close enough to the history edge that the
+ * next page of older rows should load. History lives at the TOP of a
+ * chronological transcript (newest pinned at the bottom) and at the BOTTOM of a
+ * newest-first list, so the edge we watch flips with `chronological`.
+ */
+export function isNearHistoryEdge(
+  metrics: { scrollTop: number; scrollHeight: number; clientHeight: number },
+  chronological: boolean,
+  threshold: number = MESSAGE_AUTOLOAD_THRESHOLD_PX,
+): boolean {
+  const { scrollTop, scrollHeight, clientHeight } = metrics;
+  return chronological
+    ? scrollTop <= threshold
+    : scrollTop + clientHeight >= scrollHeight - threshold;
+}
 
 /**
  * Per-pane row budget: the selected quota plus any rows the reader has paged
@@ -247,11 +286,25 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   chronological = false,
   chatLayout = false,
   captainEchoes,
+  autoLoadOnScroll = false,
 }) => {
   const [count, setCount] = React.useState<MessagePickerCount>(() => getMessagePickerCount());
   // Rows paged in past the per-pane quota. Additive, and deliberately NOT
   // reset when the quota changes: the reader's paging is their own state.
   const [pagedRows, setPagedRows] = React.useState(0);
+  // Live count of rows still hidden below the current budget, mirrored into a
+  // ref so the scroll listener and the auto-fill effect can read it without
+  // re-subscribing on every render. Written during render, below.
+  const hiddenCountRef = React.useRef(0);
+  const historyPrependRef = React.useRef(false);
+  const pagePendingRef = React.useRef(false);
+
+  const pageOlder = React.useCallback(() => {
+    if (pagePendingRef.current) return;
+    pagePendingRef.current = true;
+    historyPrependRef.current = chronological;
+    setPagedRows((prev) => prev + MESSAGE_PAGE_STEP);
+  }, [chronological]);
 
   const handleCountChange = React.useCallback((next: MessagePickerCount) => {
     setCount(next);
@@ -270,11 +323,26 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
     if (!scroller) return;
     const previous = scrollMetricsRef.current;
     if (previous) {
-      const next = anchoredScrollTop(previous, scroller.scrollHeight);
+      const next = historyPrependRef.current
+        ? Math.max(0, previous.scrollTop + scroller.scrollHeight - previous.scrollHeight)
+        : anchoredScrollTop(previous, scroller.scrollHeight);
       if (next !== scroller.scrollTop) scroller.scrollTop = next;
     }
+    historyPrependRef.current = false;
+    pagePendingRef.current = false;
     scrollMetricsRef.current = { scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight };
   }, [messages, count, pagedRows]);
+
+  // Fill a tall Messages panel until it has an actual scrollable history.
+  // Declared after the anchor so each prepended page is compensated first.
+  React.useLayoutEffect(() => {
+    if (!autoLoadOnScroll || hiddenCountRef.current <= 0) return;
+    const scroller = scrollableAncestor(rootRef.current);
+    if (!scroller) return;
+    const overflows =
+      scroller.scrollHeight > scroller.clientHeight + MESSAGE_AUTOLOAD_THRESHOLD_PX;
+    if (!overflows) pageOlder();
+  }, [autoLoadOnScroll, messages, count, pagedRows, pageOlder]);
 
   // Track whether the latest row has scrolled out of view, which is what makes
   // the explicit `Jump to latest` affordance necessary rather than decorative.
@@ -292,14 +360,34 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
       const scrollerBox = scroller.getBoundingClientRect();
       setIsAwayFromLatest(rowBox.bottom < scrollerBox.top || rowBox.top > scrollerBox.bottom);
     };
+    const onScroll = () => {
+      sync();
+      if (
+        autoLoadOnScroll &&
+        hiddenCountRef.current > 0 &&
+        isNearHistoryEdge(
+          {
+            scrollTop: scroller.scrollTop,
+            scrollHeight: scroller.scrollHeight,
+            clientHeight: scroller.clientHeight,
+          },
+          chronological,
+        )
+      ) {
+        pageOlder();
+      }
+    };
     sync();
-    scroller.addEventListener("scroll", sync, { passive: true });
-    return () => scroller.removeEventListener("scroll", sync);
-  }, [messages, count, pagedRows]);
+    scroller.addEventListener("scroll", onScroll, { passive: true });
+    return () => scroller.removeEventListener("scroll", onScroll);
+  }, [messages, count, pagedRows, autoLoadOnScroll, chronological, pageOlder]);
 
   const jumpToLatest = React.useCallback(() => {
-    latestRowRef.current?.scrollIntoView({ block: "nearest" });
-  }, []);
+    latestRowRef.current?.scrollIntoView({
+      block: chronological ? "end" : "start",
+      behavior: "smooth",
+    });
+  }, [chronological]);
 
   if (messages.length === 0) {
     return (
@@ -474,6 +562,10 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
         ? indexedAll.slice(Math.max(0, indexedAll.length - rowBudget))
         : indexedAll.slice(0, rowBudget);
   if (flatShown) hiddenCount = messages.length - flatShown.length;
+  // Mirror the still-hidden count so the scroll listener and auto-fill effect
+  // (which run after paint, off this render's closure) can decide whether more
+  // history remains to page in without re-subscribing every render.
+  hiddenCountRef.current = hiddenCount;
 
   return (
     <div className="p-2" ref={rootRef}>
@@ -521,7 +613,7 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
         {hiddenCount > 0 && (
           <button
             type="button"
-            onClick={() => setPagedRows((prev) => prev + MESSAGE_PAGE_STEP)}
+            onClick={pageOlder}
             className="w-full text-left px-2 py-1 rounded text-[10px] font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
           >
             +{Math.min(hiddenCount, MESSAGE_PAGE_STEP)} more

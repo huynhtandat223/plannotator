@@ -85,6 +85,8 @@ interface SidebarContainerProps {
   messagesChronological?: boolean;
   /** Render the live picker as a two-sided chat transcript (agent left, captain right). */
   messagesChatLayout?: boolean;
+  /** Opt-in scroll-driven paging for the live Messages tab. */
+  messagesAutoLoadOnScroll?: boolean;
   /** A newer response finished in another pane while the reviewer stayed here. */
   hasPendingResponse?: boolean;
   messagePickerLabels?: {
@@ -152,6 +154,7 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
   messageCaptainEchoes,
   messagesChronological,
   messagesChatLayout,
+  messagesAutoLoadOnScroll,
   hasPendingResponse,
   messagePickerLabels,
 }) => {
@@ -289,7 +292,12 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
       </div>
 
       {/* Content area */}
-      <OverlayScrollArea className="flex-1 min-h-0">
+      <OverlayScrollArea
+        className="flex-1 min-h-0"
+        data-messages-scroll-region={activeTab === "messages" ? "desktop" : undefined}
+        tabIndex={activeTab === "messages" ? 0 : undefined}
+        style={activeTab === "messages" ? { overscrollBehaviorY: "contain" } : undefined}
+      >
         {activeTab === "toc" && (
           <TableOfContents
             blocks={blocks}
@@ -361,6 +369,7 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
             captainEchoes={messageCaptainEchoes}
             chronological={messagesChronological}
             chatLayout={messagesChatLayout}
+            autoLoadOnScroll={messagesAutoLoadOnScroll}
             listLabel={pickerLabels.list}
             emptyLabel={pickerLabels.empty}
           />
@@ -402,7 +411,12 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
               Done
             </button>
           </div>
-          <OverlayScrollArea className={activeTab === "files" || activeTab === "changes" ? "h-[calc(100%-4.75rem)]" : "max-h-[calc(min(72dvh,36rem)-4.75rem)]"}>
+          <OverlayScrollArea
+            className={activeTab === "files" || activeTab === "changes" ? "h-[calc(100%-4.75rem)]" : "h-[calc(min(72dvh,36rem)-4.75rem)]"}
+            data-messages-scroll-region={activeTab === "messages" ? "mobile" : undefined}
+            tabIndex={activeTab === "messages" ? 0 : undefined}
+            style={activeTab === "messages" ? { overscrollBehaviorY: "contain", WebkitOverflowScrolling: "touch" } : undefined}
+          >
             {activeTab === "files" && fileBrowser ? (
               <FileBrowser
                 dirs={fileBrowser.dirs}
@@ -446,6 +460,7 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
                 captainEchoes={messageCaptainEchoes}
                 chronological={messagesChronological}
                 chatLayout={messagesChatLayout}
+                autoLoadOnScroll={messagesAutoLoadOnScroll}
                 listLabel={pickerLabels.list}
                 emptyLabel={pickerLabels.empty}
               />
