@@ -331,14 +331,21 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
       textareaRef.current?.focus();
       return;
     }
-    const delivered = await onSend(text, allowImages && images.length > 0 ? images : undefined);
-    if (delivered === false) {
+    try {
+      const delivered = await onSend(text, allowImages && images.length > 0 ? images : undefined);
+      if (delivered === false) {
+        textareaRef.current?.focus();
+        return;
+      }
+      if (draftKey) draftStore.delete(draftKey);
+      onDraftChange?.('', allowImages ? [] : undefined);
+      onClose();
+      requestAnimationFrame(() => anchorEl?.focus());
+    } catch (error) {
+      console.error('Send action failed:', error);
       textareaRef.current?.focus();
-      return;
     }
-    if (draftKey) draftStore.delete(draftKey);
-    onDraftChange?.('', allowImages ? [] : undefined);
-  }, [allowImages, draftKey, images, isSending, onDraftChange, onSend, text]);
+  }, [allowImages, anchorEl, draftKey, images, isSending, onClose, onDraftChange, onSend, text]);
 
   const handleTextChange = useCallback((nextText: string) => {
     setText(nextText);
@@ -639,6 +646,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
       onClick={() => void handleSend()}
       disabled={!canSend}
       aria-busy={isSending}
+      data-direct-send-close-and-restore-focus="true"
       className="px-3 py-1.5 text-xs font-medium rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
       title={canSend ? 'Send this comment to the agent' : 'Type a comment to send'}
     >
