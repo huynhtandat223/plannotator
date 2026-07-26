@@ -1,9 +1,9 @@
 import { expect, test } from 'bun:test';
 import { deriveLiveActivityChip } from './liveActivityChip';
 
-test('working + tool activity → ● Running <name>', () => {
+test('working + tool activity → ● Running <name> (animated)', () => {
   const chip = deriveLiveActivityChip({ agentStatus: 'working', activity: { kind: 'tool', name: 'bash', count: 1 } });
-  expect(chip).toEqual({ glyph: '●', label: 'Running bash', tone: 'active' });
+  expect(chip).toEqual({ glyph: '●', label: 'Running bash', tone: 'active', animated: true });
 });
 
 test('working + tool activity with count > 1 appends ×N', () => {
@@ -17,9 +17,9 @@ test('working + tool activity without a name falls back to "tool"', () => {
   expect(chip?.label).toBe('Running tool');
 });
 
-test('working + subagent activity → ● Subagent', () => {
+test('working + subagent activity → ● Subagent (animated)', () => {
   const chip = deriveLiveActivityChip({ agentStatus: 'working', activity: { kind: 'subagent', count: 1 } });
-  expect(chip).toEqual({ glyph: '●', label: 'Subagent', tone: 'active' });
+  expect(chip).toEqual({ glyph: '●', label: 'Subagent', tone: 'active', animated: true });
 });
 
 test('working + subagent activity with count > 1 appends ×N', () => {
@@ -27,14 +27,25 @@ test('working + subagent activity with count > 1 appends ×N', () => {
   expect(chip?.label).toBe('Subagent ×2');
 });
 
-test('working with no activity → ● Thinking…', () => {
+test('working with no activity → ● Thinking… (animated)', () => {
   const chip = deriveLiveActivityChip({ agentStatus: 'working' });
-  expect(chip).toEqual({ glyph: '●', label: 'Thinking…', tone: 'active' });
+  expect(chip).toEqual({ glyph: '●', label: 'Thinking…', tone: 'active', animated: true });
 });
 
 test('idle → ○ Idle', () => {
   const chip = deriveLiveActivityChip({ agentStatus: 'idle' });
   expect(chip).toEqual({ glyph: '○', label: 'Idle', tone: 'idle' });
+});
+
+test('only the actively-working states are animated', () => {
+  // Working states drive the single looping indicator…
+  expect(deriveLiveActivityChip({ agentStatus: 'working' })?.animated).toBe(true);
+  expect(deriveLiveActivityChip({ agentStatus: 'working', activity: { kind: 'tool', name: 'bash', count: 1 } })?.animated).toBe(true);
+  expect(deriveLiveActivityChip({ agentStatus: 'working', activity: { kind: 'subagent', count: 1 } })?.animated).toBe(true);
+  // …calm states never animate, so motion uniquely signals live work.
+  expect(deriveLiveActivityChip({ agentStatus: 'idle' })?.animated).toBeUndefined();
+  expect(deriveLiveActivityChip({ agentStatus: 'blocked' })?.animated).toBeUndefined();
+  expect(deriveLiveActivityChip({ agentStatus: 'idle', reviewRoundStatus: 'waiting' })?.animated).toBeUndefined();
 });
 
 test('reviewRoundStatus waiting → ● Waiting on you', () => {

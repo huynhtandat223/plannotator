@@ -23,6 +23,15 @@ export type LiveActivityChip = {
   label: string;
   /** Semantic tone for styling; meaning is also conveyed by {@link label}. */
   tone: LiveActivityChipTone;
+  /**
+   * True only for the "actively working right now" states (running a tool,
+   * delegating to a subagent, or thinking). The renderer turns this into ONE
+   * looping animated indicator (honoring prefers-reduced-motion) so motion
+   * uniquely signals live work. Calm states (idle/blocked/waiting) leave this
+   * unset and keep static indicators. Meaning is always carried by {@link label},
+   * never by the animation alone.
+   */
+  animated?: boolean;
 };
 
 export type LiveActivityChipInput = {
@@ -39,9 +48,9 @@ const countSuffix = (count: number): string => (count > 1 ? ` ×${count}` : '');
  * nothing meaningful to show. Branch precedence (highest first):
  *   1. review round waiting on the captain  → ● Waiting on you
  *   2. blocked                              → ▲ Blocked
- *   3. working + tool activity              → ● Running <name> [×N]
- *   4. working + subagent activity          → ● Subagent [×N]
- *   5. working, no activity                 → ● Thinking…
+ *   3. working + tool activity              → ◐ Running <name> [×N] (animated)
+ *   4. working + subagent activity          → ◐ Subagent [×N]     (animated)
+ *   5. working, no activity                 → ◐ Thinking…          (animated)
  *   6. idle                                 → ○ Idle
  */
 export const deriveLiveActivityChip = (input: LiveActivityChipInput): LiveActivityChip | null => {
@@ -59,12 +68,12 @@ export const deriveLiveActivityChip = (input: LiveActivityChipInput): LiveActivi
   if (agentStatus === 'working') {
     if (activity?.kind === 'tool') {
       const name = activity.name ?? 'tool';
-      return { glyph: '●', label: `Running ${name}${countSuffix(activity.count)}`, tone: 'active' };
+      return { glyph: '●', label: `Running ${name}${countSuffix(activity.count)}`, tone: 'active', animated: true };
     }
     if (activity?.kind === 'subagent') {
-      return { glyph: '●', label: `Subagent${countSuffix(activity.count)}`, tone: 'active' };
+      return { glyph: '●', label: `Subagent${countSuffix(activity.count)}`, tone: 'active', animated: true };
     }
-    return { glyph: '●', label: 'Thinking…', tone: 'active' };
+    return { glyph: '●', label: 'Thinking…', tone: 'active', animated: true };
   }
 
   if (agentStatus === 'idle') {

@@ -166,9 +166,11 @@ import {
   saveCaptainEchoes,
   type CaptainEchoStore,
 } from './liveCaptainEcho';
-import { deriveLiveActivityChip, type LiveActivityChip as LiveActivityChipData } from './liveActivityChip';
+import { deriveLiveActivityChip } from './liveActivityChip';
+import { LiveActivityChip } from './LiveActivityChipView';
 import { deriveLiveActivityTrail, formatLiveActivityTrail, formatTrailStep, type LiveActivityTrailStep } from './liveActivityTrail';
 import { LivePaneChipsRow } from './LivePaneChipsRow';
+import { repoInfoForDocument } from './documentRepoInfo';
 
 type NoteAutoSaveResults = {
   obsidian?: boolean;
@@ -196,6 +198,8 @@ type HerdrContextUsage = {
 type LiveMessageReviewSnapshot = {
   /** Host-owned monotonic version; prevents late SSE frames restoring stale focus. */
   revision?: number;
+  /** Effective host high-water mark for both the chip tone and handoff warning. */
+  contextHandoffHighPercent?: number;
   messages: PickerMessage[];
   selectedMessageId: string | null;
   reviewRoundStatus: LiveReviewRoundStatus;
@@ -318,6 +322,9 @@ const LivePaneHandoffWarning = ({
   pending: boolean;
 }) => {
   if (!handoff.warn) return null;
+  // The raw % is NOT repeated here: the CTX bar in the same header row is the one
+  // authoritative readout (see #26/#27 de-dup). The accessible title keeps the
+  // percent for AT users who don't see the adjacent bar.
   const pctLabel = handoff.percent === null ? '' : ` (${handoff.percent.toFixed(0)}%)`;
   const reason = handoff.canManualHandoff
     ? `Context high${pctLabel} — hand off now?`
@@ -329,7 +336,7 @@ const LivePaneHandoffWarning = ({
       title={reason}
     >
       <span aria-hidden="true">⚠</span>
-      <span className="font-medium">Context high{pctLabel}</span>
+      <span className="font-medium">Context high</span>
       <button
         type="button"
         onClick={() => { if (handoff.command) onHandoff(handoff.command); }}
@@ -371,29 +378,10 @@ const LivePaneMetaBar = ({ meta }: { meta: LivePaneMeta }) => {
   );
 };
 
-// Live "currently doing" chip: promotes agentStatus + activity into a single legible,
-// high-contrast signal next to the coarse status pill. Meaning is carried by the text
-// label (not colour/glyph alone), and the chip announces changes politely to AT.
-const LiveActivityChip = ({ chip }: { chip: LiveActivityChipData }) => {
-  const toneClass =
-    chip.tone === 'active'
-      ? 'border-primary/40 bg-primary/15 text-foreground'
-      : chip.tone === 'waiting'
-        ? 'border-warning/40 bg-warning/15 text-warning-foreground'
-        : chip.tone === 'blocked'
-          ? 'border-destructive/40 bg-destructive/15 text-destructive'
-          : 'border-border bg-muted/50 text-foreground/80';
-  return (
-    <span
-      role="status"
-      aria-live="polite"
-      className={`shrink-0 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${toneClass}`}
-    >
-      <span aria-hidden="true">{chip.glyph}</span>
-      <span>{chip.label}</span>
-    </span>
-  );
-};
+// LiveActivityChip lives in its own module (./LiveActivityChip) so it is
+// DOM-testable in isolation — it renders the single folded status indicator
+// (killing the old ● Thinking… + ● Working duplication) with one animated
+// working icon that honours prefers-reduced-motion.
 
 // Ordered names-only activity trail for the current turn, e.g. `read → grep ×3 →
 // edit → bash`. Driven entirely by `activityTrail` already on the wire (see
@@ -695,6 +683,7 @@ const App: React.FC = () => {
   const [liveMessageSelectionPinned, setLiveMessageSelectionPinned] = useState(false);
   const [liveMessageReviewReloadOnSelection, setLiveMessageReviewReloadOnSelection] = useState(true);
   const [liveMessageReviewReadOnly, setLiveMessageReviewReadOnly] = useState(false);
+  const [contextHandoffHighPercent, setContextHandoffHighPercent] = useState<number>();
   // Browser-local echo of messages this browser sent to a live pane, so the
   // transcript reads two-sided. The host never stores captain turns (its pending
   // instruction is destroyed on claim for at-most-once delivery), so this is the
@@ -800,8 +789,12 @@ const App: React.FC = () => {
   const goalSetupMode = goalSetupBundle !== null;
 
   useEffect(() => {
-    document.title = repoInfo ? `${repoInfo.display} · Plannotator` : "Plannotator";
-  }, [repoInfo]);
+    // The live Pi panels surface has no meaningful repo display (it is the
+    // synthetic "Herdr live Pi panels" label), so keep a plain title there and
+    // reclaim the header badge space. Non-live surfaces keep the repo title.
+    const documentRepoInfo = repoInfoForDocument(repoInfo, liveMessageReview);
+    document.title = documentRepoInfo ? `${documentRepoInfo.display} · Plannotator` : "Plannotator";
+  }, [repoInfo, liveMessageReview]);
 
   const [initialExportTab, setInitialExportTab] = useState<'share' | 'annotations' | 'notes'>();
   const [isPlanDiffActive, setIsPlanDiffActive] = useState(false);
@@ -1534,6 +1527,7 @@ const App: React.FC = () => {
     // to arrive back-to-back, and each must compare with this accepted snapshot
     // rather than the stale render closure above.
     liveSnapshotMessagesRef.current = snapshot.messages;
+    setContextHandoffHighPercent(snapshot.contextHandoffHighPercent);
     setLiveReviewRoundStatus(snapshot.reviewRoundStatus);
     setLiveReviewDeliveryError(snapshot.deliveryError);
     setRecentMessages(snapshot.messages);
@@ -2901,7 +2895,7 @@ const App: React.FC = () => {
         if (!res.ok) throw new Error('Not in API mode');
         return res.json();
       })
-      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'archive' | 'goal-setup'; goalSetup?: GoalSetupBundle; filePath?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; renderAs?: 'html' | 'markdown'; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; archivePlans?: ArchivedPlan[]; projectRoot?: string; isWSL?: boolean; serverConfig?: { displayName?: string; gitUser?: string }; recentMessages?: PickerMessage[]; selectedMessageId?: string; agentTerminal?: AgentTerminalCapability; liveMessageReview?: boolean; liveMessageReviewReloadOnSelection?: boolean; liveMessageReviewReadOnly?: boolean; planReview?: PlanReviewCapability }) => {
+      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'archive' | 'goal-setup'; goalSetup?: GoalSetupBundle; filePath?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; renderAs?: 'html' | 'markdown'; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; archivePlans?: ArchivedPlan[]; projectRoot?: string; isWSL?: boolean; serverConfig?: { displayName?: string; gitUser?: string }; recentMessages?: PickerMessage[]; selectedMessageId?: string; agentTerminal?: AgentTerminalCapability; liveMessageReview?: boolean; liveMessageReviewReloadOnSelection?: boolean; liveMessageReviewReadOnly?: boolean; contextHandoffHighPercent?: number; planReview?: PlanReviewCapability }) => {
         // Initialize config store with server-provided values (config file > cookie > default)
         configStore.init(data.serverConfig);
         // Session-level force-markdown preference (--markdown); threaded into folder/linked
@@ -2946,6 +2940,7 @@ const App: React.FC = () => {
         setLiveMessageSelectionPinned(false);
         setLiveMessageReviewReloadOnSelection(data.liveMessageReviewReloadOnSelection !== false);
         setLiveMessageReviewReadOnly(data.liveMessageReviewReadOnly === true);
+        setContextHandoffHighPercent(data.contextHandoffHighPercent);
         setPlanReview(data.planReview ?? null);
         if (data.mode === 'annotate' || data.mode === 'annotate-last' || data.mode === 'annotate-folder') {
           setAnnotateMode(true);
@@ -5080,6 +5075,7 @@ const App: React.FC = () => {
             sources={recentMessages}
             selectedMessageId={selectedMessageId}
             reviewRoundStatus={liveReviewRoundStatus}
+            contextHandoffHighPercent={contextHandoffHighPercent}
             onSelect={handleSelectMessage}
           />
         )}
@@ -5092,6 +5088,11 @@ const App: React.FC = () => {
           const activityChip = deriveLiveActivityChip({ agentStatus, activity: selectedMessage?.activity, reviewRoundStatus: status });
           const activityTrailSteps = deriveLiveActivityTrail(selectedMessage?.activityTrail);
           const paneMetadata = livePaneMetadata(selectedMessage);
+          // Name of the selected pane, so the single activity indicator reads as
+          // belonging to a specific pane rather than floating detached at the right.
+          const selectedPaneName = liveMessageReview
+            ? (selectedMessage?.paneTab?.trim() || selectedMessage?.paneLabel?.trim() || undefined)
+            : undefined;
           return <div className={`border-b px-4 py-2 text-xs flex flex-wrap items-center gap-x-3 gap-y-1 flex-shrink-0 ${
             status === 'delivery_failed'
               ? 'border-destructive/25 bg-destructive/10 text-destructive'
@@ -5129,9 +5130,17 @@ const App: React.FC = () => {
             )}
             {(agentStatusLabel || activityChip) && (
               <span className="ml-auto flex shrink-0 items-center gap-2">
-                {activityChip && <LiveActivityChip chip={activityChip} />}
+                {/* Single working/status indicator: the activity chip already
+                    folds in the same state precedence the plain pill did
+                    (working/blocked/idle/waiting/tool/subagent), so we render
+                    ONE element — the chip when it has something to say, and the
+                    plain pill only as a fallback for states the chip can't
+                    promote (e.g. 'unknown'). This kills the old ● Thinking… +
+                    ● Working duplication. */}
+                {activityChip
+                  ? <LiveActivityChip chip={activityChip} paneName={selectedPaneName} />
+                  : agentStatusLabel && <span className={`shrink-0 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${agentStatus === 'working' ? 'border-primary/30 bg-primary/10 text-foreground' : agentStatus === 'blocked' ? 'border-warning/30 bg-warning/10 text-warning-foreground' : 'border-border bg-muted/40 text-muted-foreground'}`}><span aria-hidden="true">●</span>{agentStatusLabel}</span>}
                 {liveMessageReview && !liveWorkspaceMode && <LiveActivityTrail steps={activityTrailSteps} />}
-                {agentStatusLabel && <span className={`shrink-0 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${agentStatus === 'working' ? 'border-primary/30 bg-primary/10 text-foreground' : agentStatus === 'blocked' ? 'border-warning/30 bg-warning/10 text-warning-foreground' : 'border-border bg-muted/40 text-muted-foreground'}`}><span aria-hidden="true">●</span>{agentStatusLabel}</span>}
               </span>
             )}
             {(status === 'waiting' || status === 'agent_stopped' || status === 'delivery_failed') && (
@@ -5615,7 +5624,12 @@ const App: React.FC = () => {
                     globalAttachments={globalAttachments}
                     onAddGlobalAttachment={handleAddGlobalAttachment}
                     onRemoveGlobalAttachment={handleRemoveGlobalAttachment}
-                    repoInfo={repoInfo}
+                    // Live Pi panels surface: suppress the synthetic
+                    // "Herdr live Pi panels" repo badge (server.ts repoInfo.display)
+                    // to reclaim header space — the pane chips row already names
+                    // the workspace/tab. Non-live annotate/plan-diff/code-review
+                    // surfaces keep their real repo name + branch badge.
+                    repoInfo={repoInfoForDocument(repoInfo, liveMessageReview)}
                     stickyActions={uiPrefs.stickyActionsEnabled}
                     planDiffStats={linkedDocHook.isActive ? null : planDiff.diffStats}
                     isPlanDiffActive={isPlanDiffActive}

@@ -9,6 +9,7 @@
 // activity (reused via deriveLiveActivityChip — the state precedence is NOT
 // reinvented here), context usage, and the optional per-turn activityTrail.
 
+import { CONTEXT_HANDOFF_HIGH_PERCENT } from '@plannotator/shared/context-handoff-threshold';
 import {
   deriveLiveActivityChip,
   type LiveActivityChip,
@@ -65,6 +66,14 @@ export interface LivePaneChip {
   contextWarning: boolean;
   /** The pane currently viewed. */
   isSelected: boolean;
+  /**
+   * True when every chip in this derivation shares the SAME workspace, so the
+   * common `workspace ·` prefix is redundant noise. The renderer de-emphasizes
+   * (or drops) the shared prefix and gives the tab — the actual differentiator —
+   * the space. `label` still carries the full `workspace · tab` for the a11y
+   * title/fallback so meaning is never lost.
+   */
+  workspaceShared: boolean;
   /** Latest redacted command summaries (oldest→newest), bounded by config. */
   recentCommands: string[];
 }
@@ -84,7 +93,7 @@ export interface LivePaneChipConfig {
   reviewRoundStatus?: string | null;
   /** Max chips shown inline before the rest collapse into `+N more`. Default 6. */
   maxVisible?: number;
-  /** CTX% high-water mark for the warning tone. Default 75. */
+  /** CTX% high-water mark for the warning tone. Default {@link DEFAULT_CTX_WARN_THRESHOLD}. */
   ctxWarnThreshold?: number;
   /** How many recent commands to surface per chip. Default 5. */
   recentCommandLimit?: number;
@@ -95,7 +104,11 @@ export interface LivePaneChipConfig {
 // with the `+N more` affordance still visible. Beyond six we collapse so the
 // header never overflows regardless of how many panes are live.
 export const DEFAULT_MAX_VISIBLE_PANE_CHIPS = 6;
-export const DEFAULT_CTX_WARN_THRESHOLD = 75;
+// Chip CTX warning tone shares ONE high-water source with the #26 handoff banner
+// (PLANNOTATOR_HANDOFF_HIGH_PERCENT default). Before this the chip flipped at 75%
+// while the banner fired at 72%, so 72–74% showed a banner but a calm chip. Both
+// now read the same number, so the tone and the banner agree at the boundary.
+export const DEFAULT_CTX_WARN_THRESHOLD = CONTEXT_HANDOFF_HIGH_PERCENT;
 export const DEFAULT_RECENT_COMMAND_LIMIT = 5;
 
 /** Sort key: active states first so working/blocked/waiting panes lead. */
@@ -199,8 +212,21 @@ export const deriveLivePaneChips = (
       contextPercent: percent === null ? null : Math.round(percent),
       contextWarning: percent !== null && percent >= ctxWarn,
       isSelected,
+      // Provisional; set once all chips are known (below). Defaults false so a
+      // lone pane keeps its full label.
+      workspaceShared: false,
       recentCommands: recentCommandsFromTrail(representative.activityTrail, commandLimit),
     });
+  }
+
+  // When every chip shares one workspace, the common `workspace ·` prefix is
+  // redundant: flag it so the renderer can de-emphasize/drop it and give the
+  // tab the space. Needs >1 chip and every chip to carry the same workspace.
+  const workspaces = new Set(chips.map((chip) => chip.workspace ?? ''));
+  const workspaceShared =
+    chips.length > 1 && workspaces.size === 1 && !workspaces.has('');
+  if (workspaceShared) {
+    for (const chip of chips) chip.workspaceShared = true;
   }
 
   disambiguateLabels(chips);

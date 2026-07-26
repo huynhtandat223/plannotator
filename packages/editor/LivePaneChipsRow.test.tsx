@@ -41,9 +41,53 @@ test.skipIf(!hasDom)('renders one chip per pane with workspace · tab identity',
   );
   const group = el.querySelector('[aria-label="Live Pi panes — click to switch pane"]')!;
   expect(group).toBeTruthy();
+  // Both chips share the 'firstmate' workspace, so the visible label
+  // de-emphasizes the common prefix and leads with the distinguishing tab. The
+  // full `workspace · tab` still lives in the button title (a11y).
   const text = group.textContent ?? '';
-  expect(text).toContain('firstmate · t3H');
-  expect(text).toContain('firstmate · t9K');
+  expect(text).toContain('t3H');
+  expect(text).toContain('t9K');
+  const titles = Array.from(group.querySelectorAll('button[aria-current], button[title]'))
+    .map((b) => b.getAttribute('title') ?? '');
+  expect(titles.some((t) => t.includes('firstmate · t3H'))).toBe(true);
+  expect(titles.some((t) => t.includes('firstmate · t9K'))).toBe(true);
+});
+
+test.skipIf(!hasDom)('shared workspace: prefix de-emphasized, distinct workspaces keep full label', async () => {
+  // Distinct workspaces → not shared → each chip renders the full `ws · tab`.
+  const el = await render(
+    <LivePaneChipsRow
+      sources={[
+        pane({ messageId: 'm1', paneId: 'p1', paneLabel: 'alpha', paneTab: 'x' }),
+        pane({ messageId: 'm2', paneId: 'p2', paneLabel: 'beta', paneTab: 'y' }),
+      ]}
+      selectedMessageId="m1"
+      onSelect={() => {}}
+    />,
+  );
+  const group = el.querySelector('[aria-label="Live Pi panes — click to switch pane"]')!;
+  const text = group.textContent ?? '';
+  expect(text).toContain('alpha · x');
+  expect(text).toContain('beta · y');
+});
+
+test.skipIf(!hasDom)('uses the host handoff threshold for the CTX warning tone', async () => {
+  const el = await render(
+    <LivePaneChipsRow
+      sources={[
+        pane({ messageId: 'm1', paneId: 'p1', paneLabel: 'alpha', paneTab: 'x', contextUsage: { tokens: 75, contextWindow: 100, percent: 75 } }),
+        pane({ messageId: 'm2', paneId: 'p2', paneLabel: 'beta', paneTab: 'y' }),
+      ]}
+      selectedMessageId="m1"
+      contextHandoffHighPercent={80}
+      onSelect={() => {}}
+    />,
+  );
+
+  const context = el.querySelector('[title="Context 75%"]');
+  expect(context).not.toBeNull();
+  expect(context?.className).toContain('text-muted-foreground');
+  expect(context?.className).not.toContain('bg-warning');
 });
 
 test.skipIf(!hasDom)('renders nothing for a single pane', async () => {

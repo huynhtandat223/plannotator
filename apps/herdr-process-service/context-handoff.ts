@@ -24,6 +24,8 @@
  * manual "Hand off" action is triggered by the captain in the UI.
  */
 
+import { CONTEXT_HANDOFF_HIGH_PERCENT } from "../../packages/shared/context-handoff-threshold";
+
 export type ContextHandoffConfig = {
   /** Arm-and-warn threshold (percent, 0-100). */
   high: number;
@@ -34,7 +36,9 @@ export type ContextHandoffConfig = {
 };
 
 export const DEFAULT_CONTEXT_HANDOFF_CONFIG: ContextHandoffConfig = {
-  high: 72,
+  // Single source of truth shared with the live pane-chip CTX warning tone so
+  // the banner and the chip agree at the boundary (see context-handoff-threshold.ts).
+  high: CONTEXT_HANDOFF_HIGH_PERCENT,
   low: 55,
   debounceTicks: 2,
 };

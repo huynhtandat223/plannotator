@@ -40,6 +40,41 @@
   width: 0 !important;
 }
 
+/* Live "working right now" indicator: ONE friendly looping pulse used by the
+   live-pane activity chip (packages/editor/App.tsx LiveActivityChip) for the
+   active/working states (Thinking…, Running <tool>, Subagent). It is the only
+   animation in the header, so motion uniquely signals live work. The text label
+   always carries the meaning; this dot is aria-hidden and decorative.
+   prefers-reduced-motion falls back to a static filled dot. */
+.live-working-dot {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background-color: currentColor;
+  animation: live-working-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes live-working-pulse {
+  0%,
+  100% {
+    transform: scale(0.7);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-working-dot {
+    animation: none;
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
 /* Code blocks */
 pre code.hljs {
   display: block;

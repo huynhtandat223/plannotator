@@ -134,6 +134,8 @@ function loadReviewHtml(): string {
 type HerdrReviewSnapshot = {
   /** Monotonic host snapshot version. The browser ignores stale SSE frames. */
   revision?: number;
+  /** Effective server-configured high-water mark used by both warning surfaces. */
+  contextHandoffHighPercent?: number;
   messages: Array<{
     messageId: string;
     paneId: string;
@@ -1598,6 +1600,7 @@ export function reviewSnapshotFromPanels(
   preferredPanelId: string | null = null,
   enrichments: ReadonlyMap<string, PanelSessionEnrichment> = new Map(),
   handoffs: ReadonlyMap<string, HerdrContextHandoff> = new Map(),
+  contextHandoffHighPercent: number = contextHandoffConfig.high,
 ): HerdrReviewSnapshot {
   const livePaneIds = new Set(panels.map((panel) => panel.id));
   const isCompanionPane = (paneId: string) => exAICompanions.isCompanionPane(paneId);
@@ -1677,6 +1680,7 @@ export function reviewSnapshotFromPanels(
     : null;
   return {
     revision: 0,
+    contextHandoffHighPercent,
     messages,
     selectedMessageId: selectedMessage?.messageId ?? null,
     unreadMessageIds: [],
@@ -2136,7 +2140,16 @@ async function readLiveState(): Promise<HerdrLiveState> {
   // Advance the per-pane context-handoff detector on this same tick (no extra
   // poll loop) and publish any resulting warnings into the snapshot.
   const handoffs = evaluateContextHandoffs(panelsWithGitBranches, enrichedSessions);
-  return { panels: panelsWithGitBranches, snapshot: reviewSnapshotFromPanels(panelsWithGitBranches, null, enrichedSessions, handoffs) };
+  return {
+    panels: panelsWithGitBranches,
+    snapshot: reviewSnapshotFromPanels(
+      panelsWithGitBranches,
+      null,
+      enrichedSessions,
+      handoffs,
+      contextHandoffConfig.high,
+    ),
+  };
 }
 
 const liveSnapshotPublisher = new LiveSnapshotPublisher(readLiveState);
@@ -2970,6 +2983,7 @@ async function servePlan(response: ServerResponse): Promise<void> {
     repoInfo: { display: "Herdr live Pi panels" },
     projectRoot: selected?.cwd ?? process.cwd(),
     liveMessageReview: true,
+    contextHandoffHighPercent: contextHandoffConfig.high,
     // This host receives complete documents in each snapshot and can switch
     // them in place. Reloading on every changed message identity creates an
     // initial EventSource race and is unnecessary here.
