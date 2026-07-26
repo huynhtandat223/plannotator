@@ -1398,16 +1398,15 @@ const App: React.FC = () => {
     return paneId ? recentMessages.filter((message) => message.paneId === paneId) : recentMessages;
   }, [liveWorkspaceMode, recentMessages, selectedMessageId]);
 
-  // A waiting document represents a real live Pi pane but has no assistant
-  // response to annotate. Its global comment is instead a new user message.
+  // A Global Comment in any real live Pi pane is a new user message.
+  // Selection/code comments still use the review-annotation flow.
   const selectedLiveMessage = React.useMemo(
     () => recentMessages.find((message) => message.messageId === selectedMessageId) ?? null,
     [recentMessages, selectedMessageId],
   );
   const [isOpeningFullReview, setIsOpeningFullReview] = useState(false);
   const sendsGlobalCommentAsUserMessage = liveMessageReview &&
-    Boolean(selectedLiveMessage?.paneId) &&
-    !selectedLiveMessage?.assistantMessageId;
+    Boolean(selectedLiveMessage?.paneId);
 
   const clearSelectedLiveFeedback = React.useCallback(() => {
     if (!selectedMessageId) return;

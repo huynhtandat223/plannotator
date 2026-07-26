@@ -10,6 +10,20 @@ function fingerprint(path: string): string | null {
 }
 
 describe("Ex-Plannotator build isolation", () => {
+	test("committed live browser sends Global Comments for every selected live pane", () => {
+		const repositoryRoot = resolve(import.meta.dir, "../..");
+		const editorSource = readFileSync(resolve(repositoryRoot, "packages/editor/App.tsx"), "utf8");
+		const gateStart = editorSource.indexOf("const sendsGlobalCommentAsUserMessage");
+		const gate = editorSource.slice(gateStart, editorSource.indexOf(";", gateStart));
+		const browserAsset = readFileSync(resolve(import.meta.dir, "ex-plannotator.html"), "utf8");
+
+		expect(gate).toContain("liveMessageReview");
+		expect(gate).toContain("selectedLiveMessage?.paneId");
+		expect(gate).not.toContain("assistantMessageId");
+		expect(browserAsset).toContain("onSendGlobalComment");
+		expect(browserAsset.match(/\/api\/instruction/g)?.length).toBeGreaterThanOrEqual(2);
+	});
+
 	test("builds its browser asset without creating or changing Official Plannotator assets", () => {
 		const repositoryRoot = resolve(import.meta.dir, "../..");
 		const exAsset = resolve(import.meta.dir, "ex-plannotator.html");
