@@ -17,15 +17,13 @@ The browser never edits Plan Files. Feedback asks the agent to make file changes
 
 ## Build and package
 
-Build the two sibling browser assets independently from this package directory:
+Build the shared browser asset from this package directory:
 
 ```sh
-bun run build        # Last asset only: ex-plannotator.html
-bun run build:plan   # Plan asset only: ex-plannotator-plan.html
-bun run build:package # Both, sequentially
+bun run build        # ex-plannotator.html (served by both Last and Plan)
 ```
 
-`prepublishOnly` runs both independent build entries before packaging. The package explicitly discovers `index.ts` for Last and `plan-extension.ts` for Plan; the Plan build writes `ex-plannotator-plan.html` and does not route through Official Plannotator assets.
+`prepublishOnly` runs the same build before packaging. The package explicitly discovers `index.ts` for Last and `plan-extension.ts` for Plan; both commands serve the single committed `ex-plannotator.html` bundle. The build pins `NODE_ENV=production` so a rebuild from any environment (including test runs) yields the same production bundle, and CI rebuilds and byte-compares it against the committed copy.
 
 Then load or install `apps/ex-pi-extension` as a Pi package. Official `@plannotator/pi-extension` can remain installed.
 

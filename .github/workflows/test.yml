@@ -33,6 +33,15 @@ jobs:
       - name: Run tests
         run: bun test --path-ignore-patterns='apps/ex-pi-extension/server.test.ts'
 
+      # The committed Ex-Plannotator bundle must equal a fresh production build
+      # byte-for-byte. The build is reproducible (NODE_ENV pinned in the build
+      # script, frozen lockfile), so any diff means a PR changed UI code without
+      # rebuilding the bundle — or rebuilt it under the wrong mode.
+      - name: Ex-Plannotator bundle is current
+        run: |
+          bun run --cwd apps/ex-pi-extension build
+          git diff --exit-code -- apps/ex-pi-extension/ex-plannotator.html
+
       # DOM-gated tests are deliberately separated from the default suite.
       - name: Run file-browser DOM test
         run: DOM_TESTS=1 bun test packages/ui/hooks/useFileBrowser.test.tsx

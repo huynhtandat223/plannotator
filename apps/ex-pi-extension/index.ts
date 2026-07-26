@@ -178,6 +178,11 @@ export default function exPlannotator(
 			pendingReconciliation = null;
 			void dependencies.reportHerdr(ctx, pi.getCommands());
 			if (!session || activeServer !== session) return;
+			// The review was opened against one Pi session. Messages from a new
+			// session (e.g. after /ex-plannotator-new) must never reconcile into
+			// it: reconcile would treat every old-session id as removed and
+			// destroy all drafts and sent history.
+			if (!piSessionIdAtOpen || currentPiSessionId !== piSessionIdAtOpen) return;
 			const activeBranchMessages = getActiveBranchAssistantMessages(ctx);
 			session.reconcile(
 				activeBranchMessages.slice(0, LIVE_RESPONSE_HISTORY_LIMIT),

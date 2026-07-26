@@ -131,7 +131,51 @@ describe('live message session scope', () => {
       'w:p7:waiting',
       'w:p1:response-1',
       null,
-    )).toEqual({ nextSelectedMessageId: 'w:p1:response-1', followNextPaneResponseReset: false });
+    )).toEqual({ nextSelectedMessageId: 'w:p1:response-1', followNextPaneResponseReset: false, followedPaneVanished: false });
+  });
+
+  test('clears an armed follow when the followed pane vanishes from the snapshot', () => {
+    // The captain sent feedback to p1 (arming a follow), then the pane was
+    // handed off and left the snapshot. find() returns undefined here; this
+    // used to pass an `!== null` guard and throw on `.messageId`, wedging
+    // every subsequent snapshot frame until page reload.
+    const previous = [
+      message('w:p1:response-1', 'w:p1', 'session-1', 'response-1'),
+      message('w:p2:response-1', 'w:p2', 'session-2', 'response-1'),
+    ];
+    const next = [message('w:p2:response-1', 'w:p2', 'session-2', 'response-1')];
+    const follow = { paneId: 'w:p1', latestMessageId: 'w:p1:response-1' };
+
+    const result = reconcileLiveMessageSelection(
+      previous,
+      next,
+      'w:p1:response-1',
+      'w:p2:response-1',
+      follow,
+    );
+
+    expect(result.followNextPaneResponseReset).toBe(true);
+    expect(result.followedPaneVanished).toBe(true);
+  });
+
+  test('reconciles selection normally on the frame where the followed pane vanishes', () => {
+    // The vanished follow must not short-circuit selection: the reviewer had
+    // not picked a source, so the server's focused pane still wins.
+    const previous = [message('w:p1:waiting', 'w:p1', 'session-1')];
+    const next = [message('w:p2:response-1', 'w:p2', 'session-2', 'response-1')];
+    const follow = { paneId: 'w:p1', latestMessageId: 'w:p1:waiting' };
+
+    const result = reconcileLiveMessageSelection(
+      previous,
+      next,
+      'w:p1:waiting',
+      'w:p2:response-1',
+      follow,
+    );
+
+    expect(result.nextSelectedMessageId).toBe('w:p2:response-1');
+    expect(result.followNextPaneResponseReset).toBe(true);
+    expect(result.followedPaneVanished).toBe(true);
   });
 
   test('keeps an explicitly selected source when Herdr focus changes', () => {

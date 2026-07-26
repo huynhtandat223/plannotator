@@ -318,7 +318,10 @@ export class PlanReviewSession {
 			await deliver(batch);
 		} catch (error) {
 			this.failedBatch = batch;
-			this.pendingRound = null;
+			// A round staged while delivery was in flight stays staged: dropping it
+			// would leave a successful retry stuck in "waiting" with the already
+			// finalized response never opening for annotation. No further
+			// message_end restages it — hasNewResponse is false in delivery_failed.
 			this.deliveryError = errorMessage(error);
 			this.agentStoppedWhileSubmitting = false;
 			this.reviewRoundStatus = "delivery_failed";

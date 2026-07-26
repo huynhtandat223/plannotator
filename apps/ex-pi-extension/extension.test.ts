@@ -194,6 +194,55 @@ describe("Ex-Plannotator package surface", () => {
 		expect(reconciliations.at(-1)?.messages.some((message) => message.text === "Outside branch")).toBe(false);
 	});
 
+	test("does not reconcile assistant messages from a new Pi session into the open review", async () => {
+		const reconciliations: unknown[] = [];
+		const server: LiveMessageReviewServer = {
+			port: 1234,
+			url: "http://127.0.0.1:1234",
+			reconcile: (messages, activeBranchMessageIds) => {
+				reconciliations.push({ messages, activeBranchMessageIds });
+			},
+			setFeedbackDelivery() {},
+			stop() {},
+		};
+		const pi = fakePi();
+		exPlannotator(pi.api as never, {
+			startBrowser: async () => server,
+			reportHerdr: async () => {},
+			releaseHerdr: async () => {},
+			pollHerdrFeedback: async () => {},
+			pollHerdrInstruction: async () => {},
+		});
+		const contextA = {
+			hasUI: true,
+			sessionManager: {
+				getBranch: () => [{ id: "old", type: "message", message: { role: "assistant", content: [{ type: "text", text: "Old session" }] } }],
+				getSessionId: () => "session-a",
+			},
+			ui: { notify() {} },
+		};
+		await pi.commands.find((command) => command.name === EX_PLANNOTATOR_COMMAND)!.options.handler("", contextA as never);
+
+		// /ex-plannotator-new switched to a fresh session; its first assistant
+		// message must not reconcile into the review opened for session-a —
+		// reconcile would compute every session-a id as removed and delete all
+		// drafts and sent history.
+		const contextB = {
+			hasUI: true,
+			sessionManager: {
+				getBranch: () => [{ id: "fresh", type: "message", message: { role: "assistant", content: [{ type: "text", text: "New session" }] } }],
+				getSessionId: () => "session-b",
+			},
+			ui: { notify() {} },
+		};
+		await pi.handlers.get("session_start")!({} as never, contextB as never);
+		pi.handlers.get("message_end")!({ message: { role: "assistant", content: [] } } as never, contextB as never);
+		await waitForDeferredReconciliation();
+
+		expect(reconciliations).toEqual([]);
+		await pi.handlers.get("session_shutdown")!({} as never, contextB as never);
+	});
+
 	test("coexists with Official Plannotator without command collisions", async () => {
 		const pi = fakePi();
 		const { default: officialPlannotator } = await import("../pi-extension/index");
@@ -213,7 +262,9 @@ describe("Ex-Plannotator package surface", () => {
 		expect(exPackage.name).toBe("@huynhtandat223/ex-plannotator-pi-extension");
 		expect(exPackage.name).not.toBe(officialPackage.name);
 		expect(exPackage.files).toContain("ex-plannotator.html");
-		expect(exPackage.files).toContain("ex-plannotator-plan.html");
+		// Plan review serves the same built app as Last; the second copy of the
+		// bundle was removed after its committed copy drifted to a dev build.
+		expect(exPackage.files).not.toContain("ex-plannotator-plan.html");
 		expect(officialPackage.files).not.toContain("ex-plannotator.html");
 		expect(exPackage.pi.extensions).toEqual(["./", "./plan-extension.ts"]);
 	});

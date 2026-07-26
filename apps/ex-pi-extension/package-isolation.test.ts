@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 function fingerprint(path: string): string | null {
@@ -10,41 +11,56 @@ function fingerprint(path: string): string | null {
 }
 
 describe("Ex-Plannotator build isolation", () => {
-	test("committed live browser sends Global Comments for every selected live pane", () => {
+	// Bundle currency (source change without rebuild) is enforced by the CI
+	// step that rebuilds and compares against the committed asset byte-for-byte;
+	// this suite only guards source contracts and build isolation.
+	test("live global comment gate targets the selected live pane", () => {
 		const repositoryRoot = resolve(import.meta.dir, "../..");
 		const editorSource = readFileSync(resolve(repositoryRoot, "packages/editor/App.tsx"), "utf8");
 		const gateStart = editorSource.indexOf("const sendsGlobalCommentAsUserMessage");
 		const gate = editorSource.slice(gateStart, editorSource.indexOf(";", gateStart));
-		const browserAsset = readFileSync(resolve(import.meta.dir, "ex-plannotator.html"), "utf8");
 
 		expect(gate).toContain("liveMessageReview");
 		expect(gate).toContain("selectedLiveMessage?.paneId");
 		expect(gate).not.toContain("assistantMessageId");
-		expect(browserAsset).toContain("onSendGlobalComment");
-		expect(browserAsset).toContain("direct-send-close-and-restore-focus");
-		expect(browserAsset.match(/\/api\/instruction/g)?.length).toBeGreaterThanOrEqual(2);
 	});
 
-	test("builds its browser asset without creating or changing Official Plannotator assets", () => {
+	test("committed browser asset is a production build", () => {
+		// The dev JSX transform must never ship: a bundle rebuilt under
+		// NODE_ENV=development/test carries jsxDEV calls and README warnings.
+		const browserAsset = readFileSync(resolve(import.meta.dir, "ex-plannotator.html"), "utf8");
+		expect(browserAsset).not.toContain("jsxDEV");
+	});
+
+	test("builds its browser asset without creating or changing committed assets", () => {
 		const repositoryRoot = resolve(import.meta.dir, "../..");
 		const exAsset = resolve(import.meta.dir, "ex-plannotator.html");
-		const planAsset = resolve(import.meta.dir, "ex-plannotator-plan.html");
 		const officialAssets = [
 			resolve(import.meta.dir, "../pi-extension/plannotator.html"),
 			resolve(import.meta.dir, "../pi-extension/review-editor.html"),
 		];
 		const officialBefore = officialAssets.map(fingerprint);
-		const lastBefore = fingerprint(exAsset);
+		const exBefore = fingerprint(exAsset);
 
-		const build = spawnSync("bun", ["run", "--cwd", "apps/ex-pi-extension", "build:plan"], {
-			cwd: repositoryRoot,
-			encoding: "utf8",
-		});
+		// Build into a temp directory: a test run must never rewrite the
+		// committed working-tree artifact (that is exactly how a dev-flavored
+		// bundle got committed once).
+		const outDir = mkdtempSync(join(tmpdir(), "ex-plannotator-build-"));
+		try {
+			const build = spawnSync("bun", ["x", "vite", "build", "--outDir", outDir, "--emptyOutDir"], {
+				cwd: resolve(repositoryRoot, "apps/hook"),
+				encoding: "utf8",
+				env: { ...process.env, NODE_ENV: "production" },
+			});
 
-		expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
-		expect(fingerprint(exAsset)).toBe(lastBefore);
-		expect(existsSync(planAsset)).toBe(true);
-		expect(readFileSync(planAsset, "utf8")).toContain("data-plan-review-sources");
-		expect(officialAssets.map(fingerprint)).toEqual(officialBefore);
+			expect(build.status, `${build.stdout}\n${build.stderr}`).toBe(0);
+			const built = readFileSync(join(outDir, "index.html"), "utf8");
+			expect(built).toContain("data-plan-review-sources");
+			expect(built).not.toContain("jsxDEV");
+			expect(fingerprint(exAsset)).toBe(exBefore);
+			expect(officialAssets.map(fingerprint)).toEqual(officialBefore);
+		} finally {
+			rmSync(outDir, { recursive: true, force: true });
+		}
 	}, 60_000);
 });

@@ -36,15 +36,12 @@
     "plan-browser.ts",
     "plan-server.ts",
     "plan-session.ts",
-    "plan-folder.ts",
-    "ex-plannotator-plan.html"
+    "plan-folder.ts"
   ],
   "scripts": {
-    "build": "cd ../hook && bunx vite build && cp dist/index.html ../ex-pi-extension/ex-plannotator.html",
+    "build": "cd ../hook && NODE_ENV=production bunx vite build && cp dist/index.html ../ex-pi-extension/ex-plannotator.html",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "prepublishOnly": "bun run build && bun run build:plan",
-    "build:plan": "cd ../hook && bunx vite build && cp dist/index.html ../ex-pi-extension/ex-plannotator-plan.html",
-    "build:package": "bun run build && bun run build:plan"
+    "prepublishOnly": "bun run build"
   },
   "dependencies": {
     "@plannotator/core": "workspace:*",

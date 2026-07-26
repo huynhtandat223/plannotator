@@ -54,6 +54,11 @@ export function reconcileLiveMessageSelection(
   nextSelectedMessageId: string | null;
   followNextPaneResponseReset: boolean;
   /**
+   * The armed follow's pane left the snapshot entirely (closed or handed off),
+   * so the follow was cleared without a response having arrived.
+   */
+  followedPaneVanished?: boolean;
+  /**
    * A newer response became focused in a different pane while the reviewer was
    * already viewing a real response. The caller keeps the current view and
    * surfaces this as a notification instead of yanking to the other pane.
@@ -65,8 +70,13 @@ export function reconcileLiveMessageSelection(
   const selectedPaneSessionChanged = changedPaneIds.has(selectedPaneId ?? "");
 
   const followedPaneLatest = followNextPaneResponse
-    ? nextMessages.find((message) => message.paneId === followNextPaneResponse.paneId)
+    ? nextMessages.find((message) => message.paneId === followNextPaneResponse.paneId) ?? null
     : null;
+  // A followed pane can leave the snapshot before responding (closed or handed
+  // off). The armed follow can then never fire, so it must be reported for
+  // clearing — otherwise every subsequent frame would re-test the same armed
+  // follow against an absent pane.
+  const followedPaneVanished = followNextPaneResponse !== null && followedPaneLatest === null;
   const receivedFollowedResponse = followedPaneLatest !== null &&
     followedPaneLatest.messageId !== followNextPaneResponse?.latestMessageId;
 
@@ -88,7 +98,8 @@ export function reconcileLiveMessageSelection(
     if (realResponse) {
       return {
         nextSelectedMessageId: realResponse.messageId,
-        followNextPaneResponseReset: false,
+        followNextPaneResponseReset: followedPaneVanished,
+        followedPaneVanished,
       };
     }
   }
@@ -109,13 +120,15 @@ export function reconcileLiveMessageSelection(
     if (!isCurrentlyWaiting && focusMovedToAnotherPane) {
       return {
         nextSelectedMessageId: currentSelectedMessageId,
-        followNextPaneResponseReset: false,
+        followNextPaneResponseReset: followedPaneVanished,
+        followedPaneVanished,
         pendingFocusMessageId: snapshotSelectedMessageId,
       };
     }
     return {
       nextSelectedMessageId: snapshotSelectedMessageId,
-      followNextPaneResponseReset: false,
+      followNextPaneResponseReset: followedPaneVanished,
+      followedPaneVanished,
     };
   }
 
@@ -134,6 +147,7 @@ export function reconcileLiveMessageSelection(
 
   return {
     nextSelectedMessageId: nextSelectedId,
-    followNextPaneResponseReset: false,
+    followNextPaneResponseReset: followedPaneVanished,
+    followedPaneVanished,
   };
 }
