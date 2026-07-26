@@ -18,11 +18,14 @@ import { LIVE_MESSAGE_RETENTION } from "../../packages/core/live-message-window"
 import {
   livePaneAgentProfile,
   livePaneCapabilityReason,
+  livePaneFeedbackDelivery,
   livePaneLimitations,
   supportsLivePaneCapability,
   type LivePaneCapabilityId,
 } from "../../packages/core/live-pane-agents";
 import { readClaudeLiveSession } from "./claude-live-session";
+import { deliverViaHerdrComposer, type ComposerDeliveryOutcome } from "./herdr-composer-delivery";
+import { formatLiveFeedbackBatch } from "../ex-pi-extension/session";
 import {
   filterWorkspaceStatusForDirectory,
   getWorkspaceStatusForDirectory,
@@ -1104,6 +1107,12 @@ function waitingDocument(panel: HerdrPanel): string {
           "",
         ]
       : []),
+    // Composer delivery works, but with weaker guarantees than the Pi
+    // extension path — say so where the user first meets the pane, not only
+    // at the moment of sending.
+    ...(profile.feedbackDelivery === "herdr-composer" && profile.composerDeliveryCaveat
+      ? [`> [!NOTE]\n> **Send feedback / message** — ${profile.composerDeliveryCaveat}`, ""]
+      : []),
     "**Working directory:**",
     formattedWorkingDirectory(panel.cwd),
   ].join("\n");
@@ -1245,6 +1254,38 @@ async function refusedUnsupportedCapability(
   return true;
 }
 
+/**
+ * Deliver one final message to a pane whose agent kind declared
+ * `feedbackDelivery: "herdr-composer"` in the capability registry. Types into
+ * the pane's composer through the real herdr CLI; all sequencing/hazard
+ * handling lives in herdr-composer-delivery.ts.
+ */
+function composerDeliver(paneId: string, content: string): Promise<ComposerDeliveryOutcome> {
+  return deliverViaHerdrComposer(paneId, content, {
+    run: (args) => execFileAsync("herdr", args, { timeout: 10_000 }),
+  });
+}
+
+/**
+ * Answer a composer delivery honestly. A confirmed send and an
+ * unconfirmed-but-typed send both report 202 with `confirmed`, so the browser
+ * can say which happened instead of pretending extension-grade delivery; a
+ * refusal (busy pane, unreadable state) is a 409 with the exact reason and
+ * nothing was typed.
+ */
+function writeComposerOutcome(response: ServerResponse, outcome: ComposerDeliveryOutcome): void {
+  if (!outcome.delivered) {
+    writeJson(response, 409, { error: outcome.reason, mechanism: "herdr-composer" });
+    return;
+  }
+  writeJson(response, 202, {
+    ok: true,
+    mechanism: "herdr-composer",
+    confirmed: outcome.confirmed,
+    ...(outcome.confirmed ? {} : { note: outcome.note }),
+  });
+}
+
 async function queueFeedback(request: IncomingMessage, response: ServerResponse): Promise<void> {
   if (!canWriteFeedback(request)) {
     writeJson(response, 403, { error: "Feedback delivery requires a loopback browser or PLANNOTATOR_HERDR_WRITE_TOKEN." });
@@ -1258,6 +1299,14 @@ async function queueFeedback(request: IncomingMessage, response: ServerResponse)
     return;
   }
   if (await refusedUnsupportedCapability(response, prepared.paneId, "feedback")) return;
+  const agent = snapshot.messages.find((message) => message.paneId === prepared.paneId)?.agent;
+  if (livePaneFeedbackDelivery(agent) === "herdr-composer") {
+    // No extension will ever claim a queue entry for this kind, so the host
+    // formats the batch itself (same formatter the Pi extension uses) and types
+    // it into the pane's composer.
+    writeComposerOutcome(response, await composerDeliver(prepared.paneId, formatLiveFeedbackBatch(prepared.batch)));
+    return;
+  }
   const registration = panelSessions.get(prepared.paneId);
   if (!registration) {
     writeJson(response, 409, { error: "The selected Pi session is no longer registered" });
@@ -1345,22 +1394,25 @@ async function queueInstruction(request: IncomingMessage, response: ServerRespon
     return;
   }
   if (await refusedUnsupportedCapability(response, prepared.paneId, "feedback")) return;
-  const requestedSessionId = text(body?.sessionId);
-  const registration = panelSessions.get(prepared.paneId);
-  if (!registration || (requestedSessionId && registration.sessionId !== requestedSessionId)) {
-    writeJson(response, 409, { error: "The selected Pi pane session is no longer current" });
-    return;
-  }
   const pane = (await discoverPanels()).find((candidate) => candidate.id === prepared.paneId);
   if (!pane) {
-    writeJson(response, 409, { error: "The selected Pi pane is no longer live" });
+    writeJson(response, 409, { error: "The selected pane is no longer live" });
+    return;
+  }
+  const composerDelivered = livePaneFeedbackDelivery(pane.agent) === "herdr-composer";
+  const requestedSessionId = text(body?.sessionId);
+  const registration = panelSessions.get(prepared.paneId);
+  // Composer kinds have no extension registration to hold — pane liveness and
+  // the delivery module's own idle gate are the whole (weaker, stated) contract.
+  if (!composerDelivered && (!registration || (requestedSessionId && registration.sessionId !== requestedSessionId))) {
+    writeJson(response, 409, { error: "The selected Pi pane session is no longer current" });
     return;
   }
   let workspaceRoot: string;
   try {
     workspaceRoot = await realpath(resolve(pane.cwd));
   } catch {
-    writeJson(response, 409, { error: "The selected Pi pane workspace is no longer available" });
+    writeJson(response, 409, { error: "The selected pane workspace is no longer available" });
     return;
   }
   const references = await formatInstructionFileReferences(prepared.content, workspaceRoot);
@@ -1368,10 +1420,14 @@ async function queueInstruction(request: IncomingMessage, response: ServerRespon
     writeJson(response, 400, { error: references.error });
     return;
   }
+  if (composerDelivered) {
+    writeComposerOutcome(response, await composerDeliver(prepared.paneId, references.content));
+    return;
+  }
   const delivery: PendingInstructionDelivery = {
     deliveryId: randomUUID(),
     paneId: prepared.paneId,
-    sessionId: registration.sessionId,
+    sessionId: registration!.sessionId,
     content: references.content,
   };
   pendingInstructionDeliveries.set(delivery.deliveryId, delivery);
@@ -2284,13 +2340,20 @@ async function readLiveState(): Promise<HerdrLiveState> {
     for (const paneId of panelSessions.keys()) {
       if (!livePaneIds.has(paneId)) panelSessions.delete(paneId);
     }
+    // Composer-delivered panes hold no extension registration by design, so the
+    // registration-mismatch staleness test only applies to extension kinds;
+    // composer reviews re-verify staleness at decision time instead.
+    const paneAgentById = new Map(panels.map((panel) => [panel.id, panel.agent]));
+    const registrationStale = (paneId: string, sessionId: string): boolean =>
+      livePaneFeedbackDelivery(paneAgentById.get(paneId)) !== "herdr-composer"
+      && panelSessions.get(paneId)?.sessionId !== sessionId;
     for (const review of activeGitChangesReviews.values()) {
-      if (!livePaneIds.has(review.paneId) || panelSessions.get(review.paneId)?.sessionId !== review.sessionId) {
+      if (!livePaneIds.has(review.paneId) || registrationStale(review.paneId, review.sessionId)) {
         stopGitChangesReview(review);
       }
     }
     for (const [paneId, launch] of pendingGitChangesReviewLaunches) {
-      if (!livePaneIds.has(paneId) || panelSessions.get(paneId)?.sessionId !== launch.sessionId) {
+      if (!livePaneIds.has(paneId) || registrationStale(paneId, launch.sessionId)) {
         cancelPendingGitChangesReviewLaunch(pendingGitChangesReviewLaunches, paneId, launch.sessionId);
       }
     }
@@ -2873,12 +2936,20 @@ async function openGitChangesReview(request: IncomingMessage, response: ServerRe
   // "Send feedback" could never land is exactly the empty-but-looks-alive
   // outcome this must avoid.
   if (await refusedUnsupportedCapability(response, paneId, "feedback")) return;
+  const composerDelivered = livePaneFeedbackDelivery(pane.agent) === "herdr-composer";
   const registration = panelSessions.get(paneId);
-  if (!registration) {
+  if (!composerDelivered && !registration) {
     writeJson(response, 409, { error: "The selected Pi pane has not published a live session" });
     return;
   }
-  const requestedSessionId = registration.sessionId;
+  // Composer kinds have no extension registration. When the pane sources a
+  // disk transcript (Claude Code) its log's session id is captured so the
+  // decision handler can at least refuse a visibly changed session; kinds with
+  // no session identity at all get an empty capture, and the delivery module's
+  // liveness + idle gate is the whole (weaker, stated) staleness contract.
+  const requestedSessionId = registration?.sessionId
+    ?? (await reviewSnapshot()).snapshot.messages.find((message) => message.paneId === paneId)?.piSessionId
+    ?? "";
   while (true) {
     const existing = activeGitChangesReviews.get(paneId);
     if (existing?.settled) stopGitChangesReview(existing);
@@ -2936,11 +3007,33 @@ async function openGitChangesReview(request: IncomingMessage, response: ServerRe
           sharingEnabled: false,
           onDecision: async (decision) => {
             if (decision.exit) return;
+            const content = decision.approved ? "LGTM - no changes requested." : decision.feedback.trim();
+            if (composerDelivered) {
+              const { snapshot: current } = await reviewSnapshot();
+              const message = current.messages.find((entry) => entry.paneId === captured.paneId);
+              if (!message) {
+                throw new Error("The pane is no longer live. Reopen the review from a current pane.");
+              }
+              // Best-effort only: with a disk-sourced session id a visibly
+              // changed session is refused; without one there is nothing to
+              // compare and the composer module's idle gate is the remaining
+              // protection. That gap is stated in the kind's delivery caveat.
+              if (captured.sessionId && message.piSessionId && message.piSessionId !== captured.sessionId) {
+                throw new Error("The pane's session changed since this review was opened. Reopen the review from the current pane.");
+              }
+              if (!content) return;
+              const outcome = await composerDeliver(captured.paneId, content);
+              if (!outcome.delivered) throw new Error(outcome.reason);
+              // An unconfirmed-but-typed outcome must NOT throw: the review UI
+              // treats an error as undelivered and invites a resend, which
+              // would type the feedback twice. Record it for the host log.
+              if (!outcome.confirmed) console.warn(`git-changes review feedback for ${captured.paneId}: ${outcome.note}`);
+              return;
+            }
             const current = panelSessions.get(captured.paneId);
             if (current?.sessionId !== captured.sessionId) {
               throw new Error("The Pi pane session changed since this review was opened. Reopen the review from the current pane.");
             }
-            const content = decision.approved ? "LGTM - no changes requested." : decision.feedback.trim();
             if (!content) return;
             const delivery: PendingInstructionDelivery = {
               deliveryId: randomUUID(),

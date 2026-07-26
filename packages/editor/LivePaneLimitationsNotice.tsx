@@ -20,19 +20,33 @@ import type { LivePaneLimitation } from '@plannotator/core/live-pane-agents';
 export const LivePaneLimitationsNotice = ({
   agentLabel,
   limitations,
+  composerDeliveryCaveat,
 }: {
   agentLabel: string;
   limitations: LivePaneLimitation[];
+  /**
+   * The registry's caveat for kinds whose sends are typed into the composer
+   * through Herdr instead of injected by an extension. Shown alongside the
+   * missing-capability list because it also changes what the user may rely on —
+   * the two delivery mechanisms are not equivalent and this notice must not
+   * imply they are.
+   */
+  composerDeliveryCaveat?: string | null;
 }) => {
   const [expanded, setExpanded] = useState(false);
-  if (limitations.length === 0) return null;
+  if (limitations.length === 0 && !composerDeliveryCaveat) return null;
   return (
     <div className="border-b border-warning/25 bg-warning/10 px-4 py-2 text-xs text-warning-foreground flex-shrink-0">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span aria-hidden="true">⚠</span>
         <span className="font-medium">{agentLabel} panes are limited in Plannotator.</span>
         <span className="min-w-0">
-          Not available here: {limitations.map((limitation) => limitation.label).join(' · ')}.
+          {[
+            limitations.length > 0
+              ? `Not available here: ${limitations.map((limitation) => limitation.label).join(' · ')}.`
+              : '',
+            composerDeliveryCaveat ? 'Sends are typed into the composer via Herdr.' : '',
+          ].filter(Boolean).join(' ')}
         </span>
         <button
           type="button"
@@ -45,6 +59,11 @@ export const LivePaneLimitationsNotice = ({
       </div>
       {expanded && (
         <ul className="mt-2 flex flex-col gap-1 pl-5">
+          {composerDeliveryCaveat && (
+            <li className="list-disc">
+              <span className="font-medium">Send feedback / message</span> — {composerDeliveryCaveat}
+            </li>
+          )}
           {limitations.map((limitation) => (
             <li key={limitation.id} className="list-disc">
               <span className="font-medium">{limitation.label}</span> — {limitation.reason}
