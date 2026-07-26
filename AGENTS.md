@@ -655,6 +655,8 @@ bun run --cwd apps/review build && bun run build:hook && \
 
 Running only `build:opencode` will copy stale HTML files.
 
+**Never commit generated HTML bundles.** `apps/ex-pi-extension/ex-plannotator.html` (~23 MB) and the `apps/pi-extension` bundles are gitignored build artifacts: `prepublishOnly` builds them into published tarballs, and source checkouts build them explicitly (`bun run build:ex-pi` / `build:pi`) before `pi install`. The ex-pi bundle was once tracked and grew history ~23 MB per rebuild — see `apps/ex-pi-extension/README.md` for the install flows.
+
 ## Marketing Site
 
 `apps/marketing/` is the plannotator.ai website — landing page, documentation, and blog. Built with Astro 5 (static output, zero client JS except a theme toggle island). Docs are markdown files in `src/content/docs/`, blog posts in `src/content/blog/`, both using Astro content collections. Tailwind CSS v4 via `@tailwindcss/vite`. Deploys to S3/CloudFront via GitHub Actions on push to main.

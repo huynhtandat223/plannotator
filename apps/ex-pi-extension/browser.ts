@@ -18,7 +18,9 @@ export async function startLiveMessageReviewBrowser(
 ): Promise<LiveMessageReviewServer> {
 	if (!ctx.hasUI) throw new Error("Ex-Plannotator requires an interactive Pi session.");
 	if (!hasExPlannotatorBrowserAsset()) {
-		throw new Error("Ex-Plannotator browser asset is missing. Run the Ex-Plannotator build first.");
+		throw new Error(
+			"Ex-Plannotator browser asset is missing. It is generated, not committed: run `bun install && bun run build:ex-pi` from the plannotator repository root, then retry.",
+		);
 	}
 	const server = await startLiveMessageReviewServer({
 		htmlContent: readFileSync(browserAssetPath, "utf8"),

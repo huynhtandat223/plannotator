@@ -15,7 +15,10 @@ export function hasPlanReviewBrowserAsset(): boolean { return existsSync(browser
 
 export async function startPlanReviewBrowser(ctx: ExtensionContext, options: { folder: PlanFolder; messages: LiveAssistantMessage[] }): Promise<PlanReviewServer> {
 	if (!ctx.hasUI) throw new Error("Ex-Plannotator Plan requires an interactive Pi session.");
-	if (!hasPlanReviewBrowserAsset()) throw new Error("Ex-Plannotator Plan browser asset is missing. Run the Ex-Plannotator build first.");
+	if (!hasPlanReviewBrowserAsset())
+		throw new Error(
+			"Ex-Plannotator Plan browser asset is missing. It is generated, not committed: run `bun install && bun run build:ex-pi` from the plannotator repository root, then retry.",
+		);
 	const server = await startPlanReviewServer({
 		htmlContent: readFileSync(browserAssetPath, "utf8"),
 		messages: options.messages,

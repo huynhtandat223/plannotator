@@ -119,12 +119,17 @@ export class LiveSnapshotPublisher<T> {
 
 // The packaged Ex-Plannotator editor owns every visual decision, including its
 // responsive/mobile behavior. This service supplies data only.
-const editorHtml = readFileSync(join(import.meta.dir, "..", "ex-pi-extension", "ex-plannotator.html"), "utf8");
+//
+// Both HTML payloads are build artifacts (gitignored). Read them on first use,
+// not at module load: this module also exports pure helpers that tests import,
+// and an eager read made importing it throw ENOENT in any checkout that had
+// not run the corresponding build.
+let editorHtmlCache: string | undefined;
+function loadEditorHtml(): string {
+  editorHtmlCache ??= readFileSync(join(import.meta.dir, "..", "ex-pi-extension", "ex-plannotator.html"), "utf8");
+  return editorHtmlCache;
+}
 
-// apps/review/dist is a build artifact (gitignored), unlike the committed
-// ex-plannotator.html above. Read it on first use, not at module load: this
-// module also exports pure helpers that tests import, and an eager read made
-// importing it throw ENOENT in any checkout that had not run the review build.
 let reviewHtmlCache: string | undefined;
 function loadReviewHtml(): string {
   reviewHtmlCache ??= readFileSync(join(import.meta.dir, "..", "review", "dist", "index.html"), "utf8");
@@ -3165,6 +3170,14 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
     return;
   }
   if (request.method === "GET" && url.pathname === "/") {
+    let editorHtml: string;
+    try {
+      editorHtml = loadEditorHtml();
+    } catch {
+      response.writeHead(503, { "content-type": "text/plain; charset=utf-8" });
+      response.end("Ex-Plannotator editor bundle is missing. It is generated, not committed: run `bun install && bun run build:ex-pi` in this checkout, then reload.");
+      return;
+    }
     const suppliedToken = text(url.searchParams.get("token"));
     const tokenAccepted = browserWriteToken !== null && suppliedToken === browserWriteToken;
     response.writeHead(200, {

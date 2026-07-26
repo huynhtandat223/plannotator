@@ -1,2 +1,5 @@
-# Keep the generated single-file app in git so a direct Pi package install works.
-# The build-isolation test regenerates it and verifies Official assets stay unchanged.
+# Generated single-file app. Never committed: `prepublishOnly` builds it into
+# the published tarball, and a source checkout builds it with `bun run build:ex-pi`
+# (repo root) before `pi install`. History grew ~23 MB per rebuild when it was
+# tracked, so do not re-add it.
+ex-plannotator.html
