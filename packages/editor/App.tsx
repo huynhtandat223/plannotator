@@ -170,6 +170,14 @@ import { deriveLiveActivityChip } from './liveActivityChip';
 import { LiveActivityChip } from './LiveActivityChipView';
 import { deriveLiveActivityTrail, formatLiveActivityTrail, formatTrailStep, type LiveActivityTrailStep } from './liveActivityTrail';
 import { LivePaneChipsRow } from './LivePaneChipsRow';
+import { LivePaneLimitationsNotice } from './LivePaneLimitationsNotice';
+import {
+  livePaneAgentLabel,
+  livePaneCapabilityReason,
+  livePaneLimitations,
+  supportsLivePaneCapability,
+  type LivePaneLimitation,
+} from '@plannotator/core/live-pane-agents';
 import { repoInfoForDocument } from './documentRepoInfo';
 import { submitLiveResponseFeedback } from './liveResponseFeedback';
 
@@ -1406,12 +1414,28 @@ const App: React.FC = () => {
     [recentMessages, selectedMessageId],
   );
   const [isOpeningFullReview, setIsOpeningFullReview] = useState(false);
+  // Herdr lists panes from several agents; only some of them can do each of the
+  // things this UI offers. `selectedLivePaneAgent` is Herdr's own agent kind for
+  // the selected pane, and every gate below asks the shared capability registry
+  // rather than hard-coding an agent name. A Pi pane answers "yes" to all of
+  // them, so nothing about Pi's behaviour changes.
+  const selectedLivePaneAgent = liveMessageReview ? selectedLiveMessage?.agent : undefined;
+  const selectedLivePaneAgentLabel = livePaneAgentLabel(selectedLivePaneAgent);
+  const selectedLivePaneLimitations = React.useMemo(
+    () => (liveMessageReview && selectedLiveMessage ? livePaneLimitations(selectedLivePaneAgent) : []),
+    [liveMessageReview, selectedLiveMessage, selectedLivePaneAgent],
+  );
+  const canSendToSelectedLivePane = liveMessageReview
+    && Boolean(selectedLiveMessage)
+    && supportsLivePaneCapability(selectedLivePaneAgent, 'feedback');
   const sendsGlobalCommentAsUserMessage = liveMessageReview &&
-    Boolean(selectedLiveMessage?.paneId);
+    Boolean(selectedLiveMessage?.paneId) &&
+    canSendToSelectedLivePane;
   const canAttachSelectedLiveImageFeedback = liveMessageReview &&
     Boolean(selectedLiveMessage?.paneId) &&
     Boolean(selectedLiveMessage?.piSessionId) &&
     Boolean(selectedLiveMessage?.assistantMessageId) &&
+    canSendToSelectedLivePane &&
     liveReviewRoundStatus === 'open';
   const selectedLiveImageFeedbackTarget = canAttachSelectedLiveImageFeedback && selectedLiveMessage
     ? `${selectedLiveMessage.paneLabel?.trim() || 'Pi'} · ${selectedLiveMessage.paneTab?.trim() || selectedLiveMessage.paneId} · selected response`
@@ -1643,6 +1667,15 @@ const App: React.FC = () => {
 
   const handleOpenFullReview = React.useCallback(async () => {
     if (!selectedLiveMessage?.paneId) return;
+    // A full review exists to send review feedback back into the session. Say so
+    // before opening a tab we would only have to fill with an error.
+    const unsupported = livePaneCapabilityReason(selectedLiveMessage.agent, 'feedback');
+    if (unsupported) {
+      toast.error(`Full review is unavailable for ${livePaneAgentLabel(selectedLiveMessage.agent)} panes`, {
+        description: unsupported,
+      });
+      return;
+    }
     // Reserve the tab while this is still a direct user gesture. Waiting for
     // fetch() first makes mobile Chrome treat the eventual window.open() as an
     // unsolicited pop-up.
@@ -1678,7 +1711,7 @@ const App: React.FC = () => {
     } finally {
       setIsOpeningFullReview(false);
     }
-  }, [selectedLiveMessage?.paneId, gitChangesCompareMode]);
+  }, [selectedLiveMessage?.paneId, selectedLiveMessage?.agent, gitChangesCompareMode]);
 
   const handleFileBrowserSelect = React.useCallback((absolutePath: string, dirPath: string) => {
     const normalizedAbsolutePath = normalizeBrowserPath(absolutePath);
@@ -4267,8 +4300,13 @@ const App: React.FC = () => {
   // useExAIChat's refresh callback and its effect key off this reference; a fresh
   // object literal every render caused an infinite refresh->setState->re-render
   // loop that hammered GET /api/ex-ai-companion (~88 req/s).
-  const exAIPaneId = liveMessageReview && !selectedLiveMessage?.isExAICompanion ? (selectedLiveMessage?.paneId ?? null) : null;
-  const exAISessionId = liveMessageReview && !selectedLiveMessage?.isExAICompanion ? (selectedLiveMessage?.piSessionId ?? null) : null;
+  // Ex AI Chat pairs a companion Pi session with the selected pane, so it needs
+  // an agent kind that can actually be paired. A Claude Code pane carries a
+  // session id (its own transcript's), which would otherwise have made it look
+  // eligible for a companion it can never have.
+  const exAICapable = supportsLivePaneCapability(selectedLivePaneAgent, 'exAICompanion');
+  const exAIPaneId = liveMessageReview && exAICapable && !selectedLiveMessage?.isExAICompanion ? (selectedLiveMessage?.paneId ?? null) : null;
+  const exAISessionId = liveMessageReview && exAICapable && !selectedLiveMessage?.isExAICompanion ? (selectedLiveMessage?.piSessionId ?? null) : null;
   const exAIIdentity = useMemo(
     () => (exAIPaneId && exAISessionId ? { paneId: exAIPaneId, sessionId: exAISessionId } : null),
     [exAIPaneId, exAISessionId],
@@ -4829,6 +4867,18 @@ const App: React.FC = () => {
   }, [hasFeedbackToSend, liveMessageReview, maybeConfirmUnsavedSourceFileEdits, selectedLiveMessage?.paneId]);
 
   const handleHeaderFeedback = useCallback(() => {
+    // A live pane whose agent has no way to receive feedback says so here too,
+    // not only in the standing limitations notice: this is the moment the user
+    // expects delivery, so it is the moment the reason has to be legible.
+    const liveDeliveryBlocked = liveMessageReview && selectedLiveMessage
+      ? livePaneCapabilityReason(selectedLiveMessage.agent, 'feedback')
+      : null;
+    if (liveDeliveryBlocked) {
+      toast.error(`${livePaneAgentLabel(selectedLiveMessage?.agent)} panes cannot receive feedback`, {
+        description: liveDeliveryBlocked,
+      });
+      return;
+    }
     const sendFeedback = () => {
       const h = headerHandlersRef.current;
       // Direct edits count as feedback — deny is the only Claude Code channel
@@ -4841,7 +4891,7 @@ const App: React.FC = () => {
     };
     if (maybeConfirmUnsavedSourceFileEdits('send-feedback', sendFeedback)) return;
     sendFeedback();
-  }, [hasFeedbackToSend, maybeConfirmUnsavedSourceFileEdits]);
+  }, [hasFeedbackToSend, liveMessageReview, selectedLiveMessage, maybeConfirmUnsavedSourceFileEdits]);
 
   const handleHeaderApprove = useCallback(() => {
     const approve = () => {
@@ -5095,6 +5145,12 @@ const App: React.FC = () => {
             reviewRoundStatus={liveReviewRoundStatus}
             contextHandoffHighPercent={contextHandoffHighPercent}
             onSelect={handleSelectMessage}
+          />
+        )}
+        {liveMessageReview && (
+          <LivePaneLimitationsNotice
+            agentLabel={selectedLivePaneAgentLabel}
+            limitations={selectedLivePaneLimitations}
           />
         )}
         {(liveMessageReview || planReview) && (() => {
@@ -5626,6 +5682,11 @@ const App: React.FC = () => {
                     } : undefined}
                     onRunLivePiCommand={async (command, args) => {
                       if (!selectedLiveMessage?.paneId) throw new Error('Select a live Pi pane first.');
+                      // A pane whose agent advertises no commands lists none, so
+                      // this is only reachable by a stale palette — answer with
+                      // the registry's reason rather than a generic failure.
+                      const unsupported = livePaneCapabilityReason(selectedLiveMessage.agent, 'commands');
+                      if (unsupported) throw new Error(unsupported);
                       const response = await fetch('/api/command', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },

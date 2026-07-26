@@ -16,6 +16,14 @@ import {
 import type { WorkspaceStatusPayload } from "../../packages/core/workspace-status-types";
 import { LIVE_MESSAGE_RETENTION } from "../../packages/core/live-message-window";
 import {
+  livePaneAgentProfile,
+  livePaneCapabilityReason,
+  livePaneLimitations,
+  supportsLivePaneCapability,
+  type LivePaneCapabilityId,
+} from "../../packages/core/live-pane-agents";
+import { readClaudeLiveSession } from "./claude-live-session";
+import {
   filterWorkspaceStatusForDirectory,
   getWorkspaceStatusForDirectory,
   parseGitNumstat,
@@ -155,6 +163,12 @@ type HerdrReviewSnapshot = {
     paneDescription: string;
     /** Herdr tab name for this pane; distinguishes panes sharing one workspace. */
     paneTab?: string;
+    /**
+     * Herdr's agent kind for this pane (`pi`, `claude`, …). The browser resolves
+     * it against the shared capability registry to name, per capability, what
+     * this pane cannot do — rather than rendering a rich pane that does nothing.
+     */
+    agent: string;
     /** Herdr's authoritative live state for the pane containing this response. */
     agentStatus: HerdrPanel["status"];
     /** Herdr's authoritative workspace root for the pane containing this response. */
@@ -190,6 +204,13 @@ type HerdrReviewSnapshot = {
 
 export type HerdrPanel = {
   id: string;
+  /**
+   * The agent kind Herdr reports for this pane (`pi`, `claude`, `codex`,
+   * `opencode`, or anything a future Herdr learns to report). Discovery never
+   * branches on this value; it is carried so the capability registry in
+   * `@plannotator/core/live-pane-agents` can say what this pane can do.
+   */
+  agent: string;
   workspaceId?: string;
   tabId?: string;
   workspace: string;
@@ -199,6 +220,13 @@ export type HerdrPanel = {
   status: "working" | "idle" | "blocked" | "unknown";
   focused: boolean;
   gitBranch?: string;
+  /**
+   * Set only when a pane that COULD have had a disk-sourced transcript did not
+   * get one for a reason specific to this machine's current state (rather than
+   * to its agent kind). Rendered verbatim in the waiting document so the pane is
+   * never silently blank.
+   */
+  transcriptNote?: string;
 };
 
 export type HerdrCommandCapability = {
@@ -438,6 +466,12 @@ function evaluateContextHandoffs(
     if (!livePaneIds.has(paneId)) contextHandoffStates.delete(paneId);
   }
   for (const panel of panels) {
+    // A kind that cannot report context usage can never cross a threshold, and
+    // must never be shown a warning it has no way to have earned.
+    if (!supportsLivePaneCapability(panel.agent, "contextUsage")) {
+      contextHandoffStates.delete(panel.id);
+      continue;
+    }
     const registration = enrichments.get(panel.id);
     const percent = registration?.contextUsage?.percent ?? null;
     const prev = contextHandoffStates.get(panel.id) ?? INITIAL_CONTEXT_HANDOFF_STATE;
@@ -730,6 +764,64 @@ async function enrichPanelSessionMetadata(enrichments: ReadonlyMap<string, Panel
   return result;
 }
 
+/**
+ * Result of trying to source one pane's transcript from disk: either the rows,
+ * or a machine-specific note explaining why there are none.
+ */
+export type DiskTranscriptOutcome =
+  | { paneId: string; enrichment: PanelSessionEnrichment }
+  | { paneId: string; note: string };
+
+/**
+ * Build transcript-only enrichments for live panes whose agent kind sources its
+ * transcript from a session log on disk instead of from an extension
+ * registration (see `transcriptSource` in the capability registry).
+ *
+ * These enrichments carry ONLY `messages` plus a session id and an empty
+ * command list. Everything the Pi extension would otherwise contribute —
+ * context usage, model, activity, activity trail, token totals, commands —
+ * stays deliberately absent, so those surfaces render as missing rather than as
+ * zeroed-out. A pane that already has an extension registration is never
+ * touched, which is what keeps Pi behaviour identical.
+ *
+ * Two live panes sharing one working directory are an unresolvable ambiguity:
+ * the newest log in that project directory belongs to one of them and we cannot
+ * tell which. Attributing it to both would show one agent's words under the
+ * other's name, so both are left without a transcript and given a note saying
+ * exactly that.
+ */
+export async function diskTranscriptOutcomes(
+  panels: ReadonlyArray<HerdrPanel>,
+  registered: ReadonlyMap<string, PanelSessionEnrichment>,
+  limit: number,
+  readTranscript: (cwd: string, limit: number) => Promise<{ sessionId: string; messages: PanelSessionEnrichment["messages"] } | null> = readClaudeLiveSession,
+): Promise<DiskTranscriptOutcome[]> {
+  const candidates = panels.filter(
+    (panel) =>
+      !registered.has(panel.id) &&
+      livePaneAgentProfile(panel.agent).transcriptSource === "claude-session-log",
+  );
+  const panesPerCwd = new Map<string, number>();
+  for (const panel of candidates) {
+    const key = resolve(panel.cwd);
+    panesPerCwd.set(key, (panesPerCwd.get(key) ?? 0) + 1);
+  }
+  return (await Promise.all(candidates.map(async (panel): Promise<DiskTranscriptOutcome | null> => {
+    if ((panesPerCwd.get(resolve(panel.cwd)) ?? 0) > 1) {
+      return {
+        paneId: panel.id,
+        note: `Two or more live panes share this working directory, so Plannotator cannot tell which ${livePaneAgentProfile(panel.agent).label} session log belongs to this one.`,
+      };
+    }
+    const session = await readTranscript(panel.cwd, limit);
+    if (!session) return null;
+    return {
+      paneId: panel.id,
+      enrichment: { paneId: panel.id, sessionId: session.sessionId, messages: session.messages, commands: [] },
+    };
+  }))).flatMap((outcome) => (outcome ? [outcome] : []));
+}
+
 function normalizeActivity(value: unknown): HerdrActivity | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const activity = value as Record<string, unknown>;
@@ -855,7 +947,14 @@ async function serveImage(response: ServerResponse, url: URL): Promise<void> {
 }
 
 function status(value: unknown): HerdrPanel["status"] {
-  return value === "working" || value === "idle" || value === "blocked" ? value : "unknown";
+  if (value === "working" || value === "idle" || value === "blocked") return value;
+  // Herdr's Claude Code integration reports a terminal "done" state that has no
+  // counterpart in Pi's vocabulary. It means the turn finished and the agent is
+  // waiting on the user, which is exactly this UI's "idle" — mapping it to
+  // "unknown" would render a perfectly well-understood pane as a mystery. Pi
+  // never emits it, so Pi panes are unaffected.
+  if (value === "done") return "idle";
+  return "unknown";
 }
 
 function resourceLabels(resources: unknown, idKey: "workspace_id" | "tab_id"): Map<string, string> {
@@ -871,7 +970,21 @@ function resourceLabels(resources: unknown, idKey: "workspace_id" | "tab_id"): M
   return labels;
 }
 
-/** The one discovery seam: normalize Herdr's authoritative live snapshot. */
+/**
+ * The one discovery seam: normalize Herdr's authoritative live snapshot.
+ *
+ * This function is deliberately agent-kind-agnostic. An entry becomes a live
+ * pane when the snapshot gives us the three things every downstream surface
+ * needs — a pane id, a working directory, and a declared agent kind — and for
+ * no other reason. It used to require `agent === "pi"`, which silently dropped
+ * every Claude Code, Codex and OpenCode pane on the machine.
+ *
+ * Do NOT reintroduce a name check here, not even a list of the four kinds we
+ * currently know about. What a kind can actually deliver is decided by the
+ * capability registry (`@plannotator/core/live-pane-agents`), which degrades an
+ * unrecognised kind honestly; a fifth agent kind must never require an edit to
+ * this function.
+ */
 export function panelsFromSnapshot(snapshot: HerdrSnapshot): HerdrPanel[] {
   const workspaceLabels = resourceLabels(snapshot.workspaces, "workspace_id");
   const tabLabels = resourceLabels(snapshot.tabs, "tab_id");
@@ -880,14 +993,15 @@ export function panelsFromSnapshot(snapshot: HerdrSnapshot): HerdrPanel[] {
   return snapshot.agents.flatMap((entry) => {
     if (!entry || typeof entry !== "object") return [];
     const agent = entry as HerdrAgent;
-    if (agent.agent !== "pi") return [];
+    const agentKind = text(agent.agent)?.toLowerCase();
     const paneId = text(agent.pane_id);
     const cwd = text(agent.foreground_cwd) ?? text(agent.cwd);
-    if (!paneId || !cwd) return [];
+    if (!agentKind || !paneId || !cwd) return [];
     const workspaceId = text(agent.workspace_id);
     const tabId = text(agent.tab_id);
     return [{
       id: paneId,
+      agent: agentKind,
       workspaceId: workspaceId ?? "",
       tabId: tabId ?? "",
       workspace: workspaceId ? workspaceLabels.get(workspaceId) ?? workspaceId : basename(cwd),
@@ -960,13 +1074,36 @@ function formattedWorkingDirectory(cwd: string): string {
   return `<div style="font-family: monospace; font-size: 0.85em; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; background: rgba(120,120,120,0.08); border: 1px solid rgba(120,120,120,0.2); padding: 6px 10px; border-radius: 6px; margin-top: 4px; user-select: all;" title="Working directory — select to copy: ${escapedCwd}">${escapedCwd}</div>`;
 }
 
+/**
+ * The document shown for a live pane that has no transcript row yet.
+ *
+ * It must never imply a transcript is on its way when this agent kind can
+ * never produce one. A kind whose `transcript` capability is unsupported is
+ * told so by name, with the reason and the full list of what else this pane
+ * cannot do, so an empty pane is legibly empty rather than mysteriously empty.
+ */
 function waitingDocument(panel: HerdrPanel): string {
+  const profile = livePaneAgentProfile(panel.agent);
+  const transcriptReason = profile.unsupported.transcript;
+  const limitations = livePaneLimitations(panel.agent);
   return [
     `# ${panel.workspace}`,
     panel.tab ? `## ${panel.tab} · ${panel.panel}` : `## ${panel.panel}`,
     "",
-    "Waiting for the Pi session to publish its latest assistant response.",
+    transcriptReason
+      ? `> [!WARNING]\n> **No transcript for ${profile.label} panes.** ${transcriptReason}`
+      : panel.transcriptNote
+        ? `> [!WARNING]\n> **No transcript for this pane.** ${panel.transcriptNote}`
+        : `Waiting for the ${profile.label} session to publish its latest assistant response.`,
     "",
+    ...(limitations.length > 0
+      ? [
+          `**What this ${profile.label} pane cannot do here:**`,
+          "",
+          ...limitations.map((limitation) => `- **${limitation.label}** — ${limitation.reason}`),
+          "",
+        ]
+      : []),
     "**Working directory:**",
     formattedWorkingDirectory(panel.cwd),
   ].join("\n");
@@ -978,16 +1115,17 @@ function documentId(panelId: string, messageId: string): string {
 
 
 function overviewDocument(panels: HerdrPanel[]): string {
-  if (panels.length === 0) return "# Herdr workspaces\n\nNo live Pi panels found.";
+  if (panels.length === 0) return "# Herdr workspaces\n\nNo live agent panels found.";
   return [
     "# Herdr workspaces",
     "",
-    "Live Pi panels discovered from Herdr. Open **Messages** in the existing sidebar to select a panel.",
+    "Live agent panels discovered from Herdr. Open **Messages** in the existing sidebar to select a panel.",
     "",
     ...panels.flatMap((panel) => {
+      const profile = livePaneAgentProfile(panel.agent);
       return [
         `## ${panel.workspace}`,
-        `${panel.tab ? `**Tab:** ${panel.tab} · ` : ""}**Panel:** ${panel.panel} · **Status:** ${panel.status}`,
+        `${panel.tab ? `**Tab:** ${panel.tab} · ` : ""}**Panel:** ${panel.panel} · **Agent:** ${profile.label} · **Status:** ${panel.status}`,
         formattedWorkingDirectory(panel.cwd),
         "",
       ];
@@ -1084,6 +1222,29 @@ export function feedbackBatch(
   };
 }
 
+/**
+ * Refuse an action this pane's agent kind cannot perform, answering with the
+ * capability registry's own user-facing reason.
+ *
+ * Without this, every write path falls through to a Pi-shaped error ("the
+ * selected Pi session is no longer registered"), which reads as a transient
+ * fault on a pane that in fact can never support the action. Returns true when
+ * the request has already been answered.
+ */
+async function refusedUnsupportedCapability(
+  response: ServerResponse,
+  paneId: string | null,
+  capability: LivePaneCapabilityId,
+): Promise<boolean> {
+  if (!paneId) return false;
+  const panel = (await cachedPanels()).find((candidate) => candidate.id === paneId);
+  if (!panel) return false;
+  const reason = livePaneCapabilityReason(panel.agent, capability);
+  if (!reason) return false;
+  writeJson(response, 409, { error: reason, agent: panel.agent, capability });
+  return true;
+}
+
 async function queueFeedback(request: IncomingMessage, response: ServerResponse): Promise<void> {
   if (!canWriteFeedback(request)) {
     writeJson(response, 403, { error: "Feedback delivery requires a loopback browser or PLANNOTATOR_HERDR_WRITE_TOKEN." });
@@ -1096,6 +1257,7 @@ async function queueFeedback(request: IncomingMessage, response: ServerResponse)
     writeJson(response, 400, { error: "Feedback must annotate one or more structured responses from one live Pi pane" });
     return;
   }
+  if (await refusedUnsupportedCapability(response, prepared.paneId, "feedback")) return;
   const registration = panelSessions.get(prepared.paneId);
   if (!registration) {
     writeJson(response, 409, { error: "The selected Pi session is no longer registered" });
@@ -1182,6 +1344,7 @@ async function queueInstruction(request: IncomingMessage, response: ServerRespon
     writeJson(response, 400, { error: "A message and one live Pi pane are required" });
     return;
   }
+  if (await refusedUnsupportedCapability(response, prepared.paneId, "feedback")) return;
   const requestedSessionId = text(body?.sessionId);
   const registration = panelSessions.get(prepared.paneId);
   if (!registration || (requestedSessionId && registration.sessionId !== requestedSessionId)) {
@@ -1220,8 +1383,10 @@ async function queueCommand(request: IncomingMessage, response: ServerResponse):
     writeJson(response, 403, { error: "Running a Pi command requires a loopback browser or PLANNOTATOR_HERDR_WRITE_TOKEN." });
     return;
   }
+  const body = await requestJson(request);
+  if (await refusedUnsupportedCapability(response, text(body?.paneId), "commands")) return;
   const { panels } = await reviewSnapshot();
-  const prepared = commandDelivery(await requestJson(request), panels, panelSessions);
+  const prepared = commandDelivery(body, panels, panelSessions);
   if (!prepared) {
     writeJson(response, 400, { error: "A supported Pi command and one live pane session are required" });
     return;
@@ -1640,6 +1805,7 @@ export function reviewSnapshotFromPanels(
         paneLabel,
         paneDescription,
         ...(paneTab ? { paneTab } : {}),
+        agent: panel.agent,
         agentStatus: panel.status,
         cwd: panel.cwd,
         workspaceId: panel.workspaceId,
@@ -1665,10 +1831,11 @@ export function reviewSnapshotFromPanels(
       text: response.text,
       ...(response.timestamp ? { timestamp: response.timestamp } : {}),
       label: `Response ${index + 1}${index === 0 ? " · latest" : ""}`,
-      description: "Structured Pi assistant response",
+      description: `${livePaneAgentProfile(panel.agent).label} assistant response`,
       paneLabel,
       paneDescription,
       ...(paneTab ? { paneTab } : {}),
+      agent: panel.agent,
       agentStatus: panel.status,
       cwd: panel.cwd,
       workspaceId: panel.workspaceId,
@@ -2138,20 +2305,36 @@ async function readLiveState(): Promise<HerdrLiveState> {
       }
     }
   }
-  const [panelsWithGitBranches, enrichedSessions] = await Promise.all([
+  const [panelsWithGitBranches, registeredSessions, transcriptOutcomes] = await Promise.all([
     Promise.all(panels.map(async (panel) => {
       const branch = await gitBranch(panel.cwd);
       return { ...panel, ...(branch ? { gitBranch: branch } : {}) };
     })),
     enrichPanelSessionMetadata(panelSessions),
+    // Disk-sourced transcripts for panes with no extension registration (today:
+    // Claude Code). Deliberately computed from `panelSessions`, not from the
+    // Pi-enriched map, and merged after it, so no Pi pane can be affected.
+    diskTranscriptOutcomes(panels, panelSessions, HERDR_LIVE_MESSAGE_LIMIT),
   ]);
+  const enrichedSessions = new Map(registeredSessions);
+  const transcriptNotes = new Map<string, string>();
+  for (const outcome of transcriptOutcomes) {
+    if ("enrichment" in outcome) enrichedSessions.set(outcome.paneId, outcome.enrichment);
+    else transcriptNotes.set(outcome.paneId, outcome.note);
+  }
+  const livePanels = transcriptNotes.size === 0
+    ? panelsWithGitBranches
+    : panelsWithGitBranches.map((panel) => {
+        const note = transcriptNotes.get(panel.id);
+        return note ? { ...panel, transcriptNote: note } : panel;
+      });
   // Advance the per-pane context-handoff detector on this same tick (no extra
   // poll loop) and publish any resulting warnings into the snapshot.
-  const handoffs = evaluateContextHandoffs(panelsWithGitBranches, enrichedSessions);
+  const handoffs = evaluateContextHandoffs(livePanels, enrichedSessions);
   return {
-    panels: panelsWithGitBranches,
+    panels: livePanels,
     snapshot: reviewSnapshotFromPanels(
-      panelsWithGitBranches,
+      livePanels,
       null,
       enrichedSessions,
       handoffs,
@@ -2685,6 +2868,11 @@ async function openGitChangesReview(request: IncomingMessage, response: ServerRe
     writeJson(response, 403, { error: "Directory is not a currently live Herdr Pi workspace" });
     return;
   }
+  // A git-changes review exists to send review feedback back into the session,
+  // so it is gated on the same capability. Opening a read-only diff whose
+  // "Send feedback" could never land is exactly the empty-but-looks-alive
+  // outcome this must avoid.
+  if (await refusedUnsupportedCapability(response, paneId, "feedback")) return;
   const registration = panelSessions.get(paneId);
   if (!registration) {
     writeJson(response, 409, { error: "The selected Pi pane has not published a live session" });
@@ -2900,6 +3088,7 @@ async function serveExAICompanion(response: ServerResponse, url: URL): Promise<v
     writeJson(response, 400, { error: "paneId and sessionId are required" });
     return;
   }
+  if (await refusedUnsupportedCapability(response, paneId, "exAICompanion")) return;
   await Promise.all([exAICompanions.reconcile(), ensureHerdrPiModels()]);
   const state = await exAICompanions.state({ paneId, sessionId });
   writeJson(response, 200, {
@@ -2926,6 +3115,7 @@ async function mutateExAICompanion(request: IncomingMessage, response: ServerRes
     writeJson(response, 400, { error: "paneId and sessionId are required" });
     return;
   }
+  if (await refusedUnsupportedCapability(response, paneId, "exAICompanion")) return;
   const main = { paneId, sessionId };
   if (action === "start") {
     const model = text(body?.model);
