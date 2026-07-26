@@ -174,12 +174,13 @@ import { LivePaneLimitationsNotice } from './LivePaneLimitationsNotice';
 import {
   livePaneAgentLabel,
   livePaneCapabilityReason,
+  livePaneComposerCaveat,
   livePaneLimitations,
   supportsLivePaneCapability,
   type LivePaneLimitation,
 } from '@plannotator/core/live-pane-agents';
 import { repoInfoForDocument } from './documentRepoInfo';
-import { submitLiveResponseFeedback } from './liveResponseFeedback';
+import { describeLiveDelivery, submitLiveResponseFeedback, type LiveDeliveryReceipt } from './liveResponseFeedback';
 
 type NoteAutoSaveResults = {
   obsidian?: boolean;
@@ -3593,6 +3594,7 @@ const App: React.FC = () => {
           const body = await response.json().catch(() => ({})) as { error?: string };
           throw new Error(body.error || 'Failed to send message to Pi');
         }
+        const receipt = await response.json().catch(() => ({})) as LiveDeliveryReceipt;
         setFollowNextPaneResponse({ paneId: selectedLiveMessage.paneId, latestMessageId: selectedLiveMessage.messageId });
         // Echo the sent text locally so the transcript reads two-sided. This is
         // the browser's own record: the host destroys the pending instruction on
@@ -3607,7 +3609,14 @@ const App: React.FC = () => {
           }));
         }
         dismissDraft();
-        toast('Message sent to Pi', { description: 'Waiting for its response.' });
+        // A composer-delivered send must be described as what it was — typed
+        // and turn-confirmed (or not) — never as extension-grade delivery.
+        const composerToast = describeLiveDelivery(receipt, selectedLivePaneAgentLabel, 'message');
+        if (composerToast) {
+          (composerToast.warning ? toast.warning : toast)(composerToast.title, { description: composerToast.description });
+        } else {
+          toast('Message sent to Pi', { description: 'Waiting for its response.' });
+        }
         setIsSubmitting(false);
         return;
       }
@@ -3670,8 +3679,9 @@ const App: React.FC = () => {
         ...(scopedSelectedMessageId ? { selectedMessageId: scopedSelectedMessageId } : {}),
         ...(messageMultiSelectMode && annotatedMessageIds.length > 1 ? { feedbackScope: 'messages' as const } : {}),
       };
+      let liveDeliveryReceipt: LiveDeliveryReceipt = {};
       if (liveMessageReview && scopedSelectedMessageId) {
-        await submitLiveResponseFeedback({ ...feedbackPayload, selectedMessageId: scopedSelectedMessageId });
+        liveDeliveryReceipt = await submitLiveResponseFeedback({ ...feedbackPayload, selectedMessageId: scopedSelectedMessageId });
       } else {
         const res = await fetch('/api/feedback', {
           method: 'POST',
@@ -3693,7 +3703,12 @@ const App: React.FC = () => {
         }
         clearSelectedLiveFeedback();
         dismissDraft();
-        toast('Feedback sent', { description: 'The selected response is clear for the next review.' });
+        const composerToast = describeLiveDelivery(liveDeliveryReceipt, selectedLivePaneAgentLabel, 'feedback');
+        if (composerToast) {
+          (composerToast.warning ? toast.warning : toast)(composerToast.title, { description: composerToast.description });
+        } else {
+          toast('Feedback sent', { description: 'The selected response is clear for the next review.' });
+        }
         setIsSubmitting(false);
         return;
       }
@@ -3736,6 +3751,7 @@ const App: React.FC = () => {
         const body = await response.json().catch(() => ({})) as { error?: string };
         throw new Error(body.error || 'Failed to send message to Pi');
       }
+      const receipt = await response.json().catch(() => ({})) as LiveDeliveryReceipt;
       setFollowNextPaneResponse({ paneId: selectedLiveMessage.paneId, latestMessageId: selectedLiveMessage.messageId });
       // Echo the sent text locally, exactly as the assembled-feedback path does.
       if (selectedLiveMessage.piSessionId) {
@@ -3747,7 +3763,12 @@ const App: React.FC = () => {
         }));
       }
       dismissDraft();
-      toast('Message sent to Pi', { description: 'Waiting for its response.' });
+      const composerToast = describeLiveDelivery(receipt, livePaneAgentLabel(selectedLiveMessage.agent), 'message');
+      if (composerToast) {
+        (composerToast.warning ? toast.warning : toast)(composerToast.title, { description: composerToast.description });
+      } else {
+        toast('Message sent to Pi', { description: 'Waiting for its response.' });
+      }
       return true;
     } catch (error) {
       toast.error('Feedback delivery failed', {
@@ -5151,6 +5172,7 @@ const App: React.FC = () => {
           <LivePaneLimitationsNotice
             agentLabel={selectedLivePaneAgentLabel}
             limitations={selectedLivePaneLimitations}
+            composerDeliveryCaveat={livePaneComposerCaveat(selectedLivePaneAgent)}
           />
         )}
         {(liveMessageReview || planReview) && (() => {

@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from 'bun:test';
-import { submitLiveResponseFeedback } from './liveResponseFeedback';
+import { describeLiveDelivery, submitLiveResponseFeedback } from './liveResponseFeedback';
 
 const payload = {
   draftGeneration: 7,
@@ -35,5 +35,40 @@ describe('structured live response feedback transport', () => {
 
     expect(submitLiveResponseFeedback(payload, fetcher)).rejects.toThrow('Pi did not accept feedback');
     expect(payload).toEqual(before);
+  });
+
+  test('returns the host delivery receipt so the UI can describe the mechanism honestly', async () => {
+    const fetcher = mock(async () => new Response(
+      JSON.stringify({ ok: true, mechanism: 'herdr-composer', confirmed: true }),
+      { status: 202, headers: { 'Content-Type': 'application/json' } },
+    )) as unknown as typeof fetch;
+    expect(await submitLiveResponseFeedback(payload, fetcher)).toMatchObject({ mechanism: 'herdr-composer', confirmed: true });
+  });
+});
+
+describe('describeLiveDelivery', () => {
+  test('extension deliveries keep their existing messaging', () => {
+    expect(describeLiveDelivery({}, 'Pi', 'message')).toBeNull();
+    expect(describeLiveDelivery({ mechanism: 'pi-extension' }, 'Pi', 'feedback')).toBeNull();
+  });
+
+  test('a confirmed composer delivery says typed-and-turn-started, not extension delivery', () => {
+    const toastCopy = describeLiveDelivery({ mechanism: 'herdr-composer', confirmed: true }, 'Claude Code', 'message');
+    expect(toastCopy).toEqual({
+      title: 'Message typed into the Claude Code pane',
+      description: 'Herdr confirmed the agent started a turn.',
+      warning: false,
+    });
+  });
+
+  test('an unconfirmed composer delivery warns with the host note and never claims success', () => {
+    const toastCopy = describeLiveDelivery(
+      { mechanism: 'herdr-composer', confirmed: false, note: 'Check the pane before sending again.' },
+      'Codex',
+      'feedback',
+    );
+    expect(toastCopy?.warning).toBe(true);
+    expect(toastCopy?.title).toBe('Feedback typed, but unconfirmed');
+    expect(toastCopy?.description).toBe('Check the pane before sending again.');
   });
 });

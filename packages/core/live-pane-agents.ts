@@ -51,6 +51,25 @@ export const LIVE_PANE_CAPABILITY_LABELS: Record<LivePaneCapabilityId, string> =
  */
 export type LivePaneTranscriptSource = "pi-extension" | "claude-session-log";
 
+/**
+ * How "Send feedback / message" reaches a kind. The two mechanisms are NOT
+ * equivalent, and the UI must never pretend they are:
+ *
+ * - `pi-extension`: the browser queues a batch for one live `{paneId,
+ *   sessionId}`; only the matching Pi extension inside the agent process claims
+ *   it (at-most-once) and injects it with `pi.sendUserMessage`. Structured,
+ *   session-exact, invalidated when the session changes or closes. Strictly
+ *   better where it applies — always preferred when an extension is present.
+ * - `herdr-composer`: the host types the text into the pane's composer through
+ *   Herdr and submits it with Enter. Delivery is confirmed only by Herdr's own
+ *   agent state observing a turn start; the host cannot prove which session is
+ *   active in the pane and refuses to send while the agent is mid-turn. Each
+ *   composer-delivered kind carries a user-facing caveat saying exactly this.
+ * - `null`: no mechanism — the pane is read-only here, with a reason in
+ *   `unsupported.feedback`.
+ */
+export type LivePaneFeedbackDeliveryMechanism = "pi-extension" | "herdr-composer";
+
 export type LivePaneAgentProfile = {
   /** Raw agent kind exactly as Herdr reports it. */
   agent: string;
@@ -58,6 +77,20 @@ export type LivePaneAgentProfile = {
   label: string;
   /** How the host sources this kind's transcript, or null when it cannot. */
   transcriptSource: LivePaneTranscriptSource | null;
+  /**
+   * How sends reach this kind, or null when they cannot. Exactly one of these
+   * holds: `feedbackDelivery` is null and `unsupported.feedback` names why the
+   * pane is read-only, or `feedbackDelivery` is set and `feedback` is absent
+   * from `unsupported`. `herdr-composer` additionally requires
+   * {@link composerDeliveryCaveat}.
+   */
+  feedbackDelivery: LivePaneFeedbackDeliveryMechanism | null;
+  /**
+   * User-facing caveat for `herdr-composer` delivery, rendered wherever sending
+   * is offered so the weaker guarantees are visible before the user relies on
+   * them. Present exactly when `feedbackDelivery` is `herdr-composer`.
+   */
+  composerDeliveryCaveat?: string;
   /**
    * Capability → user-facing reason it is unavailable for this kind. A
    * capability absent from this map is supported. Reasons are shown verbatim in
@@ -79,20 +112,32 @@ const NO_EXTENSION_COMMANDS =
   "does not advertise its slash commands to Plannotator, so there is nothing to run from here.";
 const NO_EXTENSION_HANDOFF =
   "advertises no handoff-class command, so Plannotator has nothing to fire.";
-const NO_EXTENSION_FEEDBACK =
-  "has no Plannotator extension to claim and inject feedback, so this pane is read-only here.";
 const NO_EXTENSION_EX_AI =
   "cannot be paired: Ex AI Chat drives a companion Pi session bound to a Pi pane.";
 
-/** Compose the shared "only Pi does this" reasons for a named kind. */
+/**
+ * Compose the shared "only Pi does this" reasons for a named kind. Deliberately
+ * does NOT include `feedback`: the named kinds below all receive sends through
+ * Herdr composer delivery, whose weaker guarantees are stated in
+ * {@link composerDeliveryCaveat} instead of an unsupported reason.
+ */
 function extensionGapReasons(label: string): Partial<Record<LivePaneCapabilityId, string>> {
   return {
     activityTrail: `${label} ${NO_EXTENSION_ACTIVITY}`,
     commands: `${label} ${NO_EXTENSION_COMMANDS}`,
     handoff: `${label} ${NO_EXTENSION_HANDOFF}`,
-    feedback: `${label} ${NO_EXTENSION_FEEDBACK}`,
     exAICompanion: `${label} ${NO_EXTENSION_EX_AI}`,
   };
+}
+
+/**
+ * The honest, user-facing description of Herdr composer delivery for a named
+ * kind. Every claim here must be one this path actually honours: it types once,
+ * submits with Enter, confirms only by watching the agent start a turn, refuses
+ * while the agent is busy, and cannot verify the pane's active session.
+ */
+function composerDeliveryCaveat(label: string): string {
+  return `${label} has no Plannotator extension, so sends are typed into the pane's composer through Herdr and submitted with Enter. Delivery is confirmed only by watching the agent start a turn — Plannotator cannot verify which session is active in the pane, and it refuses to send while the agent is busy.`;
 }
 
 /**
@@ -107,6 +152,7 @@ const LIVE_PANE_AGENT_PROFILES: Record<string, LivePaneAgentProfile> = {
     agent: "pi",
     label: "Pi",
     transcriptSource: "pi-extension",
+    feedbackDelivery: "pi-extension",
     unsupported: {},
   },
   claude: {
@@ -116,6 +162,8 @@ const LIVE_PANE_AGENT_PROFILES: Record<string, LivePaneAgentProfile> = {
     // knows how to read (apps/hook/server/session-log.ts). That is the whole
     // transcript, read-only.
     transcriptSource: "claude-session-log",
+    feedbackDelivery: "herdr-composer",
+    composerDeliveryCaveat: composerDeliveryCaveat("Claude Code"),
     unsupported: {
       ...extensionGapReasons("Claude Code"),
       contextUsage:
@@ -129,6 +177,8 @@ const LIVE_PANE_AGENT_PROFILES: Record<string, LivePaneAgentProfile> = {
     // but only once it knows WHICH rollout: resolution is by CODEX_THREAD_ID,
     // which Herdr's snapshot does not carry. A cwd → rollout resolver would close this.
     transcriptSource: null,
+    feedbackDelivery: "herdr-composer",
+    composerDeliveryCaveat: composerDeliveryCaveat("Codex"),
     unsupported: {
       ...extensionGapReasons("Codex"),
       transcript:
@@ -144,6 +194,8 @@ const LIVE_PANE_AGENT_PROFILES: Record<string, LivePaneAgentProfile> = {
     // inside the agent process. Nothing in this repo reads OpenCode sessions
     // from disk, so a detached host has no transcript source at all.
     transcriptSource: null,
+    feedbackDelivery: "herdr-composer",
+    composerDeliveryCaveat: composerDeliveryCaveat("OpenCode"),
     unsupported: {
       ...extensionGapReasons("OpenCode"),
       transcript:
@@ -173,6 +225,11 @@ export function unknownLivePaneAgentProfile(agent: string): LivePaneAgentProfile
     agent,
     label,
     transcriptSource: null,
+    // Herdr could type into an unknown kind's composer too, but nothing here
+    // knows that kind's composer behaviour (completion popups, submit keys,
+    // busy semantics), so an unlisted kind claims no delivery at all. Adding a
+    // profile entry above is the deliberate act that turns delivery on.
+    feedbackDelivery: null,
     unsupported: {
       transcript: noIntegration,
       activityTrail: noIntegration,
@@ -226,4 +283,25 @@ export function livePaneLimitations(agent: string | undefined | null): LivePaneL
 /** Display label for a Herdr agent kind. */
 export function livePaneAgentLabel(agent: string | undefined | null): string {
   return livePaneAgentProfile(agent).label;
+}
+
+/**
+ * How sends reach this agent kind, or null when they cannot. The host selects
+ * its delivery path from this — never from the kind's name — so a new kind
+ * gains delivery by declaring it in its profile, with no discovery change.
+ */
+export function livePaneFeedbackDelivery(
+  agent: string | undefined | null,
+): LivePaneFeedbackDeliveryMechanism | null {
+  return livePaneAgentProfile(agent).feedbackDelivery;
+}
+
+/**
+ * The user-facing caveat for Herdr composer delivery, or null for kinds that
+ * deliver through an extension (nothing to caveat) or not at all (the reason
+ * lives in `unsupported.feedback` instead).
+ */
+export function livePaneComposerCaveat(agent: string | undefined | null): string | null {
+  const profile = livePaneAgentProfile(agent);
+  return profile.feedbackDelivery === "herdr-composer" ? profile.composerDeliveryCaveat ?? null : null;
 }

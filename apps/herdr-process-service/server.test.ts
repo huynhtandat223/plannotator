@@ -1349,10 +1349,16 @@ describe("live panes that are not Pi", () => {
     // Never "waiting for the Pi session": a Claude pane has no Pi session and
     // never will, so the empty state must name what is actually absent.
     expect(message.text).not.toContain("Waiting for the Pi session");
-    expect(message.text).toContain("Send feedback");
     expect(message.text).toContain("Activity trail");
     expect(message.text).toContain("Context usage");
     expect(message.text).toContain("Ex AI Chat");
+    // Sends work for Claude panes via Herdr composer delivery, so feedback is
+    // no longer listed as missing — instead the honest caveat about typed
+    // delivery must appear.
+    expect(message.text).not.toContain("Send feedback**");
+    expect(message.text).toContain("Send feedback / message");
+    expect(message.text).toContain("typed into the pane's composer");
+    expect(message.text).toContain("cannot verify which session");
   });
 
   test("a Codex pane names its missing transcript rather than implying one is coming", () => {

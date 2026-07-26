@@ -4,6 +4,8 @@ import {
   livePaneAgentLabel,
   livePaneAgentProfile,
   livePaneCapabilityReason,
+  livePaneComposerCaveat,
+  livePaneFeedbackDelivery,
   livePaneLimitations,
   supportsLivePaneCapability,
 } from "./live-pane-agents";
@@ -26,9 +28,32 @@ describe("livePaneAgentProfile", () => {
       "commands",
       "contextUsage",
       "exAICompanion",
-      "feedback",
       "handoff",
     ]);
+  });
+
+  test("Pi keeps extension delivery; extensionless kinds declare composer delivery with an honest caveat", () => {
+    expect(livePaneFeedbackDelivery("pi")).toBe("pi-extension");
+    expect(livePaneComposerCaveat("pi")).toBeNull();
+    for (const agent of ["claude", "codex", "opencode"]) {
+      expect(livePaneFeedbackDelivery(agent)).toBe("herdr-composer");
+      expect(supportsLivePaneCapability(agent, "feedback")).toBe(true);
+      expect(livePaneCapabilityReason(agent, "feedback")).toBeNull();
+      const caveat = livePaneComposerCaveat(agent);
+      // The caveat must state exactly the guarantees this path honours: typed
+      // composer delivery, turn-start confirmation, no session verification,
+      // and refusal while busy. It is rendered verbatim in the UI.
+      expect(caveat).toContain("typed into the pane's composer");
+      expect(caveat).toContain("start a turn");
+      expect(caveat).toContain("cannot verify which session");
+      expect(caveat).toContain("refuses to send while the agent is busy");
+    }
+  });
+
+  test("an unknown agent kind declares no delivery mechanism and keeps its feedback refusal", () => {
+    expect(livePaneFeedbackDelivery("some-future-agent")).toBeNull();
+    expect(livePaneComposerCaveat("some-future-agent")).toBeNull();
+    expect(supportsLivePaneCapability("some-future-agent", "feedback")).toBe(false);
   });
 
   test("Codex and OpenCode cannot source a transcript, each for its own stated reason", () => {
