@@ -34,11 +34,27 @@ test('live feedback saves the current source before submitting all retained draf
     source.indexOf('const handleAnnotateApprove'),
   );
 
+  expect(callback).toContain('submitLiveResponseFeedback');
   expect(callback).toContain("fetch('/api/feedback'");
   expect(callback).toContain('selectedMessageId: scopedSelectedMessageId');
+  expect(callback).toContain('globalAttachments,');
   expect(callback).toContain('clearSelectedLiveFeedback()');
   expect(source).toContain('createEmptyMessageState(targetMessage)');
   expect(source).toContain('globalAttachments: state.linkedDocSession.root.globalAttachments');
   expect(source).toContain('linkedDocHook.restoreSession');
   expect(source).toContain('liveSnapshotMessagesRef.current = snapshot.messages');
+});
+
+test('direct live Send and image feedback have distinct eligibility and transports', () => {
+  const source = readFileSync(resolve(import.meta.dir, 'App.tsx'), 'utf8');
+  const directSend = source.slice(
+    source.indexOf('const handleSendGlobalComment'),
+    source.indexOf('const handleAnnotateApprove'),
+  );
+
+  expect(source).toContain('const canAttachSelectedLiveImageFeedback = liveMessageReview &&');
+  expect(source).toContain('Boolean(selectedLiveMessage?.assistantMessageId)');
+  expect(source).toContain('imageFeedbackTarget={selectedLiveImageFeedbackTarget}');
+  expect(directSend).toContain("fetch('/api/instruction'");
+  expect(directSend).not.toContain('globalAttachments');
 });

@@ -52,32 +52,34 @@ afterEach(async () => {
 });
 
 describe('CommentPopover global Send', () => {
-  test.skipIf(!hasDom)('global comments hide Ask AI and Send calls the delivery callback', async () => {
-    const calls: string[] = [];
+  test.skipIf(!hasDom)('direct Send message is explicitly text-only', async () => {
+    const calls: unknown[][] = [];
     await mount(
       <CommentPopover
         anchorRect={anchorRect}
         contextText=""
         isGlobal
-        onSubmit={() => { calls.push('submit'); }}
-        onSend={async (text) => { calls.push(text); return true; }}
-        onAskAI={() => { calls.push('ask-ai'); }}
+        onSubmit={() => { calls.push(['submit']); }}
+        onSendText={async (...args) => { calls.push(args); return true; }}
+        onAskAI={() => { calls.push(['ask-ai']); }}
         onClose={() => {}}
       />,
     );
 
     expect(button('Ask AI')).toBeNull();
     expect(button('Add')).toBeNull();
-    expect(button('Send')).not.toBeNull();
-    expect(button('Send')!.disabled).toBe(true);
+    expect(button('Send message')).not.toBeNull();
+    expect(button('Send message')!.disabled).toBe(true);
+    expect(document.querySelector('button[title="Attachments"]')).toBeNull();
+    expect(document.querySelector('textarea')?.getAttribute('placeholder')).toBe('Send a text message...');
 
     await typeInto(document.querySelector('textarea')!, 'Ship this directly');
-    expect(button('Send')!.disabled).toBe(false);
+    expect(button('Send message')!.disabled).toBe(false);
     await act(async () => {
-      button('Send')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      button('Send message')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
-    expect(calls).toEqual(['Ship this directly']);
+    expect(calls).toEqual([['Ship this directly']]);
   });
 
   test.skipIf(!hasDom)('accepted Send closes once, clears the keyed draft, and restores anchor focus', async () => {
@@ -93,7 +95,7 @@ describe('CommentPopover global Send', () => {
         isGlobal
         draftKey="live:pane-1:session-1"
         onSubmit={() => {}}
-        onSend={async () => true}
+        onSendText={async () => true}
         onClose={() => {
           closeCount += 1;
           root!.render(null);
@@ -103,8 +105,8 @@ describe('CommentPopover global Send', () => {
 
     await mount(renderPopover());
     await typeInto(document.querySelector('textarea')!, 'Ship this directly');
-    button('Send')!.focus();
-    await act(async () => button('Send')!.click());
+    button('Send message')!.focus();
+    await act(async () => button('Send message')!.click());
     await nextFrame();
 
     expect(closeCount).toBe(1);
@@ -115,11 +117,11 @@ describe('CommentPopover global Send', () => {
     expect((document.querySelector('textarea') as HTMLTextAreaElement).value).toBe('');
   });
 
-  for (const [label, onSend] of [
+  for (const [label, onSendText] of [
     ['false', async () => false],
     ['rejection', async () => { throw new Error('not accepted'); }],
   ] as const) {
-    test.skipIf(!hasDom)(`${label} keeps the keyed draft open and focuses the textarea`, async () => {
+    test.skipIf(!hasDom)(`${label} keeps the keyed text draft open and focuses the textarea`, async () => {
       let closeCount = 0;
       const anchor = document.createElement('button');
       anchor.textContent = 'Open Global Comment';
@@ -131,26 +133,19 @@ describe('CommentPopover global Send', () => {
           isGlobal
           draftKey={`live:pane-2:session-${label}`}
           onSubmit={() => {}}
-          onSend={onSend}
+          onSendText={onSendText}
           onClose={() => { closeCount += 1; }}
         />,
       );
 
       const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
       await typeInto(textarea, 'Keep this for retry');
-      await act(async () => document.querySelector<HTMLButtonElement>('button[title="Attachments"]')!.click());
-      const pathInput = document.querySelector<HTMLInputElement>('input[placeholder="Paste path or URL..."]')!;
-      await act(async () => {
-        const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(pathInput), 'value')?.set;
-        setter?.call(pathInput, '/tmp/retry-image.png');
-        pathInput.dispatchEvent(new Event('input', { bubbles: true }));
-      });
-      await act(async () => button('Add')!.click());
-      button('Send')!.focus();
+      expect(document.querySelector('button[title="Attachments"]')).toBeNull();
+      button('Send message')!.focus();
       const consoleError = label === 'rejection'
         ? spyOn(console, 'error').mockImplementation(() => {})
         : null;
-      await act(async () => button('Send')!.click());
+      await act(async () => button('Send message')!.click());
 
       expect(closeCount).toBe(0);
       if (consoleError) {
@@ -159,7 +154,6 @@ describe('CommentPopover global Send', () => {
       }
       expect(document.querySelector('[data-comment-popover="true"]')).not.toBeNull();
       expect(textarea.value).toBe('Keep this for retry');
-      expect(document.querySelector('img[alt="retry-image"]')).not.toBeNull();
       expect(document.activeElement).toBe(textarea);
     });
   }
@@ -171,14 +165,15 @@ describe('CommentPopover global Send', () => {
         contextText=""
         isGlobal
         onSubmit={() => {}}
-        onSend={() => true}
-        isSending
+        onSendText={() => true}
+        isSendingText
         onClose={() => {}}
       />,
     );
     await typeInto(document.querySelector('textarea')!, 'ready');
     expect(button('Sending...')).not.toBeNull();
     expect(button('Sending...')!.disabled).toBe(true);
+    expect(document.querySelector('button[title="Attachments"]')).toBeNull();
   });
 
   test.skipIf(!hasDom)('global comments without direct delivery still hide Ask AI and keep Add', async () => {

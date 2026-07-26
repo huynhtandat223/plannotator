@@ -65,7 +65,7 @@ afterEach(async () => {
 });
 
 // The live "Message Pi" composer only appears on a waiting document, so the
-// Viewer is mounted with isWaiting. That renames the global button to "Message
+// Viewer is mounted with directMessage. That renames the global button to "Message
 // Pi" and swaps the empty-state prompt in.
 const baseProps = {
   blocks,
@@ -76,7 +76,7 @@ const baseProps = {
   selectedAnnotationId: null,
   mode: 'comment' as const,
   taterMode: false,
-  isWaiting: true,
+  directMessage: true,
   // Host posture: no /api/doc/exists endpoint.
   disableCodePathValidation: true,
 };

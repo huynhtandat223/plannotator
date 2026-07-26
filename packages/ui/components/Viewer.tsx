@@ -119,7 +119,10 @@ interface ViewerProps {
    *  comment, attachments, checkbox toggles). Existing annotations still
    *  render and remain selectable. Default false — today's behavior. */
   readOnly?: boolean;
-  isWaiting?: boolean;
+  /** Selected live Pi pane accepts a direct text message. */
+  directMessage?: boolean;
+  /** Human-readable selected assistant response identity eligible for image feedback. */
+  imageFeedbackTarget?: string;
   /** Optional live Pi commands shown as explicit autocomplete in global comments. */
   livePiCommands?: Array<{ name: string; description?: string; source: 'extension' | 'prompt' | 'skill'; arguments?: string[] }>;
   onRunLivePiCommand?: (command: string, args: string) => Promise<void>;
@@ -133,10 +136,10 @@ interface ViewerProps {
    * draft — it never sends. Absent for non-live hosts, which keep today's behavior.
    */
   onRequestGlobalCommentOptions?: () => Promise<string[]>;
-  /** Optional one-click delivery for the global-comment composer. */
-  onSendGlobalComment?: (text: string, images?: ImageAttachment[]) => boolean | void | Promise<boolean | void>;
-  /** Whether a global-comment Send is currently in flight (disables the button). */
-  isSendingGlobalComment?: boolean;
+  /** Optional text-only delivery for the global-comment composer. */
+  onSendGlobalCommentText?: (text: string) => boolean | void | Promise<boolean | void>;
+  /** Whether a global-comment text delivery is currently in flight. */
+  isSendingGlobalCommentText?: boolean;
   /**
    * Opt-in draft key for the global-comment composer. When set, unsent text +
    * images survive a keyed Viewer remount (live panes remount by selected
@@ -226,13 +229,14 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   onAskAI,
   allowImages = true,
   readOnly = false,
-  isWaiting = false,
+  directMessage = false,
+  imageFeedbackTarget,
   livePiCommands = [],
   onRunLivePiCommand,
   onSearchFileMentions,
   onRequestGlobalCommentOptions,
-  onSendGlobalComment,
-  isSendingGlobalComment = false,
+  onSendGlobalCommentText,
+  isSendingGlobalCommentText = false,
   globalCommentDraftKey,
 }, ref) => {
   const [copied, setCopied] = useState(false);
@@ -346,7 +350,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     onSelectAnnotation,
     selectedAnnotationId,
     mode,
-    enabled: !readOnly && !isWaiting,
+    enabled: !readOnly && !directMessage,
   });
 
   // Refs for code block annotation path
@@ -675,15 +679,24 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             </button>
           )}
 
-          {/* Attachments button */}
-          {!readOnly && !isWaiting && onAddGlobalAttachment && onRemoveGlobalAttachment && (
-            <AttachmentsButton
-              images={globalAttachments}
-              onAdd={onAddGlobalAttachment}
-              onRemove={onRemoveGlobalAttachment}
-              variant="toolbar"
-              hideLabel={actionsLabelMode === 'icon'}
-            />
+          {/* Response-bound image feedback stays separate from direct text messages. */}
+          {!readOnly && (!directMessage || imageFeedbackTarget) && onAddGlobalAttachment && onRemoveGlobalAttachment && (
+            <div
+              title={directMessage ? 'Attach image feedback' : undefined}
+              aria-label={directMessage ? `Attach image feedback to ${imageFeedbackTarget}` : undefined}
+              data-image-feedback-transport="feedback-batch-only"
+            >
+              <AttachmentsButton
+                images={globalAttachments}
+                onAdd={onAddGlobalAttachment}
+                onRemove={onRemoveGlobalAttachment}
+                variant="toolbar"
+                hideLabel={directMessage ? false : actionsLabelMode === 'icon'}
+                label={directMessage ? 'Attach image feedback' : undefined}
+                ariaLabel={directMessage ? `Attach image feedback to ${imageFeedbackTarget}` : undefined}
+                feedbackTarget={directMessage ? imageFeedbackTarget : undefined}
+              />
+            </div>
           )}
 
           {/* <span className="md:hidden">Comment</span><span className="hidden md:inline">Global comment</span> button */}
@@ -698,17 +711,17 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               });
             }}
             className={`flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors ${
-              isWaiting
+              directMessage
                 ? 'bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm cursor-pointer'
                 : 'text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted cursor-pointer'
             }`}
-            title={isWaiting ? 'Message Pi' : 'Add global comment'}
-            aria-label={isWaiting ? 'Message Pi' : 'Add global comment'}
+            title={directMessage ? 'Message Pi' : 'Add global comment'}
+            aria-label={directMessage ? 'Message Pi' : 'Add global comment'}
           >
             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
             </svg>
-            {!isWaiting && (
+            {!directMessage && (
               <>
                 {actionsLabelMode === 'full' && <span>Global comment</span>}
                 {actionsLabelMode === 'short' && <span>Comment</span>}
@@ -969,13 +982,13 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             onSubmit={handleViewerCommentSubmit}
             onClose={handleViewerCommentClose}
             draftKey={viewerCommentPopover.isGlobal ? globalCommentDraftKey : undefined}
-            allowImages={allowImages}
+            allowImages={allowImages && !onSendGlobalCommentText}
             livePiCommands={viewerCommentPopover.isGlobal ? livePiCommands : []}
             onRunLivePiCommand={viewerCommentPopover.isGlobal ? onRunLivePiCommand : undefined}
             onSearchFileMentions={viewerCommentPopover.isGlobal ? onSearchFileMentions : undefined}
             onRequestOptions={viewerCommentPopover.isGlobal ? onRequestGlobalCommentOptions : undefined}
-            onSend={viewerCommentPopover.isGlobal ? onSendGlobalComment : undefined}
-            isSending={isSendingGlobalComment}
+            onSendText={viewerCommentPopover.isGlobal ? onSendGlobalCommentText : undefined}
+            isSendingText={isSendingGlobalCommentText}
             onAskAI={onAskAI}
             askAIContext={{
               kind: viewerCommentPopover.isGlobal ? 'general' : 'selection',
@@ -1016,7 +1029,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             }}
           />
         )}
-        {isWaiting && (
+        {directMessage && !imageFeedbackTarget && (
           <div className="mt-8 p-6 rounded-lg border border-primary/20 bg-primary/5 text-center flex flex-col items-center justify-center gap-3">
             <p className="text-sm font-medium text-foreground">
               Waiting for the Pi session to publish its latest assistant response.
