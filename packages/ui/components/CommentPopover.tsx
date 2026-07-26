@@ -56,10 +56,10 @@ interface CommentPopoverProps {
   onAskAI?: CommentAskAIHandler;
   askAIContext?: CommentAskAIContext;
   askAIDisabled?: boolean;
-  /** Optional one-click delivery for Global Comment. Returning false keeps the draft open. */
-  onSend?: (text: string, images?: ImageAttachment[]) => boolean | void | Promise<boolean | void>;
-  /** Whether a Send delivery is currently in flight (disables the Send button). */
-  isSending?: boolean;
+  /** Optional text-only delivery for Global Comment. Returning false keeps the draft open. */
+  onSendText?: (text: string) => boolean | void | Promise<boolean | void>;
+  /** Whether text delivery is currently in flight (disables the Send message button). */
+  isSendingText?: boolean;
   /**
    * Opt-in autocomplete for an existing global-comment flow. Raw text remains
    * a comment unless the reviewer explicitly chooses a listed command and
@@ -131,8 +131,8 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   isGlobal,
   initialText = '',
   onSubmit,
-  onSend,
-  isSending = false,
+  onSendText,
+  isSendingText = false,
   onDraftChange,
   onClose,
   draftKey,
@@ -149,7 +149,8 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   const [mode, setMode] = useState<'popover' | 'dialog'>('popover');
   const initialDraft = draftKey ? draftStore.get(draftKey) : undefined;
   const [text, setText] = useState(initialDraft?.text ?? initialText);
-  const [images, setImages] = useState<ImageAttachment[]>(allowImages ? initialDraft?.images ?? [] : []);
+  const imagesEnabled = allowImages && !onSendText;
+  const [images, setImages] = useState<ImageAttachment[]>(imagesEnabled ? initialDraft?.images ?? [] : []);
   const [selectedLivePiCommand, setSelectedLivePiCommand] = useState<LivePiCommand | null>(null);
   const [isRunningLivePiCommand, setIsRunningLivePiCommand] = useState(false);
   const [livePiCommandError, setLivePiCommandError] = useState<string | null>(null);
@@ -167,7 +168,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   const [offscreen, setOffscreen] = useState<'above' | 'below' | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
-  const hasUnsavedContent = hasUnsavedCommentContent(text, allowImages ? images : []);
+  const hasUnsavedContent = hasUnsavedCommentContent(text, imagesEnabled ? images : []);
   const hasUnsavedContentRef = useRef(hasUnsavedContent);
   const commandQuery = text.match(/^\/([^\s]*)/)?.[1]?.toLowerCase() ?? '';
   const matchingLivePiCommands = isGlobal && onRunLivePiCommand && text.startsWith('/')
@@ -199,14 +200,14 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   useEffect(() => {
     const nextDraft = draftKey ? draftStore.get(draftKey) : undefined;
     setText(nextDraft?.text ?? initialText);
-    setImages(allowImages ? nextDraft?.images ?? [] : []);
+    setImages(imagesEnabled ? nextDraft?.images ?? [] : []);
     setSelectedLivePiCommand(null);
     setLivePiCommandError(null);
     setFileSuggestions([]);
     setOptionList(null);
     setOptionsError(null);
     setIsLoadingOptions(false);
-  }, [draftKey, initialText, allowImages]);
+  }, [draftKey, initialText, imagesEnabled]);
 
   useEffect(() => {
     if (!activeFileMention || !onSearchFileMentions) {
@@ -234,11 +235,11 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     };
   }, [activeFileMention?.query, onSearchFileMentions]);
 
-  useCommentDraftSync(draftKey, text, allowImages ? images : []);
+  useCommentDraftSync(draftKey, text, imagesEnabled ? images : []);
 
   useEffect(() => {
-    onDraftChange?.(text, allowImages ? images : undefined);
-  }, [allowImages, images, onDraftChange, text]);
+    onDraftChange?.(text, imagesEnabled ? images : undefined);
+  }, [imagesEnabled, images, onDraftChange, text]);
 
   // Reset drag when anchor changes (new annotation) or mode switches
   useEffect(() => { resetDrag(); }, [anchorEl, anchorRect, resetDrag]);
@@ -322,17 +323,17 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     const canSubmitEmpty = allowEmptySubmit && initialText.trim().length > 0;
     if (hasUnsavedContent || canSubmitEmpty) {
       if (draftKey) draftStore.delete(draftKey);
-      onSubmit(text, allowImages && images.length > 0 ? images : undefined);
+      onSubmit(text, imagesEnabled && images.length > 0 ? images : undefined);
     }
-  }, [text, images, onSubmit, draftKey, allowImages, allowEmptySubmit, initialText, hasUnsavedContent]);
+  }, [text, images, onSubmit, draftKey, imagesEnabled, allowEmptySubmit, initialText, hasUnsavedContent]);
 
-  const handleSend = useCallback(async () => {
-    if (!onSend || isSending || text.trim().length === 0) {
+  const handleSendText = useCallback(async () => {
+    if (!onSendText || isSendingText || text.trim().length === 0) {
       textareaRef.current?.focus();
       return;
     }
     try {
-      const delivered = await onSend(text, allowImages && images.length > 0 ? images : undefined);
+      const delivered = await onSendText(text);
       if (delivered === false) {
         textareaRef.current?.focus();
         return;
@@ -345,7 +346,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
       console.error('Send action failed:', error);
       textareaRef.current?.focus();
     }
-  }, [allowImages, anchorEl, draftKey, images, isSending, onClose, onDraftChange, onSend, text]);
+  }, [anchorEl, draftKey, isSendingText, onClose, onDraftChange, onSendText, text]);
 
   const handleTextChange = useCallback((nextText: string) => {
     setText(nextText);
@@ -511,7 +512,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
     }
     if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
       e.preventDefault();
-      if (isGlobal && onSend) void handleSend();
+      if (isGlobal && onSendText) void handleSendText();
       else handleSubmit();
     }
   };
@@ -525,10 +526,10 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   const canSubmit =
     hasUnsavedContent ||
     (allowEmptySubmit && initialText.trim().length > 0);
-  const useSendButton = isGlobal && !!onSend;
+  const useSendButton = isGlobal && !!onSendText;
   const showAskAI = !isGlobal && !!onAskAI;
   const canAskAI = showAskAI && !askAIDisabled && text.trim().length > 0;
-  const canSend = useSendButton && !isSending && text.trim().length > 0;
+  const canSend = useSendButton && !isSendingText && text.trim().length > 0;
   const canRunLivePiCommand = selectedCommandIsCurrent && !!onRunLivePiCommand && !isRunningLivePiCommand;
 
   const commandAutocomplete = matchingLivePiCommands.length > 0 && (
@@ -643,14 +644,15 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
 
   const primaryAction = useSendButton ? (
     <button
-      onClick={() => void handleSend()}
+      onClick={() => void handleSendText()}
       disabled={!canSend}
-      aria-busy={isSending}
+      aria-busy={isSendingText}
       data-direct-send-close-and-restore-focus="true"
+      data-text-message-transport-only="true"
       className="px-3 py-1.5 text-xs font-medium rounded-md bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed transition-opacity"
-      title={canSend ? 'Send this comment to the agent' : 'Type a comment to send'}
+      title={canSend ? 'Send this text message to the agent' : 'Type a text message to send'}
     >
-      {isSending ? 'Sending...' : 'Send'}
+      {isSendingText ? 'Sending...' : 'Send message'}
     </button>
   ) : (
     <button
@@ -734,7 +736,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
               value={text}
               onChange={(e) => handleTextChange(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={isGlobal ? 'Add a global comment...' : 'Add a comment...'}
+              placeholder={onSendText ? 'Send a text message...' : isGlobal ? 'Add a global comment...' : 'Add a comment...'}
               className="w-full bg-transparent text-sm placeholder:text-muted-foreground resize-none focus:outline-none min-h-48 max-h-96 px-1 py-0.5"
               style={{ fieldSizing: 'content' } as React.CSSProperties}
             />
@@ -747,7 +749,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
           {/* Footer */}
           <div className="flex items-center justify-between px-4 py-3 border-t border-border/50">
             <div className="flex items-center gap-2">
-              {allowImages && (
+              {imagesEnabled && (
                 <AttachmentsButton
                   images={images}
                   onAdd={(img) => setImages((prev) => [...prev, img])}
@@ -842,7 +844,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
           value={text}
           onChange={(e) => handleTextChange(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={isGlobal ? 'Add a global comment...' : 'Add a comment...'}
+          placeholder={onSendText ? 'Send a text message...' : isGlobal ? 'Add a global comment...' : 'Add a comment...'}
           className="w-full bg-transparent text-sm placeholder:text-muted-foreground resize-none focus:outline-none max-h-64 min-h-[4.5rem] px-1 py-0.5"
           style={{ fieldSizing: 'content' } as React.CSSProperties}
         />
@@ -855,7 +857,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
       {/* Footer */}
       <div className="flex items-center justify-between px-3 py-2 border-t border-border/50">
         <div className="flex items-center gap-2">
-          {allowImages && (
+          {imagesEnabled && (
             <AttachmentsButton
               images={images}
               onAdd={(img) => setImages((prev) => [...prev, img])}

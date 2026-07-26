@@ -104,16 +104,58 @@ describe('Viewer consumer props', () => {
     expect(document.body.textContent).toContain('hello world');
   });
 
-  test.skipIf(!hasDom)('waiting message panes hide image attachments because instructions are text-only', async () => {
+  test.skipIf(!hasDom)('synthetic live panes offer text Send but not image feedback', async () => {
     await mount(
       <Viewer
         {...viewerProps}
-        isWaiting
+        directMessage
+        onSendGlobalCommentText={() => true}
         onAddGlobalAttachment={() => {}}
         onRemoveGlobalAttachment={() => {}}
       />,
     );
-    expect(document.querySelector('button[title="Attachments"]')).toBeNull();
+    expect(document.querySelector('button[title="Attach image feedback"]')).toBeNull();
+    expect(document.querySelector('button[title="Message Pi"]')).not.toBeNull();
+  });
+
+  test.skipIf(!hasDom)('structured live responses expose response-bound image feedback separately', async () => {
+    await mount(
+      <Viewer
+        {...viewerProps}
+        directMessage
+        imageFeedbackTarget="firstmate · history-scout · response #42"
+        onSendGlobalCommentText={() => true}
+        onAddGlobalAttachment={() => {}}
+        onRemoveGlobalAttachment={() => {}}
+      />,
+    );
+    const attach = document.querySelector<HTMLButtonElement>('button[title="Attach image feedback"]');
+    expect(attach).not.toBeNull();
+    expect(attach?.getAttribute('aria-label')).toContain('firstmate · history-scout · response #42');
+    await act(async () => attach?.click());
+    expect(document.body.textContent).toContain('Images stay draft until Send Feedback succeeds.');
+    expect(document.body.textContent).toContain('firstmate · history-scout · response #42');
+  });
+
+  test.skipIf(!hasDom)('normal non-live image attachment still adds to feedback draft', async () => {
+    const added: Array<{ path: string; name: string }> = [];
+    await mount(
+      <Viewer
+        {...viewerProps}
+        onAddGlobalAttachment={(image) => added.push(image)}
+        onRemoveGlobalAttachment={() => {}}
+      />,
+    );
+    await act(async () => document.querySelector<HTMLButtonElement>('button[title="Attachments"]')?.click());
+    const input = document.querySelector<HTMLInputElement>('input[placeholder="Paste path or URL..."]')!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), 'value')?.set;
+      setter?.call(input, '/tmp/normal-feedback.png');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const add = Array.from(document.querySelectorAll('button')).find((candidate) => candidate.textContent?.trim() === 'Add');
+    await act(async () => add?.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(added).toEqual([{ path: '/tmp/normal-feedback.png', name: 'normal-feedback' }]);
   });
 
   test.skipIf(!hasDom)('accepted direct Send closes, restores trigger focus, and records no annotation', async () => {
@@ -122,9 +164,9 @@ describe('Viewer consumer props', () => {
     await mount(
       <Viewer
         {...viewerProps}
-        isWaiting
+        directMessage
         onAddAnnotation={(annotation) => added.push(annotation)}
-        onSendGlobalComment={async (text) => { sent.push(text); return true; }}
+        onSendGlobalCommentText={async (text) => { sent.push(text); return true; }}
       />,
     );
     await act(async () => {
@@ -139,7 +181,8 @@ describe('Viewer consumer props', () => {
       setter?.call(textarea, 'send once');
       textarea.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    const send = Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.trim() === 'Send');
+    expect(document.querySelector('button[title="Attachments"]')).toBeNull();
+    const send = Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.trim() === 'Send message');
     await act(async () => send?.dispatchEvent(new MouseEvent('click', { bubbles: true })));
     await act(async () => {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));

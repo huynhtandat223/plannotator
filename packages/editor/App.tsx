@@ -171,6 +171,7 @@ import { LiveActivityChip } from './LiveActivityChipView';
 import { deriveLiveActivityTrail, formatLiveActivityTrail, formatTrailStep, type LiveActivityTrailStep } from './liveActivityTrail';
 import { LivePaneChipsRow } from './LivePaneChipsRow';
 import { repoInfoForDocument } from './documentRepoInfo';
+import { submitLiveResponseFeedback } from './liveResponseFeedback';
 
 type NoteAutoSaveResults = {
   obsidian?: boolean;
@@ -1407,6 +1408,14 @@ const App: React.FC = () => {
   const [isOpeningFullReview, setIsOpeningFullReview] = useState(false);
   const sendsGlobalCommentAsUserMessage = liveMessageReview &&
     Boolean(selectedLiveMessage?.paneId);
+  const canAttachSelectedLiveImageFeedback = liveMessageReview &&
+    Boolean(selectedLiveMessage?.paneId) &&
+    Boolean(selectedLiveMessage?.piSessionId) &&
+    Boolean(selectedLiveMessage?.assistantMessageId) &&
+    liveReviewRoundStatus === 'open';
+  const selectedLiveImageFeedbackTarget = canAttachSelectedLiveImageFeedback && selectedLiveMessage
+    ? `${selectedLiveMessage.paneLabel?.trim() || 'Pi'} · ${selectedLiveMessage.paneTab?.trim() || selectedLiveMessage.paneId} · selected response`
+    : undefined;
 
   const clearSelectedLiveFeedback = React.useCallback(() => {
     if (!selectedMessageId) return;
@@ -3252,9 +3261,10 @@ const App: React.FC = () => {
   // Global paste listener for image attachments
   useEffect(() => {
     const handlePaste = (e: ClipboardEvent) => {
-      // Plan Review has no image transport. Do not intercept image pastes or
-      // open an attachment workflow that cannot be included in its batch.
-      if (planReview) return;
+      // Plan Review and direct text-message composers have no image transport.
+      // Structured live responses expose their feedback attachment action explicitly;
+      // do not turn an unscoped page paste into an implied direct-message attachment.
+      if (planReview || sendsGlobalCommentAsUserMessage) return;
       const items = e.clipboardData?.items;
       if (!items) return;
 
@@ -3275,7 +3285,7 @@ const App: React.FC = () => {
 
     document.addEventListener('paste', handlePaste);
     return () => document.removeEventListener('paste', handlePaste);
-  }, [globalAttachments, planReview]);
+  }, [globalAttachments, planReview, sendsGlobalCommentAsUserMessage]);
 
   // Handle paste annotator accept — name comes from ImageAnnotator
   const handlePasteAnnotatorAccept = async (blob: Blob, hasDrawings: boolean, name: string) => {
@@ -3616,24 +3626,29 @@ const App: React.FC = () => {
             ...Array.from(linkedDocHook.getDocAnnotations().values()).flatMap((document) => document.annotations),
           ].map((annotation) => ({ ...annotation, messageId: scopedSelectedMessageId }))
         : allAnnotations;
-      const res = await fetch('/api/feedback', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          draftGeneration: getDraftGeneration(),
-          feedback,
-          annotations: liveAnnotations,
-          codeAnnotations,
-          // The Herdr host validates and delivers these uploaded references
-          // with the selected live assistant response's feedback batch.
-          globalAttachments,
-          ...(scopedSelectedMessageId ? { selectedMessageId: scopedSelectedMessageId } : {}),
-          ...(messageMultiSelectMode && annotatedMessageIds.length > 1 ? { feedbackScope: 'messages' } : {}),
-        }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({})) as { error?: string };
-        throw new Error(body.error || 'Failed to send feedback');
+      const feedbackPayload = {
+        draftGeneration: getDraftGeneration(),
+        feedback,
+        annotations: liveAnnotations,
+        codeAnnotations,
+        // The Herdr host validates and delivers these uploaded references
+        // with the selected live assistant response's feedback batch.
+        globalAttachments,
+        ...(scopedSelectedMessageId ? { selectedMessageId: scopedSelectedMessageId } : {}),
+        ...(messageMultiSelectMode && annotatedMessageIds.length > 1 ? { feedbackScope: 'messages' as const } : {}),
+      };
+      if (liveMessageReview && scopedSelectedMessageId) {
+        await submitLiveResponseFeedback({ ...feedbackPayload, selectedMessageId: scopedSelectedMessageId });
+      } else {
+        const res = await fetch('/api/feedback', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(feedbackPayload),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({})) as { error?: string };
+          throw new Error(body.error || 'Failed to send feedback');
+        }
       }
       if (liveMessageReview) {
         const selectedPaneId = recentMessages.find((message) => message.messageId === scopedSelectedMessageId)?.paneId;
@@ -5592,10 +5607,11 @@ const App: React.FC = () => {
                     onAddAnnotation={handleAddAnnotation}
                     onSelectAnnotation={handleSelectAnnotation}
                     selectedAnnotationId={selectedAnnotationId}
-                    isWaiting={sendsGlobalCommentAsUserMessage}
+                    directMessage={sendsGlobalCommentAsUserMessage}
+                    imageFeedbackTarget={selectedLiveImageFeedbackTarget}
                     globalCommentDraftKey={globalCommentDraftKey}
-                    onSendGlobalComment={sendsGlobalCommentAsUserMessage ? handleSendGlobalComment : undefined}
-                    isSendingGlobalComment={isSubmitting}
+                    onSendGlobalCommentText={sendsGlobalCommentAsUserMessage ? handleSendGlobalComment : undefined}
+                    isSendingGlobalCommentText={isSubmitting}
                     onRequestGlobalCommentOptions={exAIEligible ? onRequestGlobalCommentOptions : undefined}
                     livePiCommands={liveMessageReview ? selectedLiveMessage?.commands ?? [] : []}
                     onSearchFileMentions={liveMessageReview ? async (query) => {
@@ -5662,9 +5678,9 @@ const App: React.FC = () => {
                     codePathBaseDir={activeDocBaseDir}
                     copyLabel={planReview ? (planReview.snapshot.selected?.kind === 'file' ? 'Copy file' : 'Copy response') : annotateSource === 'message' ? 'Copy message' : annotateSource === 'file' || annotateSource === 'folder' ? 'Copy file' : undefined}
                     readOnly={planReviewReadOnly || liveWorkspaceMode}
-                    // Browser instructions are text-only, but live feedback
-                    // batches include uploaded image references.
-                    allowImages={!planReview && !sendsGlobalCommentAsUserMessage}
+                    // Direct messages are text-only. Eligible structured responses
+                    // expose image feedback separately through /api/feedback.
+                    allowImages={!planReview}
                     archiveInfo={archive.currentInfo}
                     sourceInfo={sourceInfo}
                     openInAppPath={annotateMode ? (linkedDocHook.isActive ? (linkedDocHook.filepath ?? null) : sourceFilePath) : null}

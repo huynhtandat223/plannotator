@@ -50,6 +50,12 @@ interface AttachmentsButtonProps {
   /** Hide the "Images" label (icon-only). When images.length > 0 the
    *  numeric badge still shows so the user can see the count. */
   hideLabel?: boolean;
+  /** Explicit label for response-bound feedback surfaces. */
+  label?: string;
+  /** Accessible destination detail when the visible label is intentionally short. */
+  ariaLabel?: string;
+  /** Response identity and completion guidance for feedback-only attachments. */
+  feedbackTarget?: string;
 }
 
 export const AttachmentsButton: React.FC<AttachmentsButtonProps> = ({
@@ -58,6 +64,9 @@ export const AttachmentsButton: React.FC<AttachmentsButtonProps> = ({
   onRemove,
   variant = 'toolbar',
   hideLabel = false,
+  label,
+  ariaLabel,
+  feedbackTarget,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [manualPath, setManualPath] = useState('');
@@ -214,8 +223,8 @@ export const AttachmentsButton: React.FC<AttachmentsButtonProps> = ({
         ref={buttonRef}
         type="button"
         onClick={() => setIsOpen(!isOpen)}
-        aria-label="Attachments"
-        title="Attachments"
+        aria-label={ariaLabel ?? label ?? 'Attachments'}
+        title={label ?? 'Attachments'}
         className="group relative flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
       >
         {/* Show stacked thumbnails if we have images */}
@@ -262,7 +271,7 @@ export const AttachmentsButton: React.FC<AttachmentsButtonProps> = ({
         )}
         {(!hideLabel || images.length > 0) && (
           <span className={variant === 'inline' ? 'sr-only' : ''}>
-            {images.length > 0 ? `${images.length}` : 'Images'}
+            {images.length > 0 ? `${images.length}` : label ?? 'Images'}
           </span>
         )}
       </button>
@@ -295,7 +304,9 @@ export const AttachmentsButton: React.FC<AttachmentsButtonProps> = ({
                 )}
               </div>
               <p className="text-[11px] text-muted-foreground -mt-1">
-                Add images to include with your feedback
+                {feedbackTarget
+                  ? <>For <span className="font-medium text-foreground">{feedbackTarget}</span>. Images stay draft until Send Feedback succeeds.</>
+                  : 'Add images to include with your feedback'}
               </p>
 
               {/* Drop zone / file picker */}

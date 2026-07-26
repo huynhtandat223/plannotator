@@ -32,6 +32,14 @@ describe("Ex-Plannotator build isolation", () => {
 		expect(browserAsset).not.toContain("jsxDEV");
 	});
 
+	test("committed browser asset ships the image feedback affordances", () => {
+		// Truthful image feedback: the live pane's Send message is text-only and
+		// image feedback rides its own attach action on /api/feedback.
+		const browserAsset = readFileSync(resolve(import.meta.dir, "ex-plannotator.html"), "utf8");
+		expect(browserAsset).toContain("Attach image feedback");
+		expect(browserAsset).toContain("text-message-transport-only");
+	});
+
 	test("builds its browser asset without creating or changing committed assets", () => {
 		const repositoryRoot = resolve(import.meta.dir, "../..");
 		const exAsset = resolve(import.meta.dir, "ex-plannotator.html");
