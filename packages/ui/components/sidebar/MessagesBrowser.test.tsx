@@ -6,6 +6,7 @@ import {
   MessagesBrowser,
   MESSAGE_PAGE_STEP,
   anchoredScrollTop,
+  isNearHistoryEdge,
   resolveRowBudget,
 } from './MessagesBrowser';
 import { resetStorageBackend, setStorageBackend, setMessagePickerCount } from '../../utils/storage';
@@ -300,6 +301,85 @@ test.skipIf(!hasDom)('treats All as absolute regardless of paging', async () => 
   expect(host.textContent).toContain('Response 7');
   // Nothing is hidden, so no paging affordance should be offered at all.
   expect(host.textContent).not.toContain('more');
+});
+
+test.skipIf(!hasDom)('auto-pages older chronological history on scroll and keeps the reader anchored', async () => {
+  useMemoryStorage();
+  const scroller = document.createElement('div');
+  scroller.style.overflowY = 'auto';
+  host = document.createElement('div');
+  scroller.append(host);
+  document.body.append(scroller);
+  let scrollHeight = 520;
+  Object.defineProperties(scroller, {
+    clientHeight: { configurable: true, value: 300 },
+    scrollHeight: { configurable: true, get: () => scrollHeight },
+  });
+  scroller.scrollTop = 180;
+  scroller.getBoundingClientRect = () => ({ top: 0, bottom: 300, left: 0, right: 300, width: 300, height: 300, x: 0, y: 0, toJSON() {} });
+
+  const messages = Array.from({ length: 12 }, (_, i) => ({
+    messageId: `m${i + 1}`,
+    text: `Response ${i + 1}`,
+  }));
+  root = createRoot(host);
+  await act(async () => {
+    root!.render(<MessagesBrowser chronological autoLoadOnScroll messages={messages} selectedMessageId="m12" onSelect={() => {}} />);
+  });
+  expect(host.textContent).not.toContain('Response 5');
+
+  scroller.scrollTop = 40;
+  await act(async () => {
+    scroller.dispatchEvent(new Event('scroll'));
+    scrollHeight = 720;
+  });
+
+  expect(host.textContent).toContain('Response 5');
+  // Five older rows were prepended (+200px in this synthetic layout), so the
+  // same visible row remains under the reader instead of jumping upward.
+  expect(scroller.scrollTop).toBe(240);
+});
+
+test.skipIf(!hasDom)('Jump to latest reliably targets the chronological newest row', async () => {
+  useMemoryStorage();
+  const scroller = document.createElement('div');
+  scroller.style.overflowY = 'auto';
+  host = document.createElement('div');
+  scroller.append(host);
+  document.body.append(scroller);
+  Object.defineProperties(scroller, {
+    clientHeight: { configurable: true, value: 200 },
+    scrollHeight: { configurable: true, value: 500 },
+  });
+  scroller.getBoundingClientRect = () => ({ top: 0, bottom: 200, left: 0, right: 300, width: 300, height: 200, x: 0, y: 0, toJSON() {} });
+  root = createRoot(host);
+  await act(async () => {
+    root!.render(<MessagesBrowser chronological messages={[
+      { messageId: 'm1', text: 'Oldest response' },
+      { messageId: 'm2', text: 'Newest response' },
+    ]} selectedMessageId="m2" onSelect={() => {}} />);
+  });
+  const newest = Array.from(host.querySelectorAll('button')).find((button) => button.textContent?.includes('Newest response'))!;
+  newest.getBoundingClientRect = () => ({ top: 420, bottom: 470, left: 0, right: 280, width: 280, height: 50, x: 0, y: 420, toJSON() {} });
+  const calls: ScrollIntoViewOptions[] = [];
+  newest.scrollIntoView = (options) => calls.push(options as ScrollIntoViewOptions);
+
+  await act(async () => {
+    scroller.dispatchEvent(new Event('scroll'));
+  });
+  const jump = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Jump to latest');
+  expect(jump).toBeTruthy();
+  await act(async () => {
+    jump!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  expect(calls).toEqual([{ block: 'end', behavior: 'smooth' }]);
+});
+
+test('detects the history edge for both list orderings', () => {
+  const metrics = { scrollTop: 40, scrollHeight: 1000, clientHeight: 300 };
+  expect(isNearHistoryEdge(metrics, true)).toBe(true);
+  expect(isNearHistoryEdge(metrics, false)).toBe(false);
+  expect(isNearHistoryEdge({ ...metrics, scrollTop: 650 }, false)).toBe(true);
 });
 
 test('anchors the viewport so an incoming SSE frame never scrolls the reader', () => {

@@ -5305,6 +5305,7 @@ const App: React.FC = () => {
                 captainEchoes={captainEchoAnchors}
                 messagesChronological={liveMessageReview}
                 messagesChatLayout={liveMessageReview}
+                messagesAutoLoadOnScroll={liveMessageReview}
                 hasPendingResponse={pendingResponseMessageId !== null}
                 messagePickerLabels={liveWorkspaceMode ? {
                   tab: 'Workspaces',
