@@ -29,14 +29,22 @@ jobs:
       - name: Run tests
         run: bun test
 
-      # The committed Ex-Plannotator bundle must equal a fresh production build
-      # byte-for-byte. The build is reproducible (NODE_ENV pinned in the build
-      # script, frozen lockfile), so any diff means a PR changed UI code without
-      # rebuilding the bundle — or rebuilt it under the wrong mode.
-      - name: Ex-Plannotator bundle is current
+      # The Ex-Plannotator bundle is no longer committed (built at publish /
+      # install time), so there is no baseline to byte-compare. Instead run the
+      # exact build command `prepublishOnly` and source installs use and assert
+      # it yields a servable production bundle: non-empty, carries the plan
+      # review app and image-feedback affordance markers (the when-present
+      # assertions in package-isolation.test.ts skip here because `bun test`
+      # runs before this build), and has no dev JSX transform (`jsxDEV` is
+      # what a bundle built under NODE_ENV=development/test ships).
+      - name: Ex-Plannotator bundle builds
         run: |
           bun run --cwd apps/ex-pi-extension build
-          git diff --exit-code -- apps/ex-pi-extension/ex-plannotator.html
+          test -s apps/ex-pi-extension/ex-plannotator.html
+          grep -q "data-plan-review-sources" apps/ex-pi-extension/ex-plannotator.html
+          grep -q "Attach image feedback" apps/ex-pi-extension/ex-plannotator.html
+          grep -q "text-message-transport-only" apps/ex-pi-extension/ex-plannotator.html
+          ! grep -q "jsxDEV" apps/ex-pi-extension/ex-plannotator.html
 
       # DOM-gated tests self-skip under plain `bun test`; the batch is
       # discovered by globbing for the hasDom guard so a new DOM-gated file

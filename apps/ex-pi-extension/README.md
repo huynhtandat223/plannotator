@@ -17,14 +17,19 @@ The browser never edits Plan Files. Feedback asks the agent to make file changes
 
 ## Build and package
 
-Build the shared browser asset from this package directory:
+The browser asset `ex-plannotator.html` (~23 MB) is **generated and never committed** — it is gitignored, so a fresh clone does not have it. The package explicitly discovers `index.ts` for Last and `plan-extension.ts` for Plan; both commands serve that single bundle. The build pins `NODE_ENV=production` so a rebuild from any environment (including test runs) yields a production bundle, and CI runs the build and rejects a dev-flavored result.
+
+**Installing from a published tarball:** nothing extra to do. `prepublishOnly` runs the build, and the `files` list ships `ex-plannotator.html` inside the package.
+
+**Installing from a source checkout:** build the asset first, then install this directory as a Pi package (same flow as Official `@plannotator/pi-extension`):
 
 ```sh
-bun run build        # ex-plannotator.html (served by both Last and Plan)
+cd plannotator
+bun install
+bun run build:ex-pi   # writes apps/ex-pi-extension/ex-plannotator.html
+pi install ./apps/ex-pi-extension
 ```
 
-`prepublishOnly` runs the same build before packaging. The package explicitly discovers `index.ts` for Last and `plan-extension.ts` for Plan; both commands serve the single committed `ex-plannotator.html` bundle. The build pins `NODE_ENV=production` so a rebuild from any environment (including test runs) yields the same production bundle, and CI rebuilds and byte-compares it against the committed copy.
-
-Then load or install `apps/ex-pi-extension` as a Pi package. Official `@plannotator/pi-extension` can remain installed.
+If the bundle is missing at runtime, both commands fail with an error naming that exact build step instead of opening a broken page. Official `@plannotator/pi-extension` can remain installed alongside.
 
 On WSL, Ex-Plannotator binds to `0.0.0.0` and opens the browser through the current WSL IPv4 address so Windows can reach the server. Set `EX_PLANNOTATOR_BIND_HOST` to override the listening interface or `EX_PLANNOTATOR_HOST` to override the hostname/IP placed in the browser URL.

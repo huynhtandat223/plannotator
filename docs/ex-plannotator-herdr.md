@@ -135,6 +135,8 @@ journalctl --user -u plannotator-herdr.service -f
 curl -fsS http://127.0.0.1:19432/health
 ```
 
+The service serves the generated (gitignored) `apps/ex-pi-extension/ex-plannotator.html`; after a fresh clone, run `bun install && bun run build:ex-pi` in the checkout before expecting `GET /` to return the editor.
+
 The default service port is `19432`. After a restart, expect a brief startup window before the health endpoint answers. A restart does not stop Herdr or Pi panes, but it clears the service's in-memory registration and delivery queues. Active extensions republish during lifecycle events and their polling loop; use the diagnostic below rather than assuming every pane has already republished.
 
 Inspect the live browser model with:
@@ -168,9 +170,9 @@ curl -fsS http://127.0.0.1:19432/health
 
 `bun run build:ex-pi` regenerates:
 
-- `apps/ex-pi-extension/ex-plannotator.html` (served by both the Last and Plan commands)
+- `apps/ex-pi-extension/ex-plannotator.html` (served by both the Last and Plan commands, and by the Herdr service's `GET /`)
 
-Never edit that generated HTML file manually.
+That file is gitignored, not committed: a fresh checkout must run `bun run build:ex-pi` once before the extension or the Herdr service can serve the editor (both fail with an error naming that command until then). Never edit the generated HTML manually.
 
 For browser coverage, use the repository's Chrome AXI workflow to verify at least:
 
