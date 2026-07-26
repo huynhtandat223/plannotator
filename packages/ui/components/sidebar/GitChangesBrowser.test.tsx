@@ -65,7 +65,7 @@ test.skipIf(!hasDom)("renders the standard since-base committed, changes, and un
 
   renderBrowser(dirs);
 
-  expect(host!.textContent).toContain("All changes since origin/main");
+  expect(host!.textContent).toContain("Since origin/main");
   expect(host!.textContent).toContain("Committed · 1");
   expect(host!.textContent).toContain("Changes · 1");
   expect(host!.textContent).toContain("Untracked · 1");

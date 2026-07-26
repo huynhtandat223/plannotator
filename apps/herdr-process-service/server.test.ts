@@ -677,7 +677,7 @@ describe("live workspace file mention search", () => {
     writeFileSync(join(repo, "src", "App.test.tsx"), "export {};\n");
     mkdirSync(join(repo, "node_modules", "hidden"), { recursive: true });
     writeFileSync(join(repo, "node_modules", "hidden", "secret.ts"), "export {};\n");
-    const panels: HerdrPanel[] = [{ id: "w:p1", cwd: repo, status: "idle", name: "Pi" }];
+    const panels: HerdrPanel[] = [{ id: "w:p1", cwd: repo, status: "idle", workspace: "w", tab: "t", panel: "p1", focused: false }];
 
     expect(await searchLiveWorkspaceFiles("w:p1", "app.tsx", panels)).toEqual(["src/App.tsx"]);
     expect(await searchLiveWorkspaceFiles("closed:p1", "app", panels)).toBeNull();

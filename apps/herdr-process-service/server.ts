@@ -20,7 +20,7 @@ import {
   getWorkspaceStatusForDirectory,
   parseGitNumstat,
 } from "../../packages/shared/workspace-status";
-import { readFileSync, createReadStream } from "node:fs";
+import { readFileSync, createReadStream, type Dirent } from "node:fs";
 import { createInterface } from "node:readline";
 import { ExAICompanionCoordinator } from "./ex-ai-companion";
 import { mkdir, readFile, readdir, realpath, stat } from "node:fs/promises";
@@ -563,13 +563,15 @@ function sessionContextWindow(modelId: string): number | undefined {
   return /(?:gpt-5|claude|gemini)/i.test(modelId) ? 200_000 : undefined;
 }
 
-function finiteUsageTokens(usage: SessionFileEntry["message"] extends { usage?: infer T } ? T : never): number {
+type SessionMessageUsage = NonNullable<SessionFileEntry["message"]>["usage"];
+
+function finiteUsageTokens(usage: SessionMessageUsage): number {
   if (!usage || typeof usage !== "object") return 0;
   return [usage.input, usage.output, usage.cacheRead, usage.cacheWrite]
-    .reduce((sum, value) => sum + (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0), 0);
+    .reduce((sum: number, value) => sum + (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0), 0);
 }
 
-function contextTokensFromUsage(usage: SessionFileEntry["message"] extends { usage?: infer T } ? T : never): number {
+function contextTokensFromUsage(usage: SessionMessageUsage): number {
   if (!usage || typeof usage !== "object") return 0;
   // Pi uses the provider's totalTokens for current context. It may be smaller
   // than the billable component sum because cache reads are priced separately.
@@ -623,7 +625,7 @@ async function findPiSessionFile(sessionId: string): Promise<string | null> {
 
 export function sessionFallbackMetadataFromEntries(entries: SessionFileEntry[]): SessionFallbackMetadata {
   let latestModel: HerdrModel | undefined;
-  let latestAssistantUsage: SessionFileEntry["message"]["usage"] | undefined;
+  let latestAssistantUsage: SessionMessageUsage | undefined;
   let latestAssistantIndex = -1;
   let latestCompactionIndex = -1;
   let latestCompactionTokens: number | undefined;
@@ -1038,7 +1040,8 @@ export function feedbackBatch(
   const add = (value: unknown, kind: "annotations" | "codeAnnotations"): boolean => {
     if (!value || typeof value !== "object" || typeof (value as { id?: unknown }).id !== "string") return false;
     const messageId = annotationMessageId(value) ?? selectedMessageId;
-    const source = messageId ? sourceMessages.get(messageId) : null;
+    if (!messageId) return false;
+    const source = sourceMessages.get(messageId);
     if (!source || !source.assistantMessageId) return false;
     const entry = grouped.get(messageId) ?? { annotations: [], codeAnnotations: [] };
     entry[kind].push(value as LiveDraftAnnotation);
@@ -1048,7 +1051,8 @@ export function feedbackBatch(
   for (const annotation of body.annotations) if (!add(annotation, "annotations")) return null;
   for (const annotation of body.codeAnnotations) if (!add(annotation, "codeAnnotations")) return null;
   if (globalAttachments.length > 0) {
-    const source = selectedMessageId ? sourceMessages.get(selectedMessageId) : null;
+    if (!selectedMessageId) return null;
+    const source = sourceMessages.get(selectedMessageId);
     if (!source?.assistantMessageId) return null;
     const entry = grouped.get(selectedMessageId) ?? { annotations: [], codeAnnotations: [] };
     grouped.set(selectedMessageId, entry);
@@ -1363,7 +1367,7 @@ async function savePanelSession(request: IncomingMessage, response: ServerRespon
     writeJson(response, 400, { error: "Invalid structured assistant messages" });
     return;
   }
-  const normalizedCommands = commands.flatMap((value) => {
+  const normalizedCommands = commands.flatMap((value): HerdrCommandCapability[] => {
     if (!value || typeof value !== "object") return [];
     const command = value as Record<string, unknown>;
     const name = text(command.name);
@@ -1846,11 +1850,10 @@ export async function resolveHerdrAISourceSession(
   if (!registration || registration.sessionId !== sessionId) {
     throw new Error("The selected Pi session has changed.");
   }
-  return {
-    paneId,
-    sessionId,
-    ...(registration.sessionFile ? { sessionFile: registration.sessionFile } : {}),
-  };
+  // NOTE: `sessionFile` is never populated today — no publisher writes it into
+  // the registration, so Ask AI always degrades to a normal session (as the doc
+  // comment above permits). Kept in the return type for the provider seam.
+  return { paneId, sessionId };
 }
 
 export function selectHerdrAIWorkspace(
@@ -1866,7 +1869,7 @@ export function selectHerdrAIWorkspace(
     return { workspaceId: ensured.workspaceId, cwd: ensured.cwd, ensuredWorkspaceId: ensured.workspaceId };
   }
   const owner = panels.find((panel) => resolve(panel.cwd) === resolve(cwd) && panel.workspaceId);
-  return owner ? { workspaceId: owner.workspaceId, cwd: owner.cwd } : null;
+  return owner?.workspaceId ? { workspaceId: owner.workspaceId, cwd: owner.cwd } : null;
 }
 
 const herdrPiGateway: HerdrPiGateway = {
@@ -2263,7 +2266,7 @@ function buildFileTree(paths: string[]): VaultNode[] {
 
 async function walkWorkspaceFiles(directory: string, root: string, state: FileBrowserWalkState): Promise<void> {
   if (state.truncated) return;
-  let entries: Awaited<ReturnType<typeof readdir>>;
+  let entries: Dirent[];
   try {
     entries = await readdir(directory, { withFileTypes: true });
   } catch {
@@ -2283,7 +2286,7 @@ async function walkWorkspaceFiles(directory: string, root: string, state: FileBr
 
 async function walkFileMentions(directory: string, root: string, files: string[]): Promise<void> {
   if (files.length >= FILE_MENTION_MAX_FILES) return;
-  let entries: Awaited<ReturnType<typeof readdir>>;
+  let entries: Dirent[];
   try {
     entries = await readdir(directory, { withFileTypes: true });
   } catch {
@@ -2573,12 +2576,12 @@ async function computeWorkspaceStatus(rootPath: string, compareMode: WorkspaceCo
       const count = counts.get(change.repoRelativePath);
       if (count) files[path] = { ...change, ...count };
     }
-    const filteredSinceBase: SinceBaseSections | undefined = sinceBase && {
+    const filteredSinceBase: SinceBaseSections | undefined = sinceBase ? {
       ...sinceBase,
       files: Object.fromEntries(
         Object.entries(sinceBase.files).filter(([repoRelativePath]) => pathIsInWorkspace(rootPath, repoRoot, repoRelativePath)),
       ),
-    };
+    } : undefined;
     const values = Object.values(files);
     return { available: true, rootPath, repoRoot, ...(filteredSinceBase ? { sinceBase: filteredSinceBase } : {}), files, totals: {
       files: values.length,

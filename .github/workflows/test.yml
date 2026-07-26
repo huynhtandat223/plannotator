@@ -26,12 +26,8 @@ jobs:
       - name: Type check
         run: bun run typecheck
 
-      # Temporarily exclude the only known unreliable suite: its 23 local HTTP
-      # server tests time out at Bun's 5s per-test limit under Bun 1.3.11 and
-      # 1.3.14. Keep this narrow; restore the file when its server lifecycle
-      # is made reliable in CI.
       - name: Run tests
-        run: bun test --path-ignore-patterns='apps/ex-pi-extension/server.test.ts'
+        run: bun test
 
       # The committed Ex-Plannotator bundle must equal a fresh production build
       # byte-for-byte. The build is reproducible (NODE_ENV pinned in the build
@@ -42,32 +38,12 @@ jobs:
           bun run --cwd apps/ex-pi-extension build
           git diff --exit-code -- apps/ex-pi-extension/ex-plannotator.html
 
-      # DOM-gated tests are deliberately separated from the default suite.
-      - name: Run file-browser DOM test
-        run: DOM_TESTS=1 bun test packages/ui/hooks/useFileBrowser.test.tsx
-
-      - name: Run UI DOM tests
-        run: >-
-          DOM_TESTS=1 bun test
-          packages/ui/markdownEditorFidelity.test.tsx
-          packages/ui/annotationDraftPersistence.test.tsx
-          packages/ui/codeAnnotationDraftPersistence.test.tsx
-          packages/ui/components/html-viewer/srcdoc.test.ts
-          packages/ui/components/InlineMarkdown.resolveLinkedDoc.test.tsx
-          packages/ui/components/MarkdownDiff.frozen.test.tsx
-          packages/ui/components/MarkdownEditor.extensions.test.tsx
-          packages/ui/components/sidebar/FileBrowser.test.ts
-          packages/editor/editableDocumentsHook.test.tsx
-          packages/ui/components/AnnotationPanel.props.test.tsx
-          packages/ui/components/Viewer.consumer.test.tsx
-          packages/ui/components/InlineMarkdown.seam.test.tsx
-          packages/ui/components/ImageThumbnail.seam.test.tsx
-          packages/ui/hooks/useAnnotationHighlighter.test.tsx
-          packages/ui/hooks/annotationRestoreVerify.test.tsx
-          packages/ui/hooks/useAnnotationDraft.seam.test.tsx
-          packages/ui/hooks/useExternalAnnotations.seam.test.tsx
-          packages/ui/hooks/useAIChat.seam.test.tsx
-          packages/ui/hooks/useFileBrowser.seam.test.tsx
+      # DOM-gated tests self-skip under plain `bun test`; the batch is
+      # discovered by globbing for the hasDom guard so a new DOM-gated file
+      # can never be silently orphaned from CI (this happened twice: 8350299
+      # registered 5 forgotten files, and a later audit found 18 more).
+      - name: Run DOM-gated tests
+        run: bash scripts/run-dom-tests.sh
 
   pi-extension-ai-runtime-windows:
     # Exercises the Pi extension's Node/jiti server mirror on Windows with an

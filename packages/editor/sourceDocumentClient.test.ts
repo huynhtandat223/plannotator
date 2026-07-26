@@ -7,7 +7,7 @@ function mockFetch(response: Response | Error) {
   globalThis.fetch = (async () => {
     if (response instanceof Error) throw response;
     return response;
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
 }
 
 afterEach(() => {

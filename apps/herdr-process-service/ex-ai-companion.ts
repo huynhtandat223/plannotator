@@ -13,7 +13,7 @@ export type ExAICompanionRegistration = {
 export type ExAICompanionBoundary = {
   panels(): Promise<ExAICompanionPanel[]>;
   registration(paneId: string): ExAICompanionRegistration | undefined | Promise<ExAICompanionRegistration | undefined>;
-  transcriptPath?(sessionId: string): string | undefined | Promise<string | undefined>;
+  transcriptPath?(sessionId: string): string | null | undefined | Promise<string | null | undefined>;
   create(input: { workspaceId: string; cwd: string; panelName: string; command: string }): Promise<{ paneId: string }>;
   close(paneId: string): Promise<void>;
   send(paneId: string, prompt: string): Promise<void>;
@@ -133,7 +133,7 @@ export class ExAICompanionCoordinator {
     const history: ExAICompanionHistory[] = [];
     for (const turn of pair.history) {
       history.push({ kind: "user", text: turn.text });
-      const assistant = turn.assistantMessageId && byId.get(turn.assistantMessageId);
+      const assistant = turn.assistantMessageId ? byId.get(turn.assistantMessageId) : undefined;
       const assistantText = assistant?.text ?? turn.assistantText;
       if (turn.assistantMessageId && assistantText) history.push({ kind: "assistant", text: assistantText, messageId: turn.assistantMessageId });
     }

@@ -242,6 +242,10 @@
         "tailwindcss": "^4.1.18",
         "tailwindcss-animate": "^1.0.7",
       },
+      "devDependencies": {
+        "@types/react": "^19.2.0",
+        "@types/react-dom": "^19.2.0",
+      },
     },
     "packages/review-editor": {
       "name": "@plannotator/review-editor",
