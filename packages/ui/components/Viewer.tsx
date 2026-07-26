@@ -133,6 +133,10 @@ interface ViewerProps {
    * draft — it never sends. Absent for non-live hosts, which keep today's behavior.
    */
   onRequestGlobalCommentOptions?: () => Promise<string[]>;
+  /** Optional one-click delivery for the global-comment composer. */
+  onSendGlobalComment?: (text: string, images?: ImageAttachment[]) => boolean | void | Promise<boolean | void>;
+  /** Whether a global-comment Send is currently in flight (disables the button). */
+  isSendingGlobalComment?: boolean;
   /**
    * Opt-in draft key for the global-comment composer. When set, unsent text +
    * images survive a keyed Viewer remount (live panes remount by selected
@@ -227,6 +231,8 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   onRunLivePiCommand,
   onSearchFileMentions,
   onRequestGlobalCommentOptions,
+  onSendGlobalComment,
+  isSendingGlobalComment = false,
   globalCommentDraftKey,
 }, ref) => {
   const [copied, setCopied] = useState(false);
@@ -968,6 +974,8 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             onRunLivePiCommand={viewerCommentPopover.isGlobal ? onRunLivePiCommand : undefined}
             onSearchFileMentions={viewerCommentPopover.isGlobal ? onSearchFileMentions : undefined}
             onRequestOptions={viewerCommentPopover.isGlobal ? onRequestGlobalCommentOptions : undefined}
+            onSend={viewerCommentPopover.isGlobal ? onSendGlobalComment : undefined}
+            isSending={isSendingGlobalComment}
             onAskAI={onAskAI}
             askAIContext={{
               kind: viewerCommentPopover.isGlobal ? 'general' : 'selection',

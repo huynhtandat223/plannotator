@@ -3664,6 +3664,64 @@ const App: React.FC = () => {
     }
   };
 
+  // Waiting live panes deliver a global comment directly as a new Pi instruction.
+  // Other global-comment surfaces keep the existing record-only Add flow.
+  const handleSendGlobalComment = React.useCallback(async (
+    rawText: string,
+  ): Promise<boolean | void> => {
+    if (!sendsGlobalCommentAsUserMessage) return false;
+    if (liveMessageReview && liveReviewRoundStatus !== 'open') {
+      toast('Feedback is already pending', { description: 'Wait for the agent response or return to review first.' });
+      return false;
+    }
+    const content = rawText.trim();
+    if (!content || !selectedLiveMessage?.paneId) {
+      toast.error('Feedback delivery failed', { description: 'Add a global message before sending it to Pi.' });
+      return false;
+    }
+    setIsSubmitting(true);
+    try {
+      const response = await fetch('/api/instruction', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paneId: selectedLiveMessage.paneId, text: content }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error || 'Failed to send message to Pi');
+      }
+      setFollowNextPaneResponse({ paneId: selectedLiveMessage.paneId, latestMessageId: selectedLiveMessage.messageId });
+      // Echo the sent text locally, exactly as the assembled-feedback path does.
+      if (selectedLiveMessage.piSessionId) {
+        const scopeKey = captainEchoScopeKey(selectedLiveMessage.paneId, selectedLiveMessage.piSessionId);
+        updateCaptainEchoes((store) => appendCaptainEcho(store, scopeKey, {
+          id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+          text: content,
+          timestamp: new Date().toISOString(),
+        }));
+      }
+      dismissDraft();
+      toast('Message sent to Pi', { description: 'Waiting for its response.' });
+      return true;
+    } catch (error) {
+      toast.error('Feedback delivery failed', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      scheduleDraftSaveAfterSubmitFailure();
+      return false;
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, [
+    sendsGlobalCommentAsUserMessage,
+    liveMessageReview,
+    liveReviewRoundStatus,
+    selectedLiveMessage,
+    dismissDraft,
+    scheduleDraftSaveAfterSubmitFailure,
+    updateCaptainEchoes,
+  ]);
+
   // Annotate gate-mode handler — approves the artifact without feedback
   const handleAnnotateApprove = async () => {
     setIsSubmitting(true);
@@ -5523,6 +5581,8 @@ const App: React.FC = () => {
                     selectedAnnotationId={selectedAnnotationId}
                     isWaiting={sendsGlobalCommentAsUserMessage}
                     globalCommentDraftKey={globalCommentDraftKey}
+                    onSendGlobalComment={sendsGlobalCommentAsUserMessage ? handleSendGlobalComment : undefined}
+                    isSendingGlobalComment={isSubmitting}
                     onRequestGlobalCommentOptions={exAIEligible ? onRequestGlobalCommentOptions : undefined}
                     livePiCommands={liveMessageReview ? selectedLiveMessage?.commands ?? [] : []}
                     onSearchFileMentions={liveMessageReview ? async (query) => {

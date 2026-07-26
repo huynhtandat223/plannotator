@@ -116,6 +116,32 @@ describe('Viewer consumer props', () => {
     expect(document.querySelector('button[title="Attachments"]')).toBeNull();
   });
 
+  test.skipIf(!hasDom)('threads one-click global Send to the host without recording an annotation', async () => {
+    const sent: string[] = [];
+    const added: Annotation[] = [];
+    await mount(
+      <Viewer
+        {...viewerProps}
+        isWaiting
+        onAddAnnotation={(annotation) => added.push(annotation)}
+        onSendGlobalComment={async (text) => { sent.push(text); return true; }}
+      />,
+    );
+    await act(async () => {
+      document.querySelector('button[title="Message Pi"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(textarea), 'value')?.set;
+      setter?.call(textarea, 'send once');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const send = Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.trim() === 'Send');
+    await act(async () => send?.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(sent).toEqual(['send once']);
+    expect(added).toEqual([]);
+  });
+
   test.skipIf(!hasDom)('restores server-loaded comment annotations as yellow comment highlights', async () => {
     const annotation: Annotation = {
       id: 'server-comment',
