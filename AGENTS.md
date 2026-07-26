@@ -4,6 +4,8 @@ A plan review UI for Claude Code that intercepts `ExitPlanMode` via hooks, letti
 
 > **Reusing the document UI (theme / markdown / editor / settings / comments / layout) in the commercial Workspaces app? Read `packages/ui/README.md` FIRST.** It explains the published `@plannotator/ui` + `@plannotator/core` packages and the host-override seams a host plugs its own backend into via `configurePlannotatorUI()`. A prior from-scratch reimplementation of this UI broke the app and was reverted — do **not** rebuild it or recreate `packages/document-ui`. Add a seam to `@plannotator/ui` instead, keep Plannotator's app unchanged, and never delete working code until a human confirms parity in the browser.
 
+> **Ex-Plannotator custom code (this fork): mount-point seams only.** Per `docs/adr/0002-feature-flagged-official-editor.md` (supersedes ADR 0001), the live review is a feature-flagged mode of the official editor — but new custom stateful logic and JSX belong in captain-owned modules (e.g. `packages/editor/live*`), never as another hunk inside upstream files like `App.tsx` / `MessagesBrowser.tsx` / `CommentPopover.tsx`. The pending extractions that enforce this are planned in `docs/extraction-seams-plan.md`.
+
 ## Project Structure
 
 ```
