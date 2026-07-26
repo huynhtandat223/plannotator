@@ -52,6 +52,15 @@ export interface PickerMessage {
    * surfaces are untouched.
    */
   paneTab?: string;
+  /**
+   * Herdr's agent kind for this pane (`pi`, `claude`, `codex`, `opencode`, or
+   * anything a future Herdr reports). Resolved against
+   * `@plannotator/core/live-pane-agents` to decide, per capability, what this
+   * pane can actually do — so a pane that cannot do something says which one
+   * and why instead of showing a dead affordance. Optional: non-live surfaces
+   * never set it.
+   */
+  agent?: string;
   /** Optional host-provided authoritative live agent state. */
   agentStatus?: 'working' | 'idle' | 'blocked' | 'unknown';
   /** Optional host-provided workspace root for the pane containing this response. */

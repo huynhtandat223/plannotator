@@ -15,6 +15,7 @@ import {
   formatInstructionFileReferences,
   instructionDelivery,
   panelsFromSnapshot,
+  diskTranscriptOutcomes,
   releasePanelSession,
   reviewSnapshotFromPanels,
   searchLiveWorkspaceFiles,
@@ -427,6 +428,7 @@ describe("Git Changes live stream", () => {
     temporaryRepos.push(outside);
     const response = await invokeWorkspaceFilesStream(outside, [{
       id: "w:p1",
+      agent: "pi",
       workspace: "one",
       tab: "",
       panel: "Pane p1",
@@ -446,6 +448,7 @@ describe("Git Changes live stream", () => {
     git(repo, "commit", "-m", "base");
     const panels: HerdrPanel[] = [{
       id: "w:p1",
+      agent: "pi",
       workspace: "one",
       tab: "",
       panel: "Pane p1",
@@ -569,6 +572,7 @@ describe("feedbackBatch", () => {
       description: "Structured Pi assistant response",
       paneLabel: "one",
       paneDescription: "Pane p1",
+      agent: "pi",
       agentStatus: "working" as const,
       cwd: "/one",
     }];
@@ -600,6 +604,7 @@ describe("feedbackBatch", () => {
       description: "Structured Pi assistant response",
       paneLabel: "one",
       paneDescription: "Pane p1",
+      agent: "pi",
       agentStatus: "working" as const,
       cwd: "/one",
     }];
@@ -639,7 +644,7 @@ describe("commandArgv", () => {
 });
 
 describe("commandDelivery", () => {
-  const panel: HerdrPanel = { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "idle", focused: true };
+  const panel: HerdrPanel = { id: "w:p1", agent: "pi", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "idle", focused: true };
   const registrations = new Map<string, PanelSessionEnrichment>([
     ["w:p1", {
       paneId: "w:p1",
@@ -677,7 +682,7 @@ describe("live workspace file mention search", () => {
     writeFileSync(join(repo, "src", "App.test.tsx"), "export {};\n");
     mkdirSync(join(repo, "node_modules", "hidden"), { recursive: true });
     writeFileSync(join(repo, "node_modules", "hidden", "secret.ts"), "export {};\n");
-    const panels: HerdrPanel[] = [{ id: "w:p1", cwd: repo, status: "idle", workspace: "w", tab: "t", panel: "p1", focused: false }];
+    const panels: HerdrPanel[] = [{ id: "w:p1", agent: "pi", cwd: repo, status: "idle", workspace: "w", tab: "t", panel: "p1", focused: false }];
 
     expect(await searchLiveWorkspaceFiles("w:p1", "app.tsx", panels)).toEqual(["src/App.tsx"]);
     expect(await searchLiveWorkspaceFiles("closed:p1", "app", panels)).toBeNull();
@@ -723,6 +728,7 @@ describe("instructionDelivery", () => {
       description: "No structured assistant response published yet",
       paneLabel: "one",
       paneDescription: "Pane p1",
+      agent: "pi",
       agentStatus: "idle" as const,
       cwd: "/one",
     }])).toEqual({ paneId: "w:p1", content: "Please start by checking the logs." });
@@ -735,7 +741,7 @@ describe("instructionDelivery", () => {
 });
 
 describe("panelsFromSnapshot", () => {
-  test("lists only live Pi agents with Herdr workspace and tab labels", () => {
+  test("keeps a live Pi agent's Herdr workspace and tab labels unchanged", () => {
     expect(panelsFromSnapshot({
       workspaces: [{ workspace_id: "workspace-1", label: "pi-harness" }],
       tabs: [{ tab_id: "tab-1", workspace_id: "workspace-1", label: "plannotator" }],
@@ -749,15 +755,10 @@ describe("panelsFromSnapshot", () => {
           workspace_id: "workspace-1",
           focused: true,
         },
-        {
-          agent: "claude",
-          agent_status: "working",
-          cwd: "/home/me/codes/other",
-          pane_id: "workspace-1:p10",
-        },
       ],
     })).toEqual([{
       id: "workspace-1:p9",
+      agent: "pi",
       workspaceId: "workspace-1",
       tabId: "tab-1",
       workspace: "pi-harness",
@@ -769,11 +770,62 @@ describe("panelsFromSnapshot", () => {
     }]);
   });
 
+  test("lists every agent kind the snapshot describes, not just Pi", () => {
+    // The regression this guards: discovery required `agent === "pi"`, so a
+    // machine running Claude Code, Codex or OpenCode showed an empty picker.
+    const panels = panelsFromSnapshot({
+      workspaces: [{ workspace_id: "w33", label: "captain" }],
+      agents: [
+        { agent: "pi", agent_status: "working", cwd: "/repos/a", pane_id: "w33:p1", workspace_id: "w33" },
+        { agent: "claude", agent_status: "working", cwd: "/repos/b", pane_id: "w33:p2", workspace_id: "w33" },
+        { agent: "codex", agent_status: "idle", cwd: "/repos/c", pane_id: "w33:p3", workspace_id: "w33" },
+        { agent: "opencode", agent_status: "blocked", cwd: "/repos/d", pane_id: "w33:p4", workspace_id: "w33" },
+      ],
+    });
+    expect(panels.map((panel) => [panel.id, panel.agent, panel.status])).toEqual([
+      ["w33:p1", "pi", "working"],
+      ["w33:p2", "claude", "working"],
+      ["w33:p3", "codex", "idle"],
+      ["w33:p4", "opencode", "blocked"],
+    ]);
+  });
+
+  test("admits an agent kind this build has never heard of", () => {
+    // Discovery must key off what the snapshot provides, never off a list of
+    // known names — a fifth agent kind must not require editing that function.
+    expect(panelsFromSnapshot({
+      agents: [{ agent: "some-future-agent", agent_status: "working", cwd: "/work/repo", pane_id: "w:p7" }],
+    }).map((panel) => [panel.id, panel.agent])).toEqual([["w:p7", "some-future-agent"]]);
+  });
+
+  test("normalizes the agent kind and drops entries missing what every surface needs", () => {
+    expect(panelsFromSnapshot({
+      agents: [
+        { agent: "Claude", agent_status: "working", cwd: "/work/repo", pane_id: "w:p1" },
+        { agent: "claude", agent_status: "working", cwd: "/work/repo" },
+        { agent: "claude", agent_status: "working", pane_id: "w:p3" },
+        { agent: "   ", agent_status: "working", cwd: "/work/repo", pane_id: "w:p4" },
+      ],
+    }).map((panel) => [panel.id, panel.agent])).toEqual([["w:p1", "claude"]]);
+  });
+
+  test("maps Claude Code's terminal 'done' state onto idle", () => {
+    // Herdr's Claude integration reports "done" where Pi reports "idle". Left
+    // unmapped it rendered a perfectly understood pane as status "unknown".
+    expect(panelsFromSnapshot({
+      agents: [
+        { agent: "claude", agent_status: "done", cwd: "/work/repo", pane_id: "w:p1" },
+        { agent: "claude", agent_status: "sleeping", cwd: "/work/other", pane_id: "w:p2" },
+      ],
+    }).map((panel) => panel.status)).toEqual(["idle", "unknown"]);
+  });
+
   test("uses stable fallbacks when Herdr has no resource labels", () => {
     expect(panelsFromSnapshot({
       agents: [{ agent: "pi", agent_status: "idle", cwd: "/work/repo", pane_id: "w:p1" }],
     })).toEqual([{
       id: "w:p1",
+      agent: "pi",
       workspaceId: "",
       tabId: "",
       workspace: "repo",
@@ -787,8 +839,8 @@ describe("panelsFromSnapshot", () => {
 
   test("renders each pane's structured response history newest-first while retaining pane and Pi message identities", () => {
     const panels: HerdrPanel[] = [
-      { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
-      { id: "w:p2", workspace: "two", tab: "", panel: "Pane p2", cwd: "/two", status: "idle", focused: false },
+      { id: "w:p1", agent: "pi", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
+      { id: "w:p2", agent: "pi", workspace: "two", tab: "", panel: "Pane p2", cwd: "/two", status: "idle", focused: false },
     ];
     const enrichments = new Map<string, PanelSessionEnrichment>([
       ["w:p1", { paneId: "w:p1", sessionId: "session-1", commands: [], messages: [
@@ -832,7 +884,7 @@ describe("panelsFromSnapshot", () => {
 
   test("passes Pi context, compaction, and Git branch metadata to every response in a pane", () => {
     const panels: HerdrPanel[] = [
-      { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true, gitBranch: "feature/herdr-metadata" },
+      { id: "w:p1", agent: "pi", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true, gitBranch: "feature/herdr-metadata" },
     ];
     const enrichments = new Map<string, PanelSessionEnrichment>([["w:p1", {
       paneId: "w:p1",
@@ -863,8 +915,8 @@ describe("panelsFromSnapshot", () => {
 
   test("passes an optional per-pane context-handoff warning through to every response in a pane", () => {
     const panels: HerdrPanel[] = [
-      { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
-      { id: "w:p2", workspace: "two", tab: "", panel: "Pane p2", cwd: "/two", status: "idle", focused: false },
+      { id: "w:p1", agent: "pi", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
+      { id: "w:p2", agent: "pi", workspace: "two", tab: "", panel: "Pane p2", cwd: "/two", status: "idle", focused: false },
     ];
     const enrichments = new Map<string, PanelSessionEnrichment>([
       ["w:p1", { paneId: "w:p1", sessionId: "session-1", commands: [], contextUsage: { tokens: 150_000, contextWindow: 200_000, percent: 75 }, messages: [{ messageId: "assistant-1", text: "Response" }] }],
@@ -889,7 +941,7 @@ describe("panelsFromSnapshot", () => {
 
   test("passes the ordered names-only activity trail through to every response in a pane", () => {
     const panels: HerdrPanel[] = [
-      { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
+      { id: "w:p1", agent: "pi", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
     ];
     const enrichments = new Map<string, PanelSessionEnrichment>([["w:p1", {
       paneId: "w:p1",
@@ -918,8 +970,8 @@ describe("panelsFromSnapshot", () => {
 
   test("surfaces the Herdr tab name as a first-class paneTab so same-workspace panes are distinguishable", () => {
     const panels: HerdrPanel[] = [
-      { id: "w:p1", workspace: "firstmate", tab: "t3H", panel: "Pane p1", cwd: "/fm", status: "working", focused: true },
-      { id: "w:p2", workspace: "firstmate", tab: "", panel: "Coordinator", cwd: "/fm", status: "idle", focused: false },
+      { id: "w:p1", agent: "pi", workspace: "firstmate", tab: "t3H", panel: "Pane p1", cwd: "/fm", status: "working", focused: true },
+      { id: "w:p2", agent: "pi", workspace: "firstmate", tab: "", panel: "Coordinator", cwd: "/fm", status: "idle", focused: false },
     ];
     const snapshot = reviewSnapshotFromPanels(panels);
     expect(snapshot.messages[0]).toMatchObject({ paneLabel: "firstmate", paneTab: "t3H" });
@@ -929,7 +981,7 @@ describe("panelsFromSnapshot", () => {
 
   test("passes an already-redacted trail command summary through to every response in a pane", () => {
     const panels: HerdrPanel[] = [
-      { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
+      { id: "w:p1", agent: "pi", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
     ];
     const enrichments = new Map<string, PanelSessionEnrichment>([["w:p1", {
       paneId: "w:p1",
@@ -949,7 +1001,7 @@ describe("panelsFromSnapshot", () => {
 
   test("selects the newest response in the focused pane by default", () => {
     const panels: HerdrPanel[] = [
-      { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
+      { id: "w:p1", agent: "pi", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
     ];
     const enrichments = new Map<string, PanelSessionEnrichment>([
       ["w:p1", { paneId: "w:p1", sessionId: "session", commands: [], messages: [
@@ -963,7 +1015,7 @@ describe("panelsFromSnapshot", () => {
 
   test("shows a truthful waiting document until the Pi extension enriches a live pane", () => {
     const panels: HerdrPanel[] = [
-      { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
+      { id: "w:p1", agent: "pi", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
     ];
 
     const snapshot = reviewSnapshotFromPanels(panels);
@@ -975,7 +1027,7 @@ describe("panelsFromSnapshot", () => {
   test("escapes the waiting document working directory while preserving its copyable value", () => {
     const cwd = '/work/\"><img src=x onerror=alert(1)>';
     const snapshot = reviewSnapshotFromPanels([
-      { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd, status: "working", focused: true },
+      { id: "w:p1", agent: "pi", workspace: "one", tab: "", panel: "Pane p1", cwd, status: "working", focused: true },
     ]);
 
     expect(snapshot.messages[0].text).toContain('title="Working directory — select to copy: /work/&quot;&gt;&lt;img src=x onerror=alert(1)&gt;"');
@@ -985,8 +1037,8 @@ describe("panelsFromSnapshot", () => {
 
   test("keeps a live user pane selection across assistant message changes", () => {
     const panels: HerdrPanel[] = [
-      { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
-      { id: "w:p2", workspace: "two", tab: "", panel: "Pane p2", cwd: "/two", status: "idle", focused: false },
+      { id: "w:p1", agent: "pi", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
+      { id: "w:p2", agent: "pi", workspace: "two", tab: "", panel: "Pane p2", cwd: "/two", status: "idle", focused: false },
     ];
     const enrichments = new Map<string, PanelSessionEnrichment>([
       ["w:p2", { paneId: "w:p2", sessionId: "session-2", commands: [], messages: [{ messageId: "new-message", text: "New response" }] }],
@@ -997,7 +1049,7 @@ describe("panelsFromSnapshot", () => {
 
   test("falls back when the remembered panel is no longer live", () => {
     const panels: HerdrPanel[] = [
-      { id: "w:p1", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
+      { id: "w:p1", agent: "pi", workspace: "one", tab: "", panel: "Pane p1", cwd: "/one", status: "working", focused: true },
     ];
 
     expect(reviewSnapshotFromPanels(panels, "w:p2").selectedMessageId).toBe("w:p1:waiting");
@@ -1172,6 +1224,7 @@ describe("resolveOrCreateAskAiWorkspace", () => {
 describe("selectHerdrAIWorkspace", () => {
   const sameCwdLivePanel: HerdrPanel = {
     id: "w-captain:p1",
+    agent: "pi",
     workspaceId: "w-captain",
     workspace: "captain",
     tab: "",
@@ -1207,6 +1260,7 @@ describe("selectHerdrAIWorkspace", () => {
 describe("isKnownProcessPanelWorkspace (createProcessPanel guard)", () => {
   const livePanel: HerdrPanel = {
     id: "w-live:p1",
+    agent: "pi",
     workspaceId: "w-live",
     workspace: "live",
     tab: "",
@@ -1276,5 +1330,139 @@ describe("resolveHerdrAIWorkspace feature gate (no client cwd)", () => {
       cwd: "/host/app",
     }));
     expect(cwd).toBe("/host/app");
+  });
+});
+
+describe("live panes that are not Pi", () => {
+  const claudePanel: HerdrPanel = {
+    id: "w33:p2", agent: "claude", workspaceId: "w33", workspace: "captain", tab: "review",
+    panel: "Pane p2", cwd: "/repos/b", status: "working", focused: false,
+  };
+  const piPanel: HerdrPanel = {
+    id: "w33:p1", agent: "pi", workspaceId: "w33", workspace: "captain", tab: "main",
+    panel: "Pane p1", cwd: "/repos/a", status: "working", focused: true,
+  };
+
+  test("a Claude pane with no transcript yet says which capabilities are missing and why", () => {
+    const [message] = reviewSnapshotFromPanels([claudePanel]).messages;
+    expect(message.agent).toBe("claude");
+    // Never "waiting for the Pi session": a Claude pane has no Pi session and
+    // never will, so the empty state must name what is actually absent.
+    expect(message.text).not.toContain("Waiting for the Pi session");
+    expect(message.text).toContain("Send feedback");
+    expect(message.text).toContain("Activity trail");
+    expect(message.text).toContain("Context usage");
+    expect(message.text).toContain("Ex AI Chat");
+  });
+
+  test("a Codex pane names its missing transcript rather than implying one is coming", () => {
+    const [message] = reviewSnapshotFromPanels([{ ...claudePanel, agent: "codex", id: "w33:p3" }]).messages;
+    expect(message.agent).toBe("codex");
+    expect(message.text).toContain("No transcript for Codex panes");
+    expect(message.text).toContain("thread id");
+  });
+
+  test("an OpenCode pane names its missing transcript", () => {
+    const [message] = reviewSnapshotFromPanels([{ ...claudePanel, agent: "opencode", id: "w33:p4" }]).messages;
+    expect(message.text).toContain("No transcript for OpenCode panes");
+  });
+
+  test("an unrecognised agent kind is listed, never hidden, and promises nothing", () => {
+    const [message] = reviewSnapshotFromPanels([{ ...claudePanel, agent: "some-future-agent", id: "w33:p5" }]).messages;
+    expect(message.agent).toBe("some-future-agent");
+    expect(message.text).toContain("No transcript for Some Future Agent panes");
+    expect(message.text).toContain("Plannotator has no integration for Some Future Agent panes");
+  });
+
+  test("a Claude pane's disk-sourced transcript renders as rows without inventing Pi-only metadata", () => {
+    const enrichments = new Map<string, PanelSessionEnrichment>([
+      ["w33:p2", {
+        paneId: "w33:p2",
+        sessionId: "5f0b6b3e-0000-4000-8000-000000000001",
+        commands: [],
+        messages: [{ messageId: "msg_2", text: "Newest", timestamp: "2026-07-26T00:00:00.000Z" }, { messageId: "msg_1", text: "Older" }],
+      }],
+    ]);
+    const { messages } = reviewSnapshotFromPanels([claudePanel], null, enrichments);
+    expect(messages.map((message) => [message.assistantMessageId, message.text])).toEqual([
+      ["msg_2", "Newest"],
+      ["msg_1", "Older"],
+    ]);
+    expect(messages[0].agent).toBe("claude");
+    expect(messages[0].description).toBe("Claude Code assistant response");
+    // The Pi extension is the only source of these; a Claude pane must show
+    // them as absent rather than as zeroes.
+    expect(messages[0].contextUsage).toBeUndefined();
+    expect(messages[0].model).toBeUndefined();
+    expect(messages[0].activityTrail).toBeUndefined();
+    expect(messages[0].commands).toEqual([]);
+  });
+
+  test("Pi panes keep their existing rows and metadata verbatim alongside a Claude pane", () => {
+    const enrichments = new Map<string, PanelSessionEnrichment>([
+      ["w33:p1", {
+        paneId: "w33:p1",
+        sessionId: "pi-session-1",
+        commands: [{ name: "handoff-to-continue", source: "extension" }],
+        messages: [{ messageId: "pi-message-1", text: "Pi response" }],
+        contextUsage: { tokens: 1000, contextWindow: 200_000, percent: 0.5 },
+        model: { id: "cx/gpt-5.6-sol", name: "GPT 5.6 Sol" },
+        activityTrail: [{ kind: "tool", name: "read", count: 1 }],
+      }],
+    ]);
+    const { messages } = reviewSnapshotFromPanels([piPanel, claudePanel], null, enrichments);
+    const pi = messages.find((message) => message.paneId === "w33:p1")!;
+    expect(pi.agent).toBe("pi");
+    expect(pi.description).toBe("Pi assistant response");
+    expect(pi.contextUsage).toEqual({ tokens: 1000, contextWindow: 200_000, percent: 0.5 });
+    expect(pi.commands).toEqual([{ name: "handoff-to-continue", source: "extension" }]);
+    expect(pi.activityTrail).toEqual([{ kind: "tool", name: "read", count: 1 }]);
+  });
+});
+
+describe("diskTranscriptOutcomes", () => {
+  const panel = (id: string, agent: string, cwd: string): HerdrPanel => ({
+    id, agent, workspace: "w", tab: "", panel: id, cwd, status: "idle", focused: false,
+  });
+  const transcript = async (cwd: string) => ({ sessionId: `session-for${cwd.replace(/\//g, "-")}`, messages: [{ messageId: "msg_1", text: `hello from ${cwd}` }] });
+
+  test("sources a transcript only for kinds whose registry entry says it can", async () => {
+    const outcomes = await diskTranscriptOutcomes(
+      [panel("w:p1", "pi", "/a"), panel("w:p2", "claude", "/b"), panel("w:p3", "codex", "/c"), panel("w:p4", "opencode", "/d")],
+      new Map(),
+      20,
+      transcript,
+    );
+    expect(outcomes.map((outcome) => outcome.paneId)).toEqual(["w:p2"]);
+    expect(outcomes[0]).toEqual({
+      paneId: "w:p2",
+      enrichment: { paneId: "w:p2", sessionId: "session-for-b", messages: [{ messageId: "msg_1", text: "hello from /b" }], commands: [] },
+    });
+  });
+
+  test("never overwrites an existing extension registration", async () => {
+    const registered = new Map<string, PanelSessionEnrichment>([
+      ["w:p2", { paneId: "w:p2", sessionId: "already-registered", commands: [], messages: [] }],
+    ]);
+    expect(await diskTranscriptOutcomes([panel("w:p2", "claude", "/b")], registered, 20, transcript)).toEqual([]);
+  });
+
+  test("refuses to attribute one session log to two panes sharing a working directory", async () => {
+    // Showing one agent's words under another pane's name is worse than showing
+    // nothing, so both panes get a note instead of a guess.
+    const outcomes = await diskTranscriptOutcomes(
+      [panel("w:p2", "claude", "/b"), panel("w:p3", "claude", "/b/")],
+      new Map(),
+      20,
+      transcript,
+    );
+    expect(outcomes.map((outcome) => outcome.paneId).sort()).toEqual(["w:p2", "w:p3"]);
+    for (const outcome of outcomes) {
+      expect("note" in outcome && outcome.note).toContain("share this working directory");
+    }
+  });
+
+  test("stays silent when a pane simply has no session log yet", async () => {
+    expect(await diskTranscriptOutcomes([panel("w:p2", "claude", "/b")], new Map(), 20, async () => null)).toEqual([]);
   });
 });
