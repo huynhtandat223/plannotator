@@ -168,10 +168,9 @@ curl -fsS http://127.0.0.1:19432/health
 
 `bun run build:ex-pi` regenerates:
 
-- `apps/ex-pi-extension/ex-plannotator.html`
-- `apps/ex-pi-extension/ex-plannotator-plan.html`
+- `apps/ex-pi-extension/ex-plannotator.html` (served by both the Last and Plan commands)
 
-Never edit those generated HTML files manually.
+Never edit that generated HTML file manually.
 
 For browser coverage, use the repository's Chrome AXI workflow to verify at least:
 

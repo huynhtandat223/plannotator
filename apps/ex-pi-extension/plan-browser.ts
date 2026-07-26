@@ -7,7 +7,9 @@ import { startPlanReviewServer, type PlanReviewServer } from "./plan-server.js";
 import type { LiveAssistantMessage } from "./session.js";
 
 const extensionDirectory = dirname(fileURLToPath(import.meta.url));
-const browserAssetPath = resolve(extensionDirectory, "ex-plannotator-plan.html");
+// Plan review serves the same built app as Last: `build` and the removed
+// `build:plan` were the identical command with two copy destinations.
+const browserAssetPath = resolve(extensionDirectory, "ex-plannotator.html");
 
 export function hasPlanReviewBrowserAsset(): boolean { return existsSync(browserAssetPath); }
 

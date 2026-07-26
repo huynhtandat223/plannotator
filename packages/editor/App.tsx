@@ -1495,7 +1495,7 @@ const App: React.FC = () => {
     const selectedPaneId = previousMessages.find((message) => message.messageId === selectedMessageId)?.paneId;
     const changedPaneIds = changedLivePaneSessionIds(previousMessages, snapshot.messages);
     const selectedPaneSessionChanged = changedPaneIds.has(selectedPaneId ?? '');
-    const { nextSelectedMessageId, followNextPaneResponseReset, pendingFocusMessageId } = reconcileLiveMessageSelection(
+    const { nextSelectedMessageId, followNextPaneResponseReset, followedPaneVanished, pendingFocusMessageId } = reconcileLiveMessageSelection(
       previousMessages,
       snapshot.messages,
       selectedMessageId,
@@ -1534,7 +1534,11 @@ const App: React.FC = () => {
     if (selectedWorkspaceMessage?.cwd) setProjectRoot(selectedWorkspaceMessage.cwd);
     if (followNextPaneResponseReset) {
       setFollowNextPaneResponse(null);
-      toast('Agent response received', { description: 'Showing the latest response.' });
+      if (followedPaneVanished) {
+        toast('Followed pane closed', { description: 'The pane you sent feedback to is no longer live.' });
+      } else {
+        toast('Agent response received', { description: 'Showing the latest response.' });
+      }
     }
 
     // A newer response finished in another pane while the reviewer is mid-review
