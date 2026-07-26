@@ -116,7 +116,7 @@ describe('Viewer consumer props', () => {
     expect(document.querySelector('button[title="Attachments"]')).toBeNull();
   });
 
-  test.skipIf(!hasDom)('threads one-click global Send to the host without recording an annotation', async () => {
+  test.skipIf(!hasDom)('accepted direct Send closes, restores trigger focus, and records no annotation', async () => {
     const sent: string[] = [];
     const added: Annotation[] = [];
     await mount(
@@ -130,6 +130,9 @@ describe('Viewer consumer props', () => {
     await act(async () => {
       document.querySelector('button[title="Message Pi"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>('button[title="Expand"]')?.click();
+    });
     const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(textarea), 'value')?.set;
@@ -138,8 +141,13 @@ describe('Viewer consumer props', () => {
     });
     const send = Array.from(document.querySelectorAll('button')).find((button) => button.textContent?.trim() === 'Send');
     await act(async () => send?.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
     expect(sent).toEqual(['send once']);
     expect(added).toEqual([]);
+    expect(document.querySelector('[data-comment-popover="true"]')).toBeNull();
+    expect(document.activeElement).toBe(document.querySelector('button[title="Message Pi"]'));
   });
 
   test.skipIf(!hasDom)('restores server-loaded comment annotations as yellow comment highlights', async () => {

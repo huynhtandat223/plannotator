@@ -21,6 +21,7 @@ describe("Ex-Plannotator build isolation", () => {
 		expect(gate).toContain("selectedLiveMessage?.paneId");
 		expect(gate).not.toContain("assistantMessageId");
 		expect(browserAsset).toContain("onSendGlobalComment");
+		expect(browserAsset).toContain("direct-send-close-and-restore-focus");
 		expect(browserAsset.match(/\/api\/instruction/g)?.length).toBeGreaterThanOrEqual(2);
 	});
 
