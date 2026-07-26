@@ -1345,7 +1345,7 @@ const App: React.FC = () => {
   ]);
 
   const getMessageStatesWithCurrent = React.useCallback((): Map<string, MessageAnnotationState> => {
-    const states = new Map(messageStateCacheRef.current);
+    const states = new Map<string, MessageAnnotationState>(messageStateCacheRef.current);
     const current = buildCurrentMessageState();
     if (current) states.set(current.messageId, current);
     return states;
@@ -1410,7 +1410,7 @@ const App: React.FC = () => {
 
   const clearSelectedLiveFeedback = React.useCallback(() => {
     if (!selectedMessageId) return;
-    const nextStates = new Map(messageStateCacheRef.current);
+    const nextStates = new Map<string, MessageAnnotationState>(messageStateCacheRef.current);
     nextStates.delete(selectedMessageId);
     messageStateCacheRef.current = nextStates;
     setCachedMessageAnnotationCounts(buildMessageAnnotationCounts(nextStates));
@@ -1429,7 +1429,7 @@ const App: React.FC = () => {
   }, [selectedMessageId, buildCurrentMessageState, cachedMessageAnnotationCounts]);
 
   const activeMessageAnnotationCounts = React.useMemo(() => {
-    const counts = new Map(cachedMessageAnnotationCounts);
+    const counts = new Map<string, number>(cachedMessageAnnotationCounts);
     const current = buildCurrentMessageState();
     if (current) {
       const count = countMessageAnnotations(current);
@@ -1804,7 +1804,7 @@ const App: React.FC = () => {
 
   // Flash highlight for annotated files in the sidebar
   const [highlightedFiles, setHighlightedFiles] = useState<Set<string> | undefined>();
-  const flashTimerRef = React.useRef<ReturnType<typeof setTimeout>>();
+  const flashTimerRef = React.useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const handleFlashAnnotatedFiles = React.useCallback(() => {
     const filePaths = new Set(allAnnotationCounts.keys());
     if (filePaths.size === 0) return;
@@ -2762,7 +2762,7 @@ const App: React.FC = () => {
     const handleReconcileEvent = (event: SourceDocumentReconcileEvent) => {
       const { result } = event;
       if (event.type === 'file-missing') {
-        if (!result.alreadyMissing && result.record.key === editableDocuments.getActiveKey()) {
+        if (!event.result.alreadyMissing && result.record.key === editableDocuments.getActiveKey()) {
           setEditorDiffersFromBaseline(result.record.currentText !== result.record.diskBaseline);
           if (isEditingMarkdownRef.current) {
             setEditorDirty(result.record.currentText !== editSessionBaseRef.current);
@@ -2789,7 +2789,7 @@ const App: React.FC = () => {
           setEditorDiffersFromBaseline(false);
           setEditStats(null);
         }
-        if (result.clearedSavedChange) {
+        if (event.result.clearedSavedChange) {
           toast('File updated from disk', {
             description: `${result.record.basename} changed outside Plannotator, so its old Edits card was cleared.`,
           });
@@ -2898,7 +2898,7 @@ const App: React.FC = () => {
         if (!res.ok) throw new Error('Not in API mode');
         return res.json();
       })
-      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'archive' | 'goal-setup'; goalSetup?: GoalSetupBundle; filePath?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; renderAs?: 'html' | 'markdown'; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; archivePlans?: ArchivedPlan[]; projectRoot?: string; isWSL?: boolean; serverConfig?: { displayName?: string; gitUser?: string }; recentMessages?: PickerMessage[]; selectedMessageId?: string; agentTerminal?: AgentTerminalCapability; liveMessageReview?: boolean; liveMessageReviewReloadOnSelection?: boolean; liveMessageReviewReadOnly?: boolean; contextHandoffHighPercent?: number; planReview?: PlanReviewCapability }) => {
+      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'archive' | 'goal-setup'; goalSetup?: GoalSetupBundle; filePath?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; renderAs?: 'html' | 'markdown'; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; archivePlans?: ArchivedPlan[]; projectRoot?: string; isWSL?: boolean; serverConfig?: { displayName?: string; gitUser?: string }; recentMessages?: PickerMessage[]; selectedMessageId?: string; revision?: number; agentTerminal?: AgentTerminalCapability; liveMessageReview?: boolean; liveMessageReviewReloadOnSelection?: boolean; liveMessageReviewReadOnly?: boolean; contextHandoffHighPercent?: number; planReview?: PlanReviewCapability }) => {
         // Initialize config store with server-provided values (config file > cookie > default)
         configStore.init(data.serverConfig);
         // Session-level force-markdown preference (--markdown); threaded into folder/linked
@@ -4532,8 +4532,8 @@ const App: React.FC = () => {
       const data = (await res.json()) as SourceSaveResponse;
 
       if (!res.ok || !data.ok) {
-        const message = !data.ok ? data.message : 'Save failed';
-        if (!data.ok && data.code === 'conflict') {
+        const message = data.ok === false ? data.message : 'Save failed';
+        if (data.ok === false && data.code === 'conflict') {
           const hasConflictSnapshot = hasSourceSaveConflictSnapshot(data);
           if (hasConflictSnapshot) {
             const conflictSourceSave: EnabledSourceSaveCapability = {
@@ -5305,7 +5305,7 @@ const App: React.FC = () => {
                 selectedMessageId={selectedMessageId}
                 onSelectMessage={handleSelectMessage}
                 messageAnnotationCounts={activeMessageAnnotationCounts}
-                captainEchoes={captainEchoAnchors}
+                messageCaptainEchoes={captainEchoAnchors}
                 messagesChronological={liveMessageReview}
                 messagesChatLayout={liveMessageReview}
                 messagesAutoLoadOnScroll={liveMessageReview}

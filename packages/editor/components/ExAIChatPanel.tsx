@@ -66,7 +66,7 @@ export const ExAIChatPanel: React.FC<{
   error: string | null;
   onStart: (model: string, instruction: string) => Promise<void>;
   onSend: (text: string) => Promise<void>;
-  onHandoff: (requestId: string, text: string) => Promise<void>;
+  onHandoff: (requestId: string, text: string) => Promise<unknown>;
   /** The current main last-message boundary the suggestions target; informational. */
   suggestBoundaryId?: string | null;
 }> = ({ state, error, onStart, onSend, onHandoff }) => {

@@ -312,7 +312,7 @@ export const AnnotateAgentTerminalPanel = forwardRef<
       className="hidden lg:flex h-full flex-shrink-0 flex-col border-r border-border bg-card"
       style={{ width }}
     >
-      {!capability.enabled ? (
+      {capability.enabled === false ? (
         <div className="flex flex-1 flex-col justify-center gap-2 px-4 text-center">
           <p className="text-xs font-medium text-foreground">Agent unavailable</p>
           <p className="text-[11px] leading-5 text-muted-foreground">

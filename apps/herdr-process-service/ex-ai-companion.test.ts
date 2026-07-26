@@ -63,7 +63,7 @@ describe("Ex AI companion contract", () => {
         service.start(main, { model: "provider/model", instruction: "Help carefully" }),
       ]);
       expect(fake.created).toEqual(["companion-1"]);
-      expect(first.pair.companion.paneId).toBe("companion-1");
+      expect(first.pair?.companion.paneId).toBe("companion-1");
       expect(second.pair).toEqual(first.pair);
 
       await service.sendTurn(main, "What changed?");

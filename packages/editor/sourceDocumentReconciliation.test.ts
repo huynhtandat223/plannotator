@@ -4,7 +4,7 @@ import {
   reconcileSourceDocuments,
   type OpenSourceDocumentRecord,
 } from './sourceDocumentReconciliation';
-import type { EditableDocumentRecord, EnabledSourceSaveCapability } from './editableDocuments';
+import type { EnabledSourceSaveCapability } from './editableDocuments';
 
 function sourceSave(hash: string, text = 'after\n'): EnabledSourceSaveCapability {
   return {
@@ -48,7 +48,7 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 
 describe('reconcileSourceDocuments', () => {
   test('ignores an older disk read after a newer reconcile starts', async () => {
-    let current: EditableDocumentRecord = record();
+    let current: OpenSourceDocumentRecord = record();
     const oldFetch = deferred<SourceDocumentSnapshotResult>();
     const newSource = sourceSave('sha256:new', 'new\n');
     const fetches = [
@@ -89,7 +89,7 @@ describe('reconcileSourceDocuments', () => {
   });
 
   test('ignores a disk read when the document changed while fetch was pending', async () => {
-    let current: EditableDocumentRecord = record();
+    let current: OpenSourceDocumentRecord = record();
     const staleFetch = deferred<SourceDocumentSnapshotResult>();
     let applied = false;
     const reconcile = reconcileSourceDocuments({
