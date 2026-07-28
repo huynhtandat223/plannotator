@@ -173,3 +173,96 @@ test.skipIf(!hasDom)('aligns visibility with lg: breakpoints for desktop session
   const mobileOpener = Array.from(el.querySelectorAll('button')).find((button) => button.textContent === 'Sessions')!;
   expect(mobileOpener.className).toContain('lg:hidden');
 });
+
+test.skipIf(!hasDom)('at mobile 412x915, history is collapsed by default, displays only selected response primacy, and toggles history correctly', async () => {
+  const originalWidth = window.innerWidth;
+  window.innerWidth = 412;
+  window.dispatchEvent(new Event('resize'));
+
+  try {
+    const messages = [
+      message('p1:r3', 'p1', 'pi-1', 'compile', 'newest turn response'),
+      message('p1:r2', 'p1', 'pi-1', 'compile', 'selected middle response'),
+      message('p1:r1', 'p1', 'pi-1', 'compile', 'older response'),
+    ];
+    // Render on mobile with selectedMessageId set to middle response
+    const el = await render({
+      messages,
+      activeTimelineMessages: [...messages].reverse(),
+      selectedMessageId: 'p1:r2',
+    });
+
+    // 1. Proving default collapsed state and selected response primacy
+    // When collapsed, only the selected message should be rendered inside the timeline scroll area.
+    const messageRows = Array.from(el.querySelectorAll('[data-live-timeline-scroll="true"] button')).filter((btn) => 
+      btn.textContent?.includes('response') && !btn.textContent?.includes('Jump') && !btn.textContent?.includes('Back')
+    );
+    expect(messageRows.length).toBe(1);
+    expect(messageRows[0].textContent).toContain('selected middle response');
+    expect(messageRows[0].textContent).not.toContain('newest turn response');
+    expect(messageRows[0].textContent).not.toContain('older response');
+
+    // Header has "Show history" button by default on mobile
+    const toggleBtn = Array.from(el.querySelectorAll('button')).find((btn) => btn.textContent === 'Show history')!;
+    expect(toggleBtn).toBeTruthy();
+
+    // 2. Toggle behavior - expand
+    await act(async () => toggleBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    
+    // Now history is expanded. All 3 messages should be visible inside the timeline scroll area.
+    const expandedMessageRows = Array.from(el.querySelectorAll('[data-live-timeline-scroll="true"] button')).filter((btn) => 
+      btn.textContent?.includes('response') && !btn.textContent?.includes('Jump') && !btn.textContent?.includes('Back')
+    );
+    expect(expandedMessageRows.length).toBe(3);
+    
+    // Header should now show "Hide history" button
+    const hideBtn = Array.from(el.querySelectorAll('button')).find((btn) => btn.textContent === 'Hide history')!;
+    expect(hideBtn).toBeTruthy();
+
+    // 3. Toggle behavior - collapse
+    await act(async () => hideBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+
+    // Back to collapsed. Only selected response visible inside the timeline scroll area.
+    const collapsedMessageRows = Array.from(el.querySelectorAll('[data-live-timeline-scroll="true"] button')).filter((btn) => 
+      btn.textContent?.includes('response') && !btn.textContent?.includes('Jump') && !btn.textContent?.includes('Back')
+    );
+    expect(collapsedMessageRows.length).toBe(1);
+    expect(collapsedMessageRows[0].textContent).toContain('selected middle response');
+
+  } finally {
+    window.innerWidth = originalWidth;
+    window.dispatchEvent(new Event('resize'));
+  }
+});
+
+test.skipIf(!hasDom)('displays Back to latest button and navigates back when selected response is not the latest', async () => {
+  const originalWidth = window.innerWidth;
+  window.innerWidth = 1024; // desktop to show all
+  window.dispatchEvent(new Event('resize'));
+
+  try {
+    const messages = [
+      message('p1:r3', 'p1', 'pi-1', 'compile', 'latest turn response'),
+      message('p1:r2', 'p1', 'pi-1', 'compile', 'older response 2'),
+      message('p1:r1', 'p1', 'pi-1', 'compile', 'older response 1'),
+    ];
+    
+    const selectedIds: string[] = [];
+    const el = await render({
+      messages,
+      activeTimelineMessages: [...messages].reverse(),
+      selectedMessageId: 'p1:r2', // older response selected
+      onSelectMessage: (id) => selectedIds.push(id),
+    });
+
+    const backToLatestBtn = Array.from(el.querySelectorAll('[data-live-timeline-scroll="true"] button')).find((btn) => btn.textContent === 'Back to latest')!;
+    expect(backToLatestBtn).toBeTruthy();
+
+    await act(async () => backToLatestBtn.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(selectedIds).toEqual(['p1:r3']); // should select latest message ID
+
+  } finally {
+    window.innerWidth = originalWidth;
+    window.dispatchEvent(new Event('resize'));
+  }
+});

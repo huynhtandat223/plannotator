@@ -619,6 +619,26 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
           Jump to latest
         </button>
       )}
+      {selectedMessageId !== undefined && selectedMessageId !== null && messages[latestIndex] !== undefined && selectedMessageId !== messages[latestIndex].messageId && (
+        <button
+          type="button"
+          onClick={() => {
+            const latestMsg = messages[latestIndex];
+            if (latestMsg) {
+              onSelect(latestMsg.messageId);
+              setTimeout(() => {
+                latestRowRef.current?.scrollIntoView({
+                  block: chronological ? "end" : "start",
+                  behavior: "smooth",
+                });
+              }, 50);
+            }
+          }}
+          className="w-full mb-1 px-2 py-1 rounded text-[10px] font-medium text-primary border border-primary/30 bg-primary/10 hover:bg-primary/20 transition-colors"
+        >
+          Back to latest
+        </button>
+      )}
       <div className="space-y-0.5">
         {herdGroups
           ? herdGroups.map((group) => (

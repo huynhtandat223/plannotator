@@ -1,6 +1,7 @@
 import React from 'react';
 import { MessagesBrowser, type CaptainEcho, type PickerMessage } from '@plannotator/ui/components/sidebar/MessagesBrowser';
 import { OverlayScrollArea } from '@plannotator/ui/components/OverlayScrollArea';
+import { useIsMobile } from '@plannotator/ui/hooks/useIsMobile';
 import { deriveLivePaneChips, type LivePaneChip } from './livePaneChips';
 import { type LiveSessionKey } from './live/liveSessionTimeline';
 
@@ -135,6 +136,9 @@ export const LiveSessionTimeline = React.memo(({
   jumpToLatestSignal,
 }: LiveSessionTimelineProps) => {
   const [mobileSessionsOpen, setMobileSessionsOpen] = React.useState(false);
+  const isMobile = useIsMobile(1024);
+  const [historyExpanded, setHistoryExpanded] = React.useState(false);
+
   const { visible, overflow } = React.useMemo(
     () => deriveLivePaneChips(messages, {
       selectedMessageId,
@@ -154,10 +158,32 @@ export const LiveSessionTimeline = React.memo(({
   }), [visible, overflow, messages]);
   const active = sessions.find((session) => session.sessionKey === activeSessionKey) ?? sessions[0];
 
+  const filteredMessages = React.useMemo(() => {
+    if (isMobile && !historyExpanded) {
+      const selected = activeTimelineMessages.find((m) => m.messageId === selectedMessageId);
+      if (selected) return [selected];
+      if (activeTimelineMessages.length > 0) return [activeTimelineMessages[activeTimelineMessages.length - 1]];
+      return [];
+    }
+    return activeTimelineMessages;
+  }, [isMobile, historyExpanded, activeTimelineMessages, selectedMessageId]);
+
+  const filteredEchoes = React.useMemo(() => {
+    if (isMobile && !historyExpanded) {
+      return new Map();
+    }
+    return captainEchoes;
+  }, [isMobile, historyExpanded, captainEchoes]);
+
   if (!active) return null;
 
   return (
-    <section data-live-session-timeline="true" className="flex min-h-0 w-full flex-1 flex-col rounded-xl border border-border/60 bg-card shadow-sm">
+    <section
+      data-live-session-timeline="true"
+      className={`flex min-h-0 w-full flex-1 flex-col rounded-xl border border-border/60 bg-card shadow-sm ${
+        isMobile ? (historyExpanded ? 'h-[min(50dvh,34rem)] min-h-[22rem]' : 'h-auto min-h-0') : 'h-full'
+      }`}
+    >
       <header className="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-2 lg:px-4">
         <div className="min-w-0 flex-1">
           <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Agent Response</p>
@@ -173,15 +199,26 @@ export const LiveSessionTimeline = React.memo(({
             )}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => setMobileSessionsOpen(true)}
-          aria-haspopup="dialog"
-          aria-expanded={mobileSessionsOpen}
-          className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs font-medium hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:hidden"
-        >
-          Sessions
-        </button>
+        <div className="flex items-center gap-1.5 lg:hidden">
+          {activeTimelineMessages.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setHistoryExpanded(!historyExpanded)}
+              className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs font-medium hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:hidden"
+            >
+              {historyExpanded ? 'Hide history' : 'Show history'}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setMobileSessionsOpen(true)}
+            aria-haspopup="dialog"
+            aria-expanded={mobileSessionsOpen}
+            className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs font-medium hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:hidden"
+          >
+            Sessions
+          </button>
+        </div>
       </header>
       <div className="hidden min-h-0 border-b border-border/60 lg:block">
         <OverlayScrollArea className="max-h-52" style={{ overscrollBehaviorY: 'contain' }}>
@@ -206,11 +243,11 @@ export const LiveSessionTimeline = React.memo(({
           </div>
         )}
         <MessagesBrowser
-          messages={activeTimelineMessages}
+          messages={filteredMessages}
           selectedMessageId={selectedMessageId}
           onSelect={onSelectMessage}
           annotationCounts={annotationCounts}
-          captainEchoes={captainEchoes}
+          captainEchoes={filteredEchoes}
           chronological
           chatLayout
           autoLoadOnScroll
