@@ -3,7 +3,10 @@ import { MessagesBrowser, type CaptainEcho, type PickerMessage } from '@plannota
 import { OverlayScrollArea } from '@plannotator/ui/components/OverlayScrollArea';
 import { useIsMobile } from '@plannotator/ui/hooks/useIsMobile';
 import { deriveLivePaneChips, type LivePaneChip } from './livePaneChips';
+import { LIVE_MESSAGE_RETENTION } from '@plannotator/core/live-message-window';
 import { type LiveSessionKey } from './live/liveSessionTimeline';
+
+const MOBILE_HISTORY_ROW_LIMIT = Math.min(5, LIVE_MESSAGE_RETENTION);
 
 export type LiveSessionTimelineProps = {
   /** Stable newest-first snapshot rows: owns switcher cards and telemetry identity. */
@@ -138,6 +141,7 @@ export const LiveSessionTimeline = React.memo(({
   const [mobileSessionsOpen, setMobileSessionsOpen] = React.useState(false);
   const isMobile = useIsMobile(1024);
   const [historyExpanded, setHistoryExpanded] = React.useState(false);
+  const historyRegionId = React.useId();
 
   const { visible, overflow } = React.useMemo(
     () => deriveLivePaneChips(messages, {
@@ -158,22 +162,20 @@ export const LiveSessionTimeline = React.memo(({
   }), [visible, overflow, messages]);
   const active = sessions.find((session) => session.sessionKey === activeSessionKey) ?? sessions[0];
 
-  const filteredMessages = React.useMemo(() => {
-    if (isMobile && !historyExpanded) {
-      const selected = activeTimelineMessages.find((m) => m.messageId === selectedMessageId);
-      if (selected) return [selected];
-      if (activeTimelineMessages.length > 0) return [activeTimelineMessages[activeTimelineMessages.length - 1]];
-      return [];
-    }
-    return activeTimelineMessages;
-  }, [isMobile, historyExpanded, activeTimelineMessages, selectedMessageId]);
+  const selectedMessage = React.useMemo(
+    () => activeTimelineMessages.find((message) => message.messageId === selectedMessageId)
+      ?? activeTimelineMessages.at(-1)
+      ?? null,
+    [activeTimelineMessages, selectedMessageId],
+  );
+  const historyMessages = React.useMemo(
+    () => activeTimelineMessages.slice(-MOBILE_HISTORY_ROW_LIMIT),
+    [activeTimelineMessages],
+  );
 
-  const filteredEchoes = React.useMemo(() => {
-    if (isMobile && !historyExpanded) {
-      return new Map();
-    }
-    return captainEchoes;
-  }, [isMobile, historyExpanded, captainEchoes]);
+  React.useEffect(() => {
+    if (!isMobile) setHistoryExpanded(false);
+  }, [isMobile]);
 
   if (!active) return null;
 
@@ -200,11 +202,13 @@ export const LiveSessionTimeline = React.memo(({
           </p>
         </div>
         <div className="flex items-center gap-1.5 lg:hidden">
-          {activeTimelineMessages.length > 0 && (
+          {historyMessages.length > 1 && (
             <button
               type="button"
-              onClick={() => setHistoryExpanded(!historyExpanded)}
-              className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs font-medium hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:hidden"
+              onClick={() => setHistoryExpanded((expanded) => !expanded)}
+              aria-controls={historyRegionId}
+              aria-expanded={historyExpanded}
+              className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs font-medium hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               {historyExpanded ? 'Hide history' : 'Show history'}
             </button>
@@ -225,37 +229,61 @@ export const LiveSessionTimeline = React.memo(({
           <SessionList chips={sessions} activeSessionKey={activeSessionKey} unreadCountBySession={unreadCountBySession} onActivateSession={onActivateSession} />
         </OverlayScrollArea>
       </div>
-      <OverlayScrollArea
-        className="min-h-0 flex-1"
-        data-live-timeline-scroll="true"
-        tabIndex={0}
-        style={{ overscrollBehaviorY: 'contain' }}
-      >
-        {newReplyCount > 0 && (
-          <div className="sticky top-0 z-10 px-3 pt-2">
-            <button
-              type="button"
-              onClick={onJumpToNewReplies}
-              className="w-full rounded-md border border-primary/35 bg-primary/10 px-2 py-1.5 text-xs font-medium text-primary hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              {newReplyCount} new repl{newReplyCount === 1 ? 'y' : 'ies'} · Jump to new replies
-            </button>
-          </div>
-        )}
-        <MessagesBrowser
-          messages={filteredMessages}
-          selectedMessageId={selectedMessageId}
-          onSelect={onSelectMessage}
-          annotationCounts={annotationCounts}
-          captainEchoes={filteredEchoes}
-          chronological
-          chatLayout
-          autoLoadOnScroll
-          listLabel="Session responses"
-          emptyLabel="No assistant response in this session yet."
-          jumpToLatestSignal={jumpToLatestSignal}
-        />
-      </OverlayScrollArea>
+      {isMobile && !historyExpanded ? (
+        <div data-live-timeline-selected-response="true" className="p-2">
+          {selectedMessage ? (
+            <MessagesBrowser
+              messages={[selectedMessage]}
+              selectedMessageId={selectedMessage.messageId}
+              onSelect={onSelectMessage}
+              annotationCounts={annotationCounts}
+              chronological
+              chatLayout
+              listLabel="Selected response"
+              emptyLabel="No assistant response in this session yet."
+              showCountControl={false}
+            />
+          ) : (
+            <p className="p-2 text-xs text-muted-foreground">No assistant response in this session yet.</p>
+          )}
+        </div>
+      ) : (
+        <OverlayScrollArea
+          id={historyRegionId}
+          aria-label="Response history"
+          className="min-h-0 flex-1"
+          data-live-timeline-scroll="true"
+          tabIndex={0}
+          style={{ overscrollBehaviorY: 'contain' }}
+        >
+          {newReplyCount > 0 && (
+            <div className="sticky top-0 z-10 px-3 pt-2">
+              <button
+                type="button"
+                onClick={onJumpToNewReplies}
+                className="w-full rounded-md border border-primary/35 bg-primary/10 px-2 py-1.5 text-xs font-medium text-primary hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {newReplyCount} new repl{newReplyCount === 1 ? 'y' : 'ies'} · Jump to new replies
+              </button>
+            </div>
+          )}
+          <MessagesBrowser
+            messages={isMobile ? historyMessages : activeTimelineMessages}
+            selectedMessageId={selectedMessageId}
+            onSelect={onSelectMessage}
+            annotationCounts={annotationCounts}
+            captainEchoes={captainEchoes}
+            chronological
+            chatLayout
+            autoLoadOnScroll={!isMobile}
+            listLabel="Session responses"
+            emptyLabel="No assistant response in this session yet."
+            jumpToLatestSignal={jumpToLatestSignal}
+            rowBudgetOverride={isMobile ? MOBILE_HISTORY_ROW_LIMIT : undefined}
+            showCountControl={!isMobile}
+          />
+        </OverlayScrollArea>
+      )}
       {mobileSessionsOpen && (
         <div className="fixed inset-0 z-[80] flex bg-black/50 lg:hidden" role="presentation" onClick={() => setMobileSessionsOpen(false)}>
           <section
