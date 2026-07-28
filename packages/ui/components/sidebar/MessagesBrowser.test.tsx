@@ -375,6 +375,38 @@ test.skipIf(!hasDom)('Jump to latest reliably targets the chronological newest r
   expect(calls).toEqual([{ block: 'end', behavior: 'smooth' }]);
 });
 
+test.skipIf(!hasDom)('external new-replies jump signal targets the latest chronological row without selecting it', async () => {
+  useMemoryStorage();
+  const scroller = document.createElement('div');
+  scroller.style.overflowY = 'auto';
+  host = document.createElement('div');
+  scroller.append(host);
+  document.body.append(scroller);
+  Object.defineProperties(scroller, {
+    clientHeight: { configurable: true, value: 200 },
+    scrollHeight: { configurable: true, value: 500 },
+  });
+  scroller.getBoundingClientRect = () => ({ top: 0, bottom: 200, left: 0, right: 300, width: 300, height: 200, x: 0, y: 0, toJSON() {} });
+  root = createRoot(host);
+  await act(async () => {
+    root!.render(<MessagesBrowser chronological jumpToLatestSignal={0} messages={[
+      { messageId: 'm1', text: 'Oldest response' },
+      { messageId: 'm2', text: 'Newest response' },
+    ]} selectedMessageId="m1" onSelect={() => {}} />);
+  });
+  const newest = Array.from(host.querySelectorAll('button')).find((button) => button.textContent?.includes('Newest response'))!;
+  const calls: ScrollIntoViewOptions[] = [];
+  newest.scrollIntoView = (options) => calls.push(options as ScrollIntoViewOptions);
+  await act(async () => {
+    root!.render(<MessagesBrowser chronological jumpToLatestSignal={1} messages={[
+      { messageId: 'm1', text: 'Oldest response' },
+      { messageId: 'm2', text: 'Newest response' },
+    ]} selectedMessageId="m1" onSelect={() => {}} />);
+  });
+  expect(calls).toEqual([{ block: 'end', behavior: 'smooth' }]);
+  expect(host.querySelector('[aria-current="true"]')?.textContent).toContain('Oldest response');
+});
+
 test('detects the history edge for both list orderings', () => {
   const metrics = { scrollTop: 40, scrollHeight: 1000, clientHeight: 300 };
   expect(isNearHistoryEdge(metrics, true)).toBe(true);

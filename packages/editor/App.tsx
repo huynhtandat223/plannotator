@@ -155,7 +155,7 @@ import { fullReviewUrlForBrowser } from './fullReviewUrl';
 import { reconcileSourceDocuments, type SourceDocumentReconcileEvent } from './sourceDocumentReconciliation';
 import { dirnameBrowserPath, normalizeBrowserPath, pathIsInsideDir } from './sourceDocumentPaths';
 import { pickRestoredSingleFileDraftToDisplay } from './draftRestoreSelection';
-import { changedLivePaneSessionIds, discardMessageStatesForChangedPanes, reconcileLiveMessageSelection } from './liveMessageScope';
+import { changedLivePaneSessionIds, discardMessageStatesForChangedPanes } from './liveMessageScope';
 import {
   appendCaptainEcho,
   buildCaptainEchoAnchors,
@@ -169,7 +169,18 @@ import {
 import { deriveLiveActivityChip } from './liveActivityChip';
 import { LiveActivityChip } from './LiveActivityChipView';
 import { deriveLiveActivityTrail, formatLiveActivityTrail, formatTrailStep, type LiveActivityTrailStep } from './liveActivityTrail';
-import { LivePaneChipsRow } from './LivePaneChipsRow';
+import { LiveSessionTimeline } from './LiveSessionTimeline';
+import {
+  activateLiveSession,
+  createLiveSessionTimelineState,
+  markLiveSessionRepliesSeen,
+  reconcileLiveSessionTimeline,
+  selectLiveSessionMessage,
+  stableLiveSessionMessages,
+  stableLiveTimelineMessages,
+  type LiveSessionKey,
+  type LiveSessionTimelineState,
+} from './live/liveSessionTimeline';
 import { LivePaneLimitationsNotice } from './LivePaneLimitationsNotice';
 import {
   livePaneAgentLabel,
@@ -677,21 +688,21 @@ const App: React.FC = () => {
   // a single pane session transition cannot discard drafts or toast repeatedly.
   const liveSnapshotMessagesRef = useRef<PickerMessage[]>([]);
   const liveSnapshotRevisionRef = useRef<number | null>(null);
-  // The last focused-in-another-pane response we already notified about, so
-  // repeated snapshots for the same response don't re-toast.
-  const notifiedPendingFocusRef = useRef<string | null>(null);
-  // A newer response finished in another pane while the reviewer stayed on the
-  // current one. Surfaced as a badge on the Messages tab instead of a toast.
-  const [pendingResponseMessageId, setPendingResponseMessageId] = useState<string | null>(null);
+  // Live history owns two independent captain choices: the session being read
+  // and the assistant response being annotated. Never derive one from Herdr's
+  // focused pane on a later SSE frame.
+  const [liveSessionTimeline, setLiveSessionTimeline] = useState<LiveSessionTimelineState>(() => createLiveSessionTimelineState([], null));
+  const liveSessionTimelineRef = useRef(liveSessionTimeline);
+  useEffect(() => { liveSessionTimelineRef.current = liveSessionTimeline; }, [liveSessionTimeline]);
+  const [liveTimelineJumpSignal, setLiveTimelineJumpSignal] = useState(0);
+  // The active transcript must not receive new object identities merely because
+  // a host telemetry frame changed status/tool/context fields.
+  const stableLiveTimelineMessagesRef = useRef<PickerMessage[]>([]);
+  const stableLiveSessionMessagesRef = useRef<PickerMessage[]>([]);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   // This capability is only emitted by Ex-Plannotator. Official annotate-last
   // sessions keep their terminal submit behavior and never open this adapter.
   const [liveMessageReview, setLiveMessageReview] = useState(false);
-  // False until a reviewer deliberately picks a response. Until then, the
-  // server-selected Herdr pane is authoritative, including focus changes that
-  // happen between /api/plan and the first SSE snapshot.
-  const [liveMessageSelectionPinned, setLiveMessageSelectionPinned] = useState(false);
-  const [liveMessageReviewReloadOnSelection, setLiveMessageReviewReloadOnSelection] = useState(true);
   const [liveMessageReviewReadOnly, setLiveMessageReviewReadOnly] = useState(false);
   const [contextHandoffHighPercent, setContextHandoffHighPercent] = useState<number>();
   // Browser-local echo of messages this browser sent to a live pane, so the
@@ -1402,11 +1413,25 @@ const App: React.FC = () => {
     });
   }, [annotateSource, recentMessages, getMessageStatesWithCurrent]);
 
+  const activeLiveSessionKey = liveMessageReview ? liveSessionTimeline.activeSessionKey : null;
+  const stableLiveSessions = React.useMemo(() => {
+    const previous = stableLiveSessionMessagesRef.current;
+    const next = liveMessageReview ? stableLiveSessionMessages(previous, recentMessages) : [];
+    stableLiveSessionMessagesRef.current = next;
+    return next;
+  }, [liveMessageReview, recentMessages]);
+  const activeLiveTimelineMessages = React.useMemo(() => {
+    const previous = stableLiveTimelineMessagesRef.current;
+    const next = liveMessageReview
+      ? stableLiveTimelineMessages(previous, stableLiveSessions, activeLiveSessionKey)
+      : [];
+    stableLiveTimelineMessagesRef.current = next;
+    return next;
+  }, [liveMessageReview, stableLiveSessions, activeLiveSessionKey]);
   const selectedLivePaneMessages = React.useMemo(() => {
-    if (!liveWorkspaceMode) return recentMessages;
-    const paneId = recentMessages.find((message) => message.messageId === selectedMessageId)?.paneId;
-    return paneId ? recentMessages.filter((message) => message.paneId === paneId) : recentMessages;
-  }, [liveWorkspaceMode, recentMessages, selectedMessageId]);
+    if (!liveMessageReview) return recentMessages;
+    return activeLiveTimelineMessages;
+  }, [liveMessageReview, activeLiveTimelineMessages, recentMessages]);
 
   // A Global Comment in any real live Pi pane is a new user message.
   // Selection/code comments still use the review-annotation flow.
@@ -1495,8 +1520,6 @@ const App: React.FC = () => {
     const msg = recentMessages.find((m) => m.messageId === messageId);
     if (!msg || messageId === selectedMessageId) return;
 
-    if (pendingResponseMessageId === messageId) setPendingResponseMessageId(null);
-
     if (liveMessageReview && msg.cwd) setProjectRoot(msg.cwd);
     const states = saveCurrentMessageState();
     const targetState = normalizeMessageState(
@@ -1505,18 +1528,39 @@ const App: React.FC = () => {
     );
 
     setSelectedMessageId(messageId);
-    if (liveMessageReview) setLiveMessageSelectionPinned(true);
+    if (liveMessageReview) {
+      const nextTimeline = selectLiveSessionMessage(liveSessionTimelineRef.current, msg);
+      liveSessionTimelineRef.current = nextTimeline;
+      setLiveSessionTimeline(nextTimeline);
+    }
     linkedDocHook.restoreSession(targetState.linkedDocSession);
     setCodeAnnotations([...targetState.codeAnnotations]);
     setSelectedCodeAnnotationId(targetState.selectedCodeAnnotationId);
   }, [
     recentMessages,
     selectedMessageId,
-    pendingResponseMessageId,
     liveMessageReview,
     saveCurrentMessageState,
     linkedDocHook.restoreSession,
   ]);
+
+  const handleActivateLiveSession = React.useCallback((key: LiveSessionKey) => {
+    const nextTimeline = activateLiveSession(liveSessionTimelineRef.current, key, recentMessages);
+    if (nextTimeline === liveSessionTimelineRef.current) return;
+    liveSessionTimelineRef.current = nextTimeline;
+    setLiveSessionTimeline(nextTimeline);
+    const targetMessageId = nextTimeline.selectedMessageIdBySession[key];
+    if (targetMessageId) handleSelectMessage(targetMessageId);
+  }, [recentMessages, handleSelectMessage]);
+
+  const handleJumpToLiveReplies = React.useCallback(() => {
+    const key = liveSessionTimelineRef.current.activeSessionKey;
+    if (!key) return;
+    const nextTimeline = markLiveSessionRepliesSeen(liveSessionTimelineRef.current, key);
+    liveSessionTimelineRef.current = nextTimeline;
+    setLiveSessionTimeline(nextTimeline);
+    setLiveTimelineJumpSignal((current) => current + 1);
+  }, []);
 
   // Applies the Ex-only server snapshot without changing the normal
   // annotate-last state flow. Existing message states stay keyed by messageId,
@@ -1532,17 +1576,14 @@ const App: React.FC = () => {
     const previousMessages = liveSnapshotMessagesRef.current.length > 0
       ? liveSnapshotMessagesRef.current
       : recentMessages;
-    const selectedPaneId = previousMessages.find((message) => message.messageId === selectedMessageId)?.paneId;
     const changedPaneIds = changedLivePaneSessionIds(previousMessages, snapshot.messages);
-    const selectedPaneSessionChanged = changedPaneIds.has(selectedPaneId ?? '');
-    const { nextSelectedMessageId, followNextPaneResponseReset, followedPaneVanished, pendingFocusMessageId } = reconcileLiveMessageSelection(
-      previousMessages,
-      snapshot.messages,
-      selectedMessageId,
-      snapshot.selectedMessageId,
-      followNextPaneResponse,
-      liveMessageSelectionPinned,
-    );
+    // Complete host snapshots are data updates, never navigation instructions.
+    // The reducer retains active session/response unless its physical session is
+    // gone; it also returns the same object for telemetry-only frames.
+    const previousTimeline = liveSessionTimelineRef.current;
+    const nextTimeline = reconcileLiveSessionTimeline(previousTimeline, previousMessages, snapshot.messages);
+    liveSessionTimelineRef.current = nextTimeline;
+    if (nextTimeline !== previousTimeline) setLiveSessionTimeline(nextTimeline);
     if (changedPaneIds.size > 0) {
       messageStateCacheRef.current = discardMessageStatesForChangedPanes(
         messageStateCacheRef.current,
@@ -1570,49 +1611,34 @@ const App: React.FC = () => {
     setLiveReviewRoundStatus(snapshot.reviewRoundStatus);
     setLiveReviewDeliveryError(snapshot.deliveryError);
     setRecentMessages(snapshot.messages);
-    const selectedWorkspaceMessage = snapshot.messages.find((message) => message.messageId === nextSelectedMessageId);
-    if (selectedWorkspaceMessage?.cwd) setProjectRoot(selectedWorkspaceMessage.cwd);
-    if (followNextPaneResponseReset) {
+    // Sending remains a local expectation only. Its response is marked as a
+    // new reply in the active session by the reducer; it never opens or selects
+    // it automatically. Clear stale bookkeeping once that pane is gone/updated.
+    if (followNextPaneResponse && !snapshot.messages.some((message) => message.paneId === followNextPaneResponse.paneId)) {
       setFollowNextPaneResponse(null);
-      if (followedPaneVanished) {
-        toast('Followed pane closed', { description: 'The pane you sent feedback to is no longer live.' });
-      } else {
-        toast('Agent response received', { description: 'Showing the latest response.' });
+    }
+
+    const activeKey = nextTimeline.activeSessionKey;
+    const selectedForActiveSession = activeKey ? nextTimeline.selectedMessageIdBySession[activeKey] : null;
+    const currentStillExists = selectedMessageId && snapshot.messages.some((message) => message.messageId === selectedMessageId);
+    // The only permitted incoming-frame navigation: the active session vanished.
+    // Preserve every other session's cached draft/selection, then restore the
+    // fallback session's own saved target without touching the sidebar/focus.
+    if (!currentStillExists && selectedForActiveSession) {
+      const targetMessage = snapshot.messages.find((message) => message.messageId === selectedForActiveSession);
+      if (targetMessage) {
+        const targetState = normalizeMessageState(
+          messageStateCacheRef.current.get(selectedForActiveSession) ?? createEmptyMessageState(targetMessage),
+          targetMessage,
+        );
+        setSelectedMessageId(selectedForActiveSession);
+        if (targetMessage.cwd) setProjectRoot(targetMessage.cwd);
+        linkedDocHook.restoreSession(targetState.linkedDocSession);
+        setCodeAnnotations([...targetState.codeAnnotations]);
+        setSelectedCodeAnnotationId(targetState.selectedCodeAnnotationId);
       }
     }
-
-    // A newer response finished in another pane while the reviewer is mid-review
-    // here. Don't steal the tab; flag it as a pending response on the Messages
-    // tab (a badge) instead of a toast, and only flag once per focused response.
-    if (pendingFocusMessageId && pendingFocusMessageId !== notifiedPendingFocusRef.current) {
-      notifiedPendingFocusRef.current = pendingFocusMessageId;
-      setPendingResponseMessageId(pendingFocusMessageId);
-    } else if (!pendingFocusMessageId) {
-      notifiedPendingFocusRef.current = null;
-      setPendingResponseMessageId(null);
-    }
-
-    if (!nextSelectedMessageId || (nextSelectedMessageId === selectedMessageId && !selectedPaneSessionChanged)) return;
-    const targetMessage = snapshot.messages.find((message) => message.messageId === nextSelectedMessageId);
-    if (!targetMessage) return;
-
-    const states = selectedPaneSessionChanged
-      ? messageStateCacheRef.current
-      : saveCurrentMessageState();
-    const targetState = normalizeMessageState(
-      states.get(nextSelectedMessageId) ?? createEmptyMessageState(targetMessage),
-      targetMessage,
-    );
-    setSelectedMessageId(nextSelectedMessageId);
-    linkedDocHook.restoreSession(targetState.linkedDocSession);
-    setCodeAnnotations([...targetState.codeAnnotations]);
-    setSelectedCodeAnnotationId(targetState.selectedCodeAnnotationId);
-
-    if (snapshot.reviewRoundStatus === 'open' && liveMessageReviewReloadOnSelection) {
-      toast('Agent response received', { description: 'Reloading the latest review state.' });
-      window.location.reload();
-    }
-  }, [selectedMessageId, recentMessages, followNextPaneResponse, liveMessageSelectionPinned, saveCurrentMessageState, linkedDocHook.restoreSession, liveMessageReviewReloadOnSelection, handleSelectMessage, updateCaptainEchoes]);
+  }, [selectedMessageId, recentMessages, followNextPaneResponse, linkedDocHook.restoreSession, updateCaptainEchoes]);
 
   const handleLiveReviewAction = React.useCallback(async (
     path: '/api/session/feedback/retry' | '/api/session/resume' | '/api/session/cancel-waiting',
@@ -3010,7 +3036,7 @@ const App: React.FC = () => {
         if (!res.ok) throw new Error('Not in API mode');
         return res.json();
       })
-      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'archive' | 'goal-setup'; goalSetup?: GoalSetupBundle; filePath?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; renderAs?: 'html' | 'markdown'; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; archivePlans?: ArchivedPlan[]; projectRoot?: string; isWSL?: boolean; serverConfig?: { displayName?: string; gitUser?: string }; recentMessages?: PickerMessage[]; selectedMessageId?: string; revision?: number; agentTerminal?: AgentTerminalCapability; liveMessageReview?: boolean; liveMessageReviewReloadOnSelection?: boolean; liveMessageReviewReadOnly?: boolean; contextHandoffHighPercent?: number; planReview?: PlanReviewCapability }) => {
+      .then((data: { plan: string; origin?: Origin; mode?: 'annotate' | 'annotate-last' | 'annotate-folder' | 'archive' | 'goal-setup'; goalSetup?: GoalSetupBundle; filePath?: string; sourceInfo?: string; sourceConverted?: boolean; sourceSave?: SourceSaveCapability; gate?: boolean; renderAs?: 'html' | 'markdown'; rawHtml?: string; shareHtml?: string; diffHtml?: string; convertHtml?: boolean; sharingEnabled?: boolean; shareBaseUrl?: string; pasteApiUrl?: string; repoInfo?: { display: string; branch?: string; host?: string }; previousPlan?: string | null; versionInfo?: { version: number; totalVersions: number; project: string }; archivePlans?: ArchivedPlan[]; projectRoot?: string; isWSL?: boolean; serverConfig?: { displayName?: string; gitUser?: string }; recentMessages?: PickerMessage[]; selectedMessageId?: string; revision?: number; agentTerminal?: AgentTerminalCapability; liveMessageReview?: boolean; liveMessageReviewReadOnly?: boolean; contextHandoffHighPercent?: number; planReview?: PlanReviewCapability }) => {
         // Initialize config store with server-provided values (config file > cookie > default)
         configStore.init(data.serverConfig);
         // Session-level force-markdown preference (--markdown); threaded into folder/linked
@@ -3052,8 +3078,6 @@ const App: React.FC = () => {
         }
         setIsApiMode(true);
         setLiveMessageReview(data.liveMessageReview === true);
-        setLiveMessageSelectionPinned(false);
-        setLiveMessageReviewReloadOnSelection(data.liveMessageReviewReloadOnSelection !== false);
         setLiveMessageReviewReadOnly(data.liveMessageReviewReadOnly === true);
         setContextHandoffHighPercent(data.contextHandoffHighPercent);
         setPlanReview(data.planReview ?? null);
@@ -3073,14 +3097,16 @@ const App: React.FC = () => {
           liveSnapshotMessagesRef.current = data.recentMessages;
           liveSnapshotRevisionRef.current = typeof data.revision === 'number' ? data.revision : null;
           setRecentMessages(data.recentMessages);
-          // Live Ex sessions provide their canonical selection in /api/plan.
-          // This makes the first SSE snapshot after an automatic reload a
-          // no-op instead of immediately triggering another reload.
+          // Initial load may adopt the host's preferred pane once. Subsequent
+          // frames are cache/unread updates only; see applyLiveReviewSnapshot.
           const initialSelectedMessageId = data.liveMessageReview === true &&
             typeof data.selectedMessageId === 'string' &&
             data.recentMessages.some((message) => message.messageId === data.selectedMessageId)
             ? data.selectedMessageId
             : data.recentMessages[0].messageId;
+          const initialTimeline = createLiveSessionTimelineState(data.recentMessages, initialSelectedMessageId);
+          liveSessionTimelineRef.current = initialTimeline;
+          setLiveSessionTimeline(initialTimeline);
           setSelectedMessageId(initialSelectedMessageId);
           const initialMessage = data.recentMessages.find((message) => message.messageId === initialSelectedMessageId);
           if (data.liveMessageReview === true && initialMessage?.cwd) setProjectRoot(initialMessage.cwd);
@@ -3090,6 +3116,9 @@ const App: React.FC = () => {
           liveSnapshotMessagesRef.current = [];
           liveSnapshotRevisionRef.current = null;
           setRecentMessages([]);
+          const emptyTimeline = createLiveSessionTimelineState([], null);
+          liveSessionTimelineRef.current = emptyTimeline;
+          setLiveSessionTimeline(emptyTimeline);
           setSelectedMessageId(null);
         }
         setSourceInfo(data.sourceInfo ?? undefined);
@@ -5177,12 +5206,12 @@ const App: React.FC = () => {
           agentName={agentName}
           availableAgents={availableAgents}
           showAnnotationsWarning={hasFeedbackToSend}
-          showLiveMessagePicker={liveMessageReview && recentMessages.length > 1}
+          showLiveMessagePicker={false}
           showLiveProcessPanel={liveMessageReview}
           onLiveProcessPanelCreated={({ panelName }) => toast('Pi panel created', { description: `${panelName} is ready in Herdr.` })}
           showLiveFolder={liveMessageReview && !!projectRoot && !archive.archiveMode}
           showLiveChanges={liveMessageReview && !!projectRoot && !archive.archiveMode}
-          onOpenLiveMessages={() => openSidebarTab('messages')}
+          onOpenLiveMessages={undefined}
           onOpenLiveFolder={() => openSidebarTab('files')}
           onOpenLiveChanges={() => openSidebarTab('changes')}
           liveFeedbackCount={liveMessageReview ? selectedLiveMessageAnnotationCount : 0}
@@ -5286,15 +5315,6 @@ const App: React.FC = () => {
             <span className="font-medium text-foreground">Sent to agent.</span>{" "}
             Keep this window open while it runs. Close Plannotator when you're done.
           </div>
-        )}
-        {liveMessageReview && (
-          <LivePaneChipsRow
-            sources={recentMessages}
-            selectedMessageId={selectedMessageId}
-            reviewRoundStatus={liveReviewRoundStatus}
-            contextHandoffHighPercent={contextHandoffHighPercent}
-            onSelect={handleSelectMessage}
-          />
         )}
         {liveMessageReview && (
           <LivePaneLimitationsNotice
@@ -5427,14 +5447,13 @@ const App: React.FC = () => {
               showVersionsTab={!isHtmlSurface && versionInfo !== null && versionInfo.totalVersions > 1}
               showFilesTab={showFilesTab && !archive.archiveMode}
               showChangesTab={liveMessageReview && !!projectRoot && !archive.archiveMode}
-              showMessagesTab={annotateSource === 'message' && recentMessages.length > 1}
-              messagesTabTitle={liveWorkspaceMode ? 'Pick a live Pi response' : undefined}
+              showMessagesTab={!liveMessageReview && annotateSource === 'message' && recentMessages.length > 1}
+              messagesTabTitle={undefined}
               showAgentTerminalTab={showAgentTerminalControls}
               isAgentTerminalOpen={isAgentTerminalOpen}
               isAgentTerminalRunning={isAgentTerminalRunning}
               onToggleAgentTerminal={toggleAgentTerminal}
               hasMessageAnnotations={activeMessageAnnotationCounts.size > 0}
-              hasPendingResponse={pendingResponseMessageId !== null}
               hasFileAnnotations={hasFileAnnotations}
               className="hidden lg:flex absolute left-0 top-0 z-20"
             />
@@ -5521,7 +5540,7 @@ const App: React.FC = () => {
                   archive.select(...args);
                 }}
                 isLoadingArchive={archive.isLoading}
-                showMessagesTab={annotateSource === 'message' && recentMessages.length > 1}
+                showMessagesTab={!liveMessageReview && annotateSource === 'message' && recentMessages.length > 1}
                 messages={sidebarMessages}
                 selectedMessageId={selectedMessageId}
                 onSelectMessage={handleSelectMessage}
@@ -5530,7 +5549,6 @@ const App: React.FC = () => {
                 messagesChronological={liveMessageReview}
                 messagesChatLayout={liveMessageReview}
                 messagesAutoLoadOnScroll={liveMessageReview}
-                hasPendingResponse={pendingResponseMessageId !== null}
                 messagePickerLabels={liveWorkspaceMode ? {
                   tab: 'Workspaces',
                   list: 'Live Pi responses · newest first',
@@ -5657,6 +5675,26 @@ const App: React.FC = () => {
               )}
               {/* Normal Plan View — always mounted, hidden during diff mode */}
               <div className={`w-full relative ${isHtmlSurface ? 'flex-1 flex flex-col' : `flex justify-center${isEditingMarkdown ? ' flex-1 min-h-0' : ''}`}`} style={{ display: goalSetupMode || (isPlanDiffActive && planDiff.diffBlocks) || (annotateSource === 'folder' && !markdown && !linkedDocHook.isActive) ? 'none' : undefined }}>
+                {liveMessageReview && (
+                  <div className="mb-4 h-[min(50dvh,34rem)] min-h-[22rem] w-full max-w-4xl">
+                    <LiveSessionTimeline
+                      messages={stableLiveSessions}
+                      activeTimelineMessages={activeLiveTimelineMessages}
+                      activeSessionKey={activeLiveSessionKey}
+                      selectedMessageId={selectedMessageId}
+                      unreadCountBySession={liveSessionTimeline.unreadMessageIdsBySession}
+                      newReplyCount={activeLiveSessionKey ? liveSessionTimeline.newReplyMessageIdsBySession[activeLiveSessionKey]?.length ?? 0 : 0}
+                      annotationCounts={activeMessageAnnotationCounts}
+                      captainEchoes={captainEchoAnchors}
+                      reviewRoundStatus={liveReviewRoundStatus}
+                      contextHandoffHighPercent={contextHandoffHighPercent}
+                      onActivateSession={handleActivateLiveSession}
+                      onSelectMessage={handleSelectMessage}
+                      onJumpToNewReplies={handleJumpToLiveReplies}
+                      jumpToLatestSignal={liveTimelineJumpSignal}
+                    />
+                  </div>
+                )}
                 {(canUseWideMode || canEditMarkdown) && !isPlanDiffActive && !archive.archiveMode && !isHtmlSurface && (
                   <div
                     data-print-hide
@@ -5913,7 +5951,7 @@ const App: React.FC = () => {
                             label: planReview.snapshot.selected?.kind === 'file' ? 'Plan File' : 'Source',
                             onOpen: () => setPlanReviewSourcesOpen(true),
                           }
-                        : annotateSource === 'message' && recentMessages.length > 1
+                        : !liveMessageReview && annotateSource === 'message' && recentMessages.length > 1
                           ? {
                               // selectedMessageId is always one of recentMessages (set on init,
                               // only changed via handleSelectMessage), so findIndex is >= 0.

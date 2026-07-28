@@ -10,6 +10,7 @@
 @source "../ui/hooks/**/*.ts";
 @source "./*.tsx";
 @source "./components/**/*.tsx";
+@source "./live/**/*.tsx";
 
 @import "../ui/theme.css";
 

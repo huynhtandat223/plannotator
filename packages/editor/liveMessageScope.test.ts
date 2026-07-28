@@ -57,7 +57,7 @@ describe('live message session scope', () => {
     expect(changedLivePaneSessionIds(newSnapshot, newSnapshot)).toEqual(new Set());
   });
 
-  test('reconciles selection off a synthetic waiting document when a real assistant response arrives', () => {
+  test('legacy picker reconciles selection off a synthetic waiting document when a real assistant response arrives', () => {
     const previous = [
       message('w:p1:waiting', 'w:p1', 'session-1'), // waiting document (no assistantMessageId)
     ];
@@ -77,7 +77,7 @@ describe('live message session scope', () => {
     expect(result.followNextPaneResponseReset).toBe(false);
   });
 
-  test('returns followed message if pane received a new response', () => {
+  test('legacy picker returns followed message if pane received a new response', () => {
     const previous = [message('w:p1:response-1', 'w:p1', 'session-1', 'response-1')];
     const next = [
       message('w:p1:response-2', 'w:p1', 'session-1', 'response-2'),
