@@ -1432,6 +1432,12 @@ const App: React.FC = () => {
   const sendsGlobalCommentAsUserMessage = liveMessageReview &&
     Boolean(selectedLiveMessage?.paneId) &&
     canSendToSelectedLivePane;
+  // A real assistant message is a structured feedback target even when that
+  // pane also accepts direct messages. Only the synthetic waiting document
+  // lacks an assistant identity and must suppress annotation creation.
+  const selectedLiveMessageIsWaitingDocument = liveMessageReview &&
+    Boolean(selectedLiveMessage) &&
+    !selectedLiveMessage.assistantMessageId;
   const canAttachSelectedLiveImageFeedback = liveMessageReview &&
     Boolean(selectedLiveMessage?.paneId) &&
     Boolean(selectedLiveMessage?.piSessionId) &&
@@ -5686,6 +5692,7 @@ const App: React.FC = () => {
                     onSelectAnnotation={handleSelectAnnotation}
                     selectedAnnotationId={selectedAnnotationId}
                     directMessage={sendsGlobalCommentAsUserMessage}
+                    disableSelectionAnnotations={selectedLiveMessageIsWaitingDocument}
                     imageFeedbackTarget={selectedLiveImageFeedbackTarget}
                     globalCommentDraftKey={globalCommentDraftKey}
                     onSendGlobalCommentText={sendsGlobalCommentAsUserMessage ? handleSendGlobalComment : undefined}
