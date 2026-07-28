@@ -2770,6 +2770,69 @@ const App: React.FC = () => {
     return composeFeedback(messageMultiSelectMode ? buildFullAnnotationsOutput() : annotationsOutput, checkedSavedFileChanges);
   }, [annotationsOutput, buildFullAnnotationsOutput, composeFeedback, messageMultiSelectMode, savedFileChanges]);
 
+  const getNonGlobalAnnotationsOutput = useCallback((filteredAllAnnotations: Annotation[]): string => {
+    const docAnnotations = linkedDocHook.getDocAnnotations();
+    const hasDocAnnotations = Array.from(docAnnotations.values()).some(
+      (d) => d.annotations.length > 0 || d.globalAttachments.length > 0
+    );
+    const hasPlanAnnotations = filteredAllAnnotations.length > 0 || globalAttachments.length > 0;
+    const hasEditorAnnotations = editorAnnotations.length > 0;
+    const hasCodeAnnotations = codeAnnotations.length > 0;
+
+    if (!hasPlanAnnotations && !hasDocAnnotations && !hasEditorAnnotations && !hasCodeAnnotations) {
+      return '';
+    }
+
+    const activeConverted = linkedDocHook.isActive
+      ? (docAnnotations.get(linkedDocHook.filepath ?? '')?.isConverted ?? false)
+      : sourceConverted;
+
+    let output = hasPlanAnnotations
+      ? exportAnnotations(
+          blocks,
+          filteredAllAnnotations,
+          globalAttachments,
+          annotateSource === 'message' ? 'Message Feedback' : annotateSource === 'folder' ? 'Folder Feedback' : annotateSource === 'file' ? 'File Feedback' : 'Plan Feedback',
+          annotateSource ?? 'plan',
+          { sourceConverted: activeConverted },
+        )
+      : '';
+
+    if (hasDocAnnotations) {
+      const enriched: Map<string, LinkedDocAnnotationEntry> = new Map(docAnnotations);
+      for (const [filepath, entry] of enriched) {
+        if (entry.markdown) {
+          enriched.set(filepath, {
+            ...entry,
+            blocks: parseMarkdownToBlocks(entry.markdown, { frontmatter: shouldStripFrontmatter(filepath) }),
+          });
+        }
+      }
+      output += exportLinkedDocAnnotations(enriched);
+    }
+
+    if (hasEditorAnnotations) {
+      output += exportEditorAnnotations(editorAnnotations);
+    }
+
+    if (hasCodeAnnotations) {
+      output += exportCodeFileAnnotations(codeAnnotations);
+    }
+
+    return output;
+  }, [blocks, globalAttachments, linkedDocHook, editorAnnotations, codeAnnotations, sourceConverted, annotateSource, shouldStripFrontmatter]);
+
+  const getNonGlobalFeedbackPayload = useCallback((checkedSavedFileChanges = savedFileChanges): string => {
+    const filteredAnns = allAnnotations.filter(
+      (annotation) => annotation.type !== AnnotationType.GLOBAL_COMMENT
+    );
+    const output = getNonGlobalAnnotationsOutput(filteredAnns);
+    if (!output && checkedSavedFileChanges.length === 0) {
+      return '';
+    }
+    return composeFeedback(output, checkedSavedFileChanges);
+  }, [allAnnotations, getNonGlobalAnnotationsOutput, composeFeedback, savedFileChanges]);
+
   const withDraftGeneration = useCallback((path: string): string => {
     const separator = path.includes('?') ? '&' : '?';
     return `${path}${separator}draftGeneration=${getDraftGeneration()}`;
@@ -3583,14 +3646,38 @@ const App: React.FC = () => {
     setIsSubmitting(true);
     try {
       if (sendsGlobalCommentAsUserMessage) {
-        const content = allAnnotations
+        snapshotActiveEditableDocument();
+        const checkedSavedFileChanges = await validateSavedFileChangesBeforeSubmit();
+        if (checkedSavedFileChanges === null) {
+          setIsSubmitting(false);
+          return;
+        }
+
+        const globalComments = allAnnotations
           .filter((annotation) => annotation.type === AnnotationType.GLOBAL_COMMENT)
           .map((annotation) => annotation.text?.trim())
           .filter((text): text is string => Boolean(text))
           .join("\n\n");
-        if (!content || !selectedLiveMessage?.paneId) {
+
+        const nonGlobalFeedback = getNonGlobalFeedbackPayload(checkedSavedFileChanges);
+
+        if ((!globalComments || globalComments.trim().length === 0) && (!nonGlobalFeedback || nonGlobalFeedback.trim().length === 0)) {
           throw new Error('Add a global message before sending it to Pi.');
         }
+
+        if (!selectedLiveMessage?.paneId) {
+          throw new Error('Add a global message before sending it to Pi.');
+        }
+
+        let content = '';
+        if (globalComments.trim() && nonGlobalFeedback.trim()) {
+          content = `${globalComments.trim()}\n\n---\n\n${nonGlobalFeedback.trim()}`;
+        } else if (globalComments.trim()) {
+          content = globalComments.trim();
+        } else {
+          content = nonGlobalFeedback.trim();
+        }
+
         const response = await fetch('/api/instruction', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -3613,6 +3700,10 @@ const App: React.FC = () => {
             text: content,
             timestamp: new Date().toISOString(),
           }));
+        }
+
+        if (nonGlobalFeedback && nonGlobalFeedback.trim().length > 0) {
+          clearSelectedLiveFeedback();
         }
         dismissDraft();
         // A composer-delivered send must be described as what it was — typed
@@ -3741,11 +3832,34 @@ const App: React.FC = () => {
       toast('Feedback is already pending', { description: 'Wait for the agent response or return to review first.' });
       return false;
     }
-    const content = rawText.trim();
-    if (!content || !selectedLiveMessage?.paneId) {
+
+    snapshotActiveEditableDocument();
+    const checkedSavedFileChanges = await validateSavedFileChangesBeforeSubmit();
+    if (checkedSavedFileChanges === null) {
+      return false;
+    }
+
+    const nonGlobalFeedback = getNonGlobalFeedbackPayload(checkedSavedFileChanges);
+
+    const trimmedRawText = rawText.trim();
+    if (!trimmedRawText && (!nonGlobalFeedback || nonGlobalFeedback.trim().length === 0)) {
       toast.error('Feedback delivery failed', { description: 'Add a global message before sending it to Pi.' });
       return false;
     }
+    if (!selectedLiveMessage?.paneId) {
+      toast.error('Feedback delivery failed', { description: 'Add a global message before sending it to Pi.' });
+      return false;
+    }
+
+    let content = '';
+    if (trimmedRawText && nonGlobalFeedback.trim()) {
+      content = `${trimmedRawText}\n\n---\n\n${nonGlobalFeedback.trim()}`;
+    } else if (trimmedRawText) {
+      content = trimmedRawText;
+    } else {
+      content = nonGlobalFeedback.trim();
+    }
+
     setIsSubmitting(true);
     try {
       const response = await fetch('/api/instruction', {
@@ -3767,6 +3881,10 @@ const App: React.FC = () => {
           text: content,
           timestamp: new Date().toISOString(),
         }));
+      }
+
+      if (nonGlobalFeedback && nonGlobalFeedback.trim().length > 0) {
+        clearSelectedLiveFeedback();
       }
       dismissDraft();
       const composerToast = describeLiveDelivery(receipt, livePaneAgentLabel(selectedLiveMessage.agent), 'message');
@@ -3793,6 +3911,10 @@ const App: React.FC = () => {
     dismissDraft,
     scheduleDraftSaveAfterSubmitFailure,
     updateCaptainEchoes,
+    getNonGlobalFeedbackPayload,
+    clearSelectedLiveFeedback,
+    validateSavedFileChangesBeforeSubmit,
+    snapshotActiveEditableDocument,
   ]);
 
   // Annotate gate-mode handler — approves the artifact without feedback
