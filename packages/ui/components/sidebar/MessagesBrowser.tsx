@@ -156,6 +156,14 @@ interface MessagesBrowserProps {
   autoLoadOnScroll?: boolean;
   /** Increment to explicitly jump this shared transcript to its latest row. */
   jumpToLatestSignal?: number;
+  /**
+   * Optional fixed row budget for an embedded, bounded history. It bypasses
+   * the reader's saved per-pane picker preference without changing that
+   * preference for other MessagesBrowser consumers.
+   */
+  rowBudgetOverride?: number;
+  /** Hide the saved per-pane count selector for a host-owned history view. */
+  showCountControl?: boolean;
 }
 
 // Hard cap for browsers where line-clamp is unavailable, and to avoid huge sidebar text nodes.
@@ -299,6 +307,8 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   captainEchoes,
   autoLoadOnScroll = false,
   jumpToLatestSignal,
+  rowBudgetOverride,
+  showCountControl = true,
 }) => {
   const [count, setCount] = React.useState<MessagePickerCount>(() => getMessagePickerCount());
   // Rows paged in past the per-pane quota. Additive, and deliberately NOT
@@ -421,7 +431,7 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   // of repeating the workspace name inline on every row.
   const groupedByPane = messages.some((message) => message.paneId !== undefined);
   // Per-pane budget = selected quota + rows the reader paged in.
-  const rowBudget = resolveRowBudget(count, pagedRows);
+  const rowBudget = rowBudgetOverride ?? resolveRowBudget(count, pagedRows);
   // The newest response: last row when the host is chronological (live panes),
   // first row otherwise. This is the scroll anchor and `Jump to latest` target.
   const latestIndex = chronological ? messages.length - 1 : 0;
@@ -593,22 +603,24 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
         <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
           {chronological ? "Recent responses — oldest first" : listLabel}
         </span>
-        <label className="flex items-center gap-1 text-[10px] text-muted-foreground shrink-0">
-          <span className="sr-only">Responses to show per pane</span>
-          <span aria-hidden="true">Per pane:</span>
-          <select
-            value={count}
-            onChange={(event) => handleCountChange(event.target.value as MessagePickerCount)}
-            aria-label="Responses to show per pane"
-            className="rounded border border-border bg-transparent px-1 py-0.5 text-[10px] text-foreground focus:outline-none focus:ring-1 focus:ring-primary/40"
-          >
-            {MESSAGE_PICKER_COUNT_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        {showCountControl && (
+          <label className="flex items-center gap-1 text-[10px] text-muted-foreground shrink-0">
+            <span className="sr-only">Responses to show per pane</span>
+            <span aria-hidden="true">Per pane:</span>
+            <select
+              value={count}
+              onChange={(event) => handleCountChange(event.target.value as MessagePickerCount)}
+              aria-label="Responses to show per pane"
+              className="rounded border border-border bg-transparent px-1 py-0.5 text-[10px] text-foreground focus:outline-none focus:ring-1 focus:ring-primary/40"
+            >
+              {MESSAGE_PICKER_COUNT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
       {isAwayFromLatest && (
         <button
@@ -617,6 +629,26 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
           className="w-full mb-1 px-2 py-1 rounded text-[10px] font-medium text-primary border border-primary/30 bg-primary/10 hover:bg-primary/20 transition-colors"
         >
           Jump to latest
+        </button>
+      )}
+      {selectedMessageId !== undefined && selectedMessageId !== null && messages[latestIndex] !== undefined && selectedMessageId !== messages[latestIndex].messageId && (
+        <button
+          type="button"
+          onClick={() => {
+            const latestMsg = messages[latestIndex];
+            if (latestMsg) {
+              onSelect(latestMsg.messageId);
+              setTimeout(() => {
+                latestRowRef.current?.scrollIntoView({
+                  block: chronological ? "end" : "start",
+                  behavior: "smooth",
+                });
+              }, 50);
+            }
+          }}
+          className="w-full mb-1 px-2 py-1 rounded text-[10px] font-medium text-primary border border-primary/30 bg-primary/10 hover:bg-primary/20 transition-colors"
+        >
+          Back to latest
         </button>
       )}
       <div className="space-y-0.5">

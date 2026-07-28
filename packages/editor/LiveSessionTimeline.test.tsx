@@ -173,3 +173,59 @@ test.skipIf(!hasDom)('aligns visibility with lg: breakpoints for desktop session
   const mobileOpener = Array.from(el.querySelectorAll('button')).find((button) => button.textContent === 'Sessions')!;
   expect(mobileOpener.className).toContain('lg:hidden');
 });
+
+test.skipIf(!hasDom)('at mobile 412x915, history is collapsed by default, keeps the selected response primary, and toggles a bounded history', async () => {
+  const originalWidth = window.innerWidth;
+  const originalHeight = window.innerHeight;
+  window.innerWidth = 412;
+  window.innerHeight = 915;
+  window.dispatchEvent(new Event('resize'));
+
+  try {
+    const messages = Array.from({ length: 6 }, (_, index) =>
+      message(`p1:r${6 - index}`, 'p1', 'pi-1', 'compile', `response ${6 - index}`),
+    );
+    const selectedIds: string[] = [];
+    const el = await render({
+      messages,
+      activeTimelineMessages: [...messages].reverse(),
+      selectedMessageId: 'p1:r3',
+      onSelectMessage: (id) => selectedIds.push(id),
+    });
+
+    const selectedResponse = el.querySelector('[data-live-timeline-selected-response="true"]')!;
+    expect(selectedResponse.textContent).toContain('response 3');
+    expect(selectedResponse.textContent).not.toContain('response 6');
+    expect(el.querySelector('[data-live-timeline-scroll="true"]')).toBeNull();
+
+    const showHistory = Array.from(el.querySelectorAll('button')).find((button) => button.textContent === 'Show history')!;
+    expect(showHistory.getAttribute('aria-expanded')).toBe('false');
+    expect(showHistory.getAttribute('aria-controls')).toBeTruthy();
+
+    await act(async () => showHistory.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+
+    const history = el.querySelector('[data-live-timeline-scroll="true"]') as HTMLElement;
+    expect(history.getAttribute('aria-label')).toBe('Response history');
+    expect(history.style.overflowY).toBe('auto');
+    const historyRows = Array.from(history.querySelectorAll('button')).filter((button) => button.textContent?.startsWith('response'));
+    expect(historyRows).toHaveLength(5);
+    expect(history.textContent).toContain('response 6');
+    expect(history.textContent).not.toContain('response 1');
+
+    const hideHistory = Array.from(el.querySelectorAll('button')).find((button) => button.textContent === 'Hide history')!;
+    expect(hideHistory.getAttribute('aria-expanded')).toBe('true');
+    await act(async () => hideHistory.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(el.querySelector('[data-live-timeline-scroll="true"]')).toBeNull();
+    expect(el.querySelector('[data-live-timeline-selected-response="true"]')?.textContent).toContain('response 3');
+
+    await act(async () => showHistory.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    const backToLatest = Array.from(el.querySelectorAll('[data-live-timeline-scroll="true"] button')).find((button) => button.textContent === 'Back to latest')!;
+    expect(backToLatest).toBeTruthy();
+    await act(async () => backToLatest.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(selectedIds).toEqual(['p1:r6']);
+  } finally {
+    window.innerWidth = originalWidth;
+    window.innerHeight = originalHeight;
+    window.dispatchEvent(new Event('resize'));
+  }
+});
