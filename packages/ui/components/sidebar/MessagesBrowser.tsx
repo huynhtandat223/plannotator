@@ -154,6 +154,8 @@ interface MessagesBrowserProps {
    * `Jump to latest` guarantees are preserved.
    */
   autoLoadOnScroll?: boolean;
+  /** Increment to explicitly jump this shared transcript to its latest row. */
+  jumpToLatestSignal?: number;
 }
 
 // Hard cap for browsers where line-clamp is unavailable, and to avoid huge sidebar text nodes.
@@ -296,6 +298,7 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   chatLayout = false,
   captainEchoes,
   autoLoadOnScroll = false,
+  jumpToLatestSignal,
 }) => {
   const [count, setCount] = React.useState<MessagePickerCount>(() => getMessagePickerCount());
   // Rows paged in past the per-pane quota. Additive, and deliberately NOT
@@ -397,6 +400,13 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
       behavior: "smooth",
     });
   }, [chronological]);
+  const latestSignalRef = React.useRef(jumpToLatestSignal);
+  React.useEffect(() => {
+    if (jumpToLatestSignal !== undefined && latestSignalRef.current !== undefined && latestSignalRef.current !== jumpToLatestSignal) {
+      jumpToLatest();
+    }
+    latestSignalRef.current = jumpToLatestSignal;
+  }, [jumpToLatest, jumpToLatestSignal]);
 
   if (messages.length === 0) {
     return (

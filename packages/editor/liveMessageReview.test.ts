@@ -9,15 +9,17 @@ test('live-message updates are applied in place without a full-page reload', () 
     source.indexOf('const handleLiveReviewAction'),
   );
 
-  expect(callback).toContain("snapshot.reviewRoundStatus === 'open' && liveMessageReviewReloadOnSelection");
-  expect(callback).toContain('window.location.reload');
-  expect(callback).not.toContain('document.reload');
-  expect(callback).toContain('linkedDocHook.restoreSession');
-  expect(callback).toContain('setSelectedMessageId(nextSelectedMessageId)');
-  expect(callback).toContain("toast('Agent response received'");
+  expect(callback).toContain('reconcileLiveSessionTimeline');
+  expect(callback).not.toContain('reconcileLiveMessageSelection');
+  expect(callback).not.toContain('window.location.reload');
+  expect(callback).not.toContain('sidebar.open');
+  expect(callback).not.toContain('setRightSidebarTab');
   expect(callback).toContain('liveSnapshotMessagesRef.current = snapshot.messages');
   expect(callback).toContain('changedLivePaneSessionIds');
   expect(callback).toContain('messageStateCacheRef.current');
+  // This is the sole allowed incoming-frame selection transition: active
+  // session removal. Arrival/focus/telemetry frames only update the reducer.
+  expect(callback).toContain('if (!currentStillExists && selectedForActiveSession)');
 });
 
 test('live-message SSE failures leave the review usable with a status message', () => {

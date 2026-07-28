@@ -39,8 +39,9 @@ export function discardMessageStatesForChangedPanes<T>(
 }
 
 /**
- * Reconciles the selection for live messages, ensuring we switch off of synthetic waiting documents
- * when real assistant messages arrive, and handling pane changes correctly.
+ * Legacy picker selection reconciler for non-session-owned callers. The live
+ * Agent Response surface now owns navigation through `liveSessionTimeline.ts`;
+ * it deliberately does not call this function for incoming SSE frames.
  */
 export function reconcileLiveMessageSelection(
   previousMessages: readonly LiveScopedMessage[],
