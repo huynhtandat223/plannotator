@@ -121,6 +121,10 @@ interface ViewerProps {
   readOnly?: boolean;
   /** Selected live Pi pane accepts a direct text message. */
   directMessage?: boolean;
+  /** Synthetic direct-message document only: suppress document annotations while
+   * preserving the direct-message composer. Structured responses leave this
+   * false, even when their pane also accepts direct messages. */
+  disableSelectionAnnotations?: boolean;
   /** Human-readable selected assistant response identity eligible for image feedback. */
   imageFeedbackTarget?: string;
   /** Optional live Pi commands shown as explicit autocomplete in global comments. */
@@ -230,6 +234,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   allowImages = true,
   readOnly = false,
   directMessage = false,
+  disableSelectionAnnotations = false,
   imageFeedbackTarget,
   livePiCommands = [],
   onRunLivePiCommand,
@@ -350,7 +355,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     onSelectAnnotation,
     selectedAnnotationId,
     mode,
-    enabled: !readOnly && !directMessage,
+    enabled: !readOnly && !disableSelectionAnnotations,
   });
 
   // Refs for code block annotation path
@@ -387,7 +392,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     containerRef,
     highlighterRef,
     inputMethod,
-    enabled: !readOnly && !toolbarState && !hookCommentPopover && !viewerCommentPopover && !hookQuickLabelPicker && !codeBlockQuickLabelPicker && !(isPlanDiffActive ?? false),
+    enabled: !readOnly && !disableSelectionAnnotations && !toolbarState && !hookCommentPopover && !viewerCommentPopover && !hookQuickLabelPicker && !codeBlockQuickLabelPicker && !(isPlanDiffActive ?? false),
     onCodeBlockClick: handlePinpointCodeBlockClick,
   });
 
@@ -819,7 +824,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             <CodeBlock
               key={group.block.id}
               block={group.block}
-              onHover={inputMethod === 'pinpoint' ? () => {} : (element) => {
+              onHover={inputMethod === 'pinpoint' || disableSelectionAnnotations ? () => {} : (element) => {
                 // Clear any pending leave timeout
                 if (hoverTimeoutRef.current) {
                   clearTimeout(hoverTimeoutRef.current);
@@ -832,7 +837,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                   setHoveredCodeBlock({ block: group.block, element });
                 }
               }}
-              onLeave={inputMethod === 'pinpoint' ? () => {} : () => {
+              onLeave={inputMethod === 'pinpoint' || disableSelectionAnnotations ? () => {} : () => {
                 // Delay then start exit animation
                 hoverTimeoutRef.current = setTimeout(() => {
                   setIsCodeBlockToolbarExiting(true);
@@ -843,7 +848,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                   }, 150);
                 }, 100);
               }}
-              isHovered={inputMethod !== 'pinpoint' && hoveredCodeBlock?.block.id === group.block.id}
+              isHovered={!disableSelectionAnnotations && inputMethod !== 'pinpoint' && hoveredCodeBlock?.block.id === group.block.id}
             />
           ) : (
             <BlockRenderer imageBaseDir={imageBaseDir} onImageClick={(src, alt) => setLightbox({ src, alt })} key={group.block.id} block={group.block} onOpenLinkedDoc={onOpenLinkedDoc} onOpenCodeFile={onOpenCodeFile} onNavigateAnchor={scrollToAnchor} onToggleCheckbox={readOnly ? undefined : onToggleCheckbox} checkboxOverrides={checkboxOverrides} githubRepo={repoInfo?.display} headingAnchorId={headingSlugMap.get(group.block.id)} />

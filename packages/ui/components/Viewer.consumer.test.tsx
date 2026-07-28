@@ -6,7 +6,7 @@
  * Defaults preserve today's behavior (composer on, images on).
  */
 import { afterEach, describe, expect, test } from 'bun:test';
-import React from 'react';
+import React, { useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 
@@ -76,6 +76,26 @@ function globalCommentButton(): Element | null {
   return document.querySelector('button[title="Add global comment"]');
 }
 
+/** Mirrors App.tsx's structured live Pi response: the pane can receive a
+ * direct message, but this response still has local feedback annotations. */
+function SendCapableLiveResponse() {
+  const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  return (
+    <>
+      <Viewer
+        {...viewerProps}
+        mode="selection"
+        directMessage
+        imageFeedbackTarget="Pi · pane-1 · selected response"
+        annotations={annotations}
+        onAddAnnotation={(annotation) => setAnnotations((current) => [...current, annotation])}
+        onSendGlobalCommentText={() => true}
+      />
+      <output data-testid="local-annotation-count">{annotations.length}</output>
+    </>
+  );
+}
+
 describe('Viewer consumer props', () => {
   test.skipIf(!hasDom)('default renders the global-comment composer entry (today’s behavior)', async () => {
     await mount(
@@ -104,11 +124,41 @@ describe('Viewer consumer props', () => {
     expect(document.body.textContent).toContain('hello world');
   });
 
-  test.skipIf(!hasDom)('synthetic live panes offer text Send but not image feedback', async () => {
+  test.skipIf(!hasDom)('send-capable live Pi responses keep Message Pi and support selection annotations', async () => {
+    await mount(<SendCapableLiveResponse />);
+
+    // A live response can send a new direct message and still be a structured
+    // feedback target. Reproduce browser text selection through the same
+    // mouseup path web-highlighter receives in production.
+    const text = [...host!.querySelectorAll('p')]
+      .find((element) => element.textContent === 'hello world')?.firstChild;
+    expect(text).toBeTruthy();
+    const range = document.createRange();
+    range.setStart(text!, 0);
+    range.setEnd(text!, 5);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    await act(async () => {
+      text!.parentElement!.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
+
+    expect(document.querySelector('mark.annotation-highlight')?.textContent).toBe('hello');
+    expect(document.querySelector('.annotation-toolbar')).not.toBeNull();
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>('button[title="Delete"]')?.click();
+    });
+    expect(document.querySelector('[data-testid="local-annotation-count"]')?.textContent).toBe('1');
+    expect(document.querySelector('button[title="Message Pi"]')).not.toBeNull();
+  });
+
+  test.skipIf(!hasDom)('synthetic waiting documents retain Message Pi but suppress selection annotations', async () => {
     await mount(
       <Viewer
         {...viewerProps}
+        mode="selection"
         directMessage
+        disableSelectionAnnotations
         onSendGlobalCommentText={() => true}
         onAddGlobalAttachment={() => {}}
         onRemoveGlobalAttachment={() => {}}
@@ -116,6 +166,20 @@ describe('Viewer consumer props', () => {
     );
     expect(document.querySelector('button[title="Attach image feedback"]')).toBeNull();
     expect(document.querySelector('button[title="Message Pi"]')).not.toBeNull();
+
+    const text = [...host!.querySelectorAll('p')]
+      .find((element) => element.textContent === 'hello world')?.firstChild;
+    const range = document.createRange();
+    range.setStart(text!, 0);
+    range.setEnd(text!, 5);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    await act(async () => {
+      text!.parentElement!.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
+    expect(document.querySelector('mark.annotation-highlight')).toBeNull();
+    expect(document.querySelector('.annotation-toolbar')).toBeNull();
   });
 
   test.skipIf(!hasDom)('structured live responses expose response-bound image feedback separately', async () => {

@@ -54,7 +54,12 @@ test('direct live Send and image feedback have distinct eligibility and transpor
 
   expect(source).toContain('const canAttachSelectedLiveImageFeedback = liveMessageReview &&');
   expect(source).toContain('Boolean(selectedLiveMessage?.assistantMessageId)');
+  expect(source).toContain('const selectedLiveMessageIsWaitingDocument = liveMessageReview &&');
+  expect(source).toContain('!selectedLiveMessage.assistantMessageId');
+  expect(source).toContain('directMessage={sendsGlobalCommentAsUserMessage}');
+  expect(source).toContain('disableSelectionAnnotations={selectedLiveMessageIsWaitingDocument}');
   expect(source).toContain('imageFeedbackTarget={selectedLiveImageFeedbackTarget}');
+  expect(source).toContain('onSendGlobalCommentText={sendsGlobalCommentAsUserMessage ? handleSendGlobalComment : undefined}');
   expect(directSend).toContain("fetch('/api/instruction'");
   expect(directSend).not.toContain('globalAttachments');
 });

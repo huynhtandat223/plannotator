@@ -20,6 +20,14 @@ Configuration:
 - `PLANNOTATOR_HERDR_PORT` — port (default `19432`)
 - `PLANNOTATOR_HERDR_WRITE_TOKEN` — optional override for browser feedback from non-Tailscale networks. Start the service with a long random value, then open `http://<host>:19432/?token=<value>` once to receive the same-site write cookie. Loopback and Tailscale (`100.64.0.0/10` or `fd7a:115c:a1e0::/48`) browsers do not need it.
 
+For a single user viewing a remote host, prefer SSH loopback forwarding and browse the local end:
+
+```sh
+ssh -L 19432:127.0.0.1:19432 user@host
+```
+
+Then open <http://127.0.0.1:19432>; its writes remain loopback-authorized. For recurring LAN access, use a managed `PLANNOTATOR_HERDR_WRITE_TOKEN` deployment behind an authenticated proxy. Do not expose an unauthenticated write endpoint or automatically distribute the token.
+
 ## Discovery contract
 
 `GET /api/panels` runs `herdr api snapshot` and returns **every** agent entry it describes — Pi, Claude Code, Codex, OpenCode, and any kind a future Herdr learns to report. `panelsFromSnapshot` admits an entry when the snapshot gives it a pane id, a working directory and an agent kind, and for no other reason: **do not reintroduce a name check there**, not even a list of the kinds we know about today. Every response is live; a closed pane disappears on the next refresh. `GET /api/plan` maps those panes and their enrichment into Ex-Plannotator's existing response-picker model.
