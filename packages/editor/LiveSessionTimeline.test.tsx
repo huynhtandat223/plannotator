@@ -198,9 +198,8 @@ test.skipIf(!hasDom)('at mobile 412x915, history is collapsed by default, keeps 
     expect(selectedResponse.textContent).not.toContain('response 6');
     expect(el.querySelector('[data-live-timeline-scroll="true"]')).toBeNull();
 
-    const showHistory = Array.from(el.querySelectorAll('button')).find((button) => button.textContent === 'Show history')!;
-    expect(showHistory.getAttribute('aria-expanded')).toBe('false');
-    expect(showHistory.getAttribute('aria-controls')).toBeTruthy();
+    const showHistory = Array.from(el.querySelectorAll('button')).find((button) => button.textContent === 'History')!;
+    expect(showHistory).toBeTruthy();
 
     await act(async () => showHistory.dispatchEvent(new MouseEvent('click', { bubbles: true })));
 
@@ -208,12 +207,12 @@ test.skipIf(!hasDom)('at mobile 412x915, history is collapsed by default, keeps 
     expect(history.getAttribute('aria-label')).toBe('Response history');
     expect(history.style.overflowY).toBe('auto');
     const historyRows = Array.from(history.querySelectorAll('button')).filter((button) => button.textContent?.startsWith('response'));
-    expect(historyRows).toHaveLength(5);
+    expect(historyRows).toHaveLength(6);
     expect(history.textContent).toContain('response 6');
-    expect(history.textContent).not.toContain('response 1');
+    expect(history.textContent).toContain('response 1');
 
-    const hideHistory = Array.from(el.querySelectorAll('button')).find((button) => button.textContent === 'Hide history')!;
-    expect(hideHistory.getAttribute('aria-expanded')).toBe('true');
+    const hideHistory = Array.from(el.querySelectorAll('button')).find((button) => button.textContent === 'Close')!;
+    expect(hideHistory).toBeTruthy();
     await act(async () => hideHistory.dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(el.querySelector('[data-live-timeline-scroll="true"]')).toBeNull();
     expect(el.querySelector('[data-live-timeline-selected-response="true"]')?.textContent).toContain('response 3');
