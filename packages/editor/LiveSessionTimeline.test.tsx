@@ -152,3 +152,24 @@ test.skipIf(!hasDom)('mobile opens a full-height accessible session selection sh
   expect(dialog.textContent).toContain('firstmate · compile');
   expect(el.querySelector('[data-live-timeline-scroll="true"]')).toBeTruthy();
 });
+
+test.skipIf(!hasDom)('unambiguously maps session headers to workspace and tab', async () => {
+  const el = await render();
+  const header = el.querySelector('header')!;
+  expect(header.textContent).toContain('firstmate');
+  expect(header.textContent).toContain('compile');
+});
+
+test.skipIf(!hasDom)('aligns visibility with lg: breakpoints for desktop session picker and mobile controls', async () => {
+  const el = await render();
+  
+  // Desktop inline SessionList should be hidden on mobile width (lg:block)
+  const desktopList = el.querySelector('.border-b.lg\\:block');
+  expect(desktopList).toBeTruthy();
+  expect(desktopList?.className).toContain('hidden');
+  expect(desktopList?.className).toContain('lg:block');
+
+  // Mobile Sessions button opener should be hidden on desktop width (lg:hidden)
+  const mobileOpener = Array.from(el.querySelectorAll('button')).find((button) => button.textContent === 'Sessions')!;
+  expect(mobileOpener.className).toContain('lg:hidden');
+});

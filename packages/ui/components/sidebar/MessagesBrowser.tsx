@@ -437,6 +437,8 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
     // <button> and still the annotation target — only its shape changes, so the
     // picker and annotation semantics are untouched.
     if (chatLayout) {
+      const isAnonymousLabel = msg.label && /^Response \d+(\s+·\s+latest)?$/.test(msg.label);
+      const displayText = isAnonymousLabel ? previewText(msg.text ?? "") : (msg.label ?? previewText(msg.text ?? ""));
       return (
         <div key={msg.messageId} className="flex w-full justify-start">
           <button
@@ -450,24 +452,23 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
                 : "bg-muted/40 text-foreground border-border/60 hover:bg-muted/70"
             }`}
           >
-            <span className="flex items-center gap-1.5 mb-0.5">
-              <span className="text-[9px] font-semibold uppercase tracking-wider text-muted-foreground">
-                {msg.isExAICompanion ? "Ex AI" : "Agent"}
-              </span>
-              <span className="font-mono text-[9px] text-muted-foreground/70">#{idx + 1}{isDefault ? " \u2605" : ""}</span>
-              {annotationCount > 0 && (
-                <span
-                  className="ml-auto min-w-4 h-4 px-1 rounded-full bg-primary/10 text-primary border border-primary/30 text-[9px] font-semibold inline-flex items-center justify-center"
-                  title={`${annotationCount} annotation${annotationCount === 1 ? "" : "s"}`}
-                >
-                  {annotationCount}
-                </span>
-              )}
-            </span>
             <span className="block line-clamp-3 leading-snug whitespace-pre-wrap">
-              {msg.label ?? previewText(msg.text)}
+              {displayText}
             </span>
-            {ts && <span className="block text-[10px] text-muted-foreground mt-0.5">{ts}</span>}
+            {((ts) || annotationCount > 0 || isDefault) && (
+              <span className="flex items-center gap-1.5 text-[9px] text-muted-foreground mt-1">
+                {ts && <span>{ts}</span>}
+                {isDefault && <span className="text-primary font-semibold">★ Latest</span>}
+                {annotationCount > 0 && (
+                  <span
+                    className="ml-auto min-w-4 h-4 px-1 rounded-full bg-primary/15 text-primary border border-primary/30 text-[9px] font-semibold inline-flex items-center justify-center"
+                    title={`${annotationCount} annotation${annotationCount === 1 ? "" : "s"}`}
+                  >
+                    {annotationCount}
+                  </span>
+                )}
+              </span>
+            )}
           </button>
         </div>
       );

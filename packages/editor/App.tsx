@@ -5673,10 +5673,15 @@ const App: React.FC = () => {
                   </div>
                 </div>
               )}
-              {/* Normal Plan View — always mounted, hidden during diff mode */}
-              <div className={`w-full relative ${isHtmlSurface ? 'flex-1 flex flex-col' : `flex justify-center${isEditingMarkdown ? ' flex-1 min-h-0' : ''}`}`} style={{ display: goalSetupMode || (isPlanDiffActive && planDiff.diffBlocks) || (annotateSource === 'folder' && !markdown && !linkedDocHook.isActive) ? 'none' : undefined }}>
+              <div className={`w-full relative ${
+                isHtmlSurface
+                  ? 'flex-1 flex flex-col'
+                  : liveMessageReview
+                    ? `flex flex-col lg:flex-row items-stretch lg:items-start justify-center gap-4 lg:gap-6${isEditingMarkdown ? ' flex-1 min-h-0' : ''}`
+                    : `flex justify-center${isEditingMarkdown ? ' flex-1 min-h-0' : ''}`
+              }`} style={{ display: goalSetupMode || (isPlanDiffActive && planDiff.diffBlocks) || (annotateSource === 'folder' && !markdown && !linkedDocHook.isActive) ? 'none' : undefined }}>
                 {liveMessageReview && (
-                  <div className="mb-4 h-[min(50dvh,34rem)] min-h-[22rem] w-full max-w-4xl">
+                  <div className="mb-4 h-[min(50dvh,34rem)] min-h-[22rem] w-full lg:w-[380px] lg:shrink-0 lg:max-w-none">
                     <LiveSessionTimeline
                       messages={stableLiveSessions}
                       activeTimelineMessages={activeLiveTimelineMessages}
