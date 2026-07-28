@@ -47,6 +47,7 @@ const SessionCard = ({
   onSelect: () => void;
 }) => {
   const activity = chip.activity?.label;
+  const displayName = chip.workspace && chip.tab ? `${chip.workspace} · ${chip.tab}` : chip.label;
   return (
     <button
       type="button"
@@ -68,8 +69,8 @@ const SessionCard = ({
             {chip.activity.glyph}
           </span>
         )}
-        <span className="min-w-0 flex-1 truncate text-xs font-semibold" title={sessionIdentity(chip)}>
-          {sessionIdentity(chip)}
+        <span className="min-w-0 flex-1 truncate text-xs font-semibold" title={displayName}>
+          {displayName}
         </span>
         {unread > 0 && (
           <span aria-label={`${unread} unread repl${unread === 1 ? 'y' : 'ies'}`} className="inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-[10px] font-semibold tabular-nums text-primary-foreground">
@@ -157,22 +158,32 @@ export const LiveSessionTimeline = React.memo(({
 
   return (
     <section data-live-session-timeline="true" className="flex min-h-0 w-full flex-1 flex-col rounded-xl border border-border/60 bg-card shadow-sm">
-      <header className="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-2 md:px-4">
+      <header className="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-2 lg:px-4">
         <div className="min-w-0 flex-1">
           <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Agent Response</p>
-          <p className="truncate text-sm font-semibold" title={sessionIdentity(active)}>{sessionIdentity(active)}</p>
+          <p className="truncate text-sm font-semibold" title={active.workspace && active.tab ? `${active.workspace} · ${active.tab}` : active.label}>
+            {active.workspace && active.tab ? (
+              <>
+                <span>{active.workspace}</span>
+                <span className="text-muted-foreground/60 mx-1.5">·</span>
+                <span>{active.tab}</span>
+              </>
+            ) : (
+              active.label
+            )}
+          </p>
         </div>
         <button
           type="button"
           onClick={() => setMobileSessionsOpen(true)}
           aria-haspopup="dialog"
           aria-expanded={mobileSessionsOpen}
-          className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs font-medium hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:hidden"
+          className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs font-medium hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:hidden"
         >
           Sessions
         </button>
       </header>
-      <div className="hidden min-h-0 border-b border-border/60 md:block">
+      <div className="hidden min-h-0 border-b border-border/60 lg:block">
         <OverlayScrollArea className="max-h-52" style={{ overscrollBehaviorY: 'contain' }}>
           <SessionList chips={sessions} activeSessionKey={activeSessionKey} unreadCountBySession={unreadCountBySession} onActivateSession={onActivateSession} />
         </OverlayScrollArea>
@@ -209,7 +220,7 @@ export const LiveSessionTimeline = React.memo(({
         />
       </OverlayScrollArea>
       {mobileSessionsOpen && (
-        <div className="fixed inset-0 z-[80] flex bg-black/50 md:hidden" role="presentation" onClick={() => setMobileSessionsOpen(false)}>
+        <div className="fixed inset-0 z-[80] flex bg-black/50 lg:hidden" role="presentation" onClick={() => setMobileSessionsOpen(false)}>
           <section
             role="dialog"
             aria-modal="true"
