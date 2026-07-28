@@ -3,10 +3,7 @@ import { MessagesBrowser, type CaptainEcho, type PickerMessage } from '@plannota
 import { OverlayScrollArea } from '@plannotator/ui/components/OverlayScrollArea';
 import { useIsMobile } from '@plannotator/ui/hooks/useIsMobile';
 import { deriveLivePaneChips, type LivePaneChip } from './livePaneChips';
-import { LIVE_MESSAGE_RETENTION } from '@plannotator/core/live-message-window';
 import { type LiveSessionKey } from './live/liveSessionTimeline';
-
-const MOBILE_HISTORY_ROW_LIMIT = Math.min(5, LIVE_MESSAGE_RETENTION);
 
 export type LiveSessionTimelineProps = {
   /** Stable newest-first snapshot rows: owns switcher cards and telemetry identity. */
@@ -35,7 +32,15 @@ const preview = (text: string): string => {
   return normalized.length > 96 ? `${normalized.slice(0, 96).trimEnd()}…` : normalized;
 };
 
-const sessionIdentity = (chip: LivePaneChip): string => chip.label;
+const sanitizeLabel = (label?: string | null): string => {
+  if (!label) return "";
+  let cleaned = label
+    .replace(/\bResponse\s+\d+(\s+·\s+latest)?\b/ig, "")
+    .replace(/\bAGENT\s*#?\d+(\s+·\s+latest)?\b/ig, "")
+    .trim();
+  cleaned = cleaned.replace(/^\s*·\s*/, "").replace(/\s*·\s*$/, "").replace(/\s+/g, " ");
+  return cleaned;
+};
 
 const SessionCard = ({
   chip,
@@ -51,7 +56,10 @@ const SessionCard = ({
   onSelect: () => void;
 }) => {
   const activity = chip.activity?.label;
-  const displayName = chip.workspace && chip.tab ? `${chip.workspace} · ${chip.tab}` : chip.label;
+  const chipWorkspace = sanitizeLabel(chip.workspace);
+  const chipTab = sanitizeLabel(chip.tab);
+  const chipLabel = sanitizeLabel(chip.label) || 'Pane';
+  const displayName = chipWorkspace && chipTab ? `${chipWorkspace} · ${chipTab}` : chipLabel;
   return (
     <button
       type="button"
@@ -139,8 +147,8 @@ export const LiveSessionTimeline = React.memo(({
   jumpToLatestSignal,
 }: LiveSessionTimelineProps) => {
   const [mobileSessionsOpen, setMobileSessionsOpen] = React.useState(false);
+  const [mobileHistoryOpen, setMobileHistoryOpen] = React.useState(false);
   const isMobile = useIsMobile(1024);
-  const [historyExpanded, setHistoryExpanded] = React.useState(false);
   const historyRegionId = React.useId();
 
   const { visible, overflow } = React.useMemo(
@@ -168,49 +176,41 @@ export const LiveSessionTimeline = React.memo(({
       ?? null,
     [activeTimelineMessages, selectedMessageId],
   );
-  const historyMessages = React.useMemo(
-    () => activeTimelineMessages.slice(-MOBILE_HISTORY_ROW_LIMIT),
-    [activeTimelineMessages],
-  );
-
-  React.useEffect(() => {
-    if (!isMobile) setHistoryExpanded(false);
-  }, [isMobile]);
 
   if (!active) return null;
+
+  const activeWorkspace = sanitizeLabel(active.workspace);
+  const activeTab = sanitizeLabel(active.tab);
+  const activeLabel = sanitizeLabel(active.label) || 'Pane';
 
   return (
     <section
       data-live-session-timeline="true"
-      className={`flex min-h-0 w-full flex-1 flex-col rounded-xl border border-border/60 bg-card shadow-sm ${
-        isMobile ? (historyExpanded ? 'h-[min(50dvh,34rem)] min-h-[22rem]' : 'h-auto min-h-0') : 'h-full'
-      }`}
+      className="flex min-h-0 w-full flex-1 flex-col rounded-xl border border-border/60 bg-card shadow-sm h-full"
     >
       <header className="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-2 lg:px-4">
         <div className="min-w-0 flex-1">
           <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Agent Response</p>
-          <p className="truncate text-sm font-semibold" title={active.workspace && active.tab ? `${active.workspace} · ${active.tab}` : active.label}>
-            {active.workspace && active.tab ? (
+          <p className="truncate text-sm font-semibold" title={activeWorkspace && activeTab ? `${activeWorkspace} · ${activeTab}` : activeLabel}>
+            {activeWorkspace && activeTab ? (
               <>
-                <span>{active.workspace}</span>
+                <span>{activeWorkspace}</span>
                 <span className="text-muted-foreground/60 mx-1.5">·</span>
-                <span>{active.tab}</span>
+                <span>{activeTab}</span>
               </>
             ) : (
-              active.label
+              activeLabel
             )}
           </p>
         </div>
         <div className="flex items-center gap-1.5 lg:hidden">
-          {historyMessages.length > 1 && (
+          {activeTimelineMessages.length > 1 && (
             <button
               type="button"
-              onClick={() => setHistoryExpanded((expanded) => !expanded)}
-              aria-controls={historyRegionId}
-              aria-expanded={historyExpanded}
+              onClick={() => setMobileHistoryOpen(true)}
               className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs font-medium hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
-              {historyExpanded ? 'Hide history' : 'Show history'}
+              History
             </button>
           )}
           <button
@@ -229,7 +229,7 @@ export const LiveSessionTimeline = React.memo(({
           <SessionList chips={sessions} activeSessionKey={activeSessionKey} unreadCountBySession={unreadCountBySession} onActivateSession={onActivateSession} />
         </OverlayScrollArea>
       </div>
-      {isMobile && !historyExpanded ? (
+      {isMobile ? (
         <div data-live-timeline-selected-response="true" className="p-2">
           {selectedMessage ? (
             <MessagesBrowser
@@ -268,19 +268,18 @@ export const LiveSessionTimeline = React.memo(({
             </div>
           )}
           <MessagesBrowser
-            messages={isMobile ? historyMessages : activeTimelineMessages}
+            messages={activeTimelineMessages}
             selectedMessageId={selectedMessageId}
             onSelect={onSelectMessage}
             annotationCounts={annotationCounts}
             captainEchoes={captainEchoes}
             chronological
             chatLayout
-            autoLoadOnScroll={!isMobile}
+            autoLoadOnScroll
             listLabel="Session responses"
             emptyLabel="No assistant response in this session yet."
             jumpToLatestSignal={jumpToLatestSignal}
-            rowBudgetOverride={isMobile ? MOBILE_HISTORY_ROW_LIMIT : undefined}
-            showCountControl={!isMobile}
+            showCountControl={false}
           />
         </OverlayScrollArea>
       )}
@@ -309,8 +308,81 @@ export const LiveSessionTimeline = React.memo(({
           </section>
         </div>
       )}
+      {mobileHistoryOpen && (
+        <div className="fixed inset-0 z-[80] flex bg-black/50 lg:hidden" role="presentation" onClick={() => setMobileHistoryOpen(false)}>
+          <section
+            role="dialog"
+            aria-modal="true"
+            aria-label="Response history"
+            className="flex h-[100dvh] w-full flex-col bg-card"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
+              <div>
+                <h2 className="text-sm font-semibold">Response history</h2>
+                <p className="text-xs text-muted-foreground">
+                  {activeWorkspace && activeTab ? (
+                    <>
+                      <span>{activeWorkspace}</span>
+                      <span className="text-muted-foreground/60 mx-1">·</span>
+                      <span>{activeTab}</span>
+                    </>
+                  ) : (
+                    activeLabel
+                  )}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMobileHistoryOpen(false)}
+                className="rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+              >
+                Close
+              </button>
+            </header>
+            <OverlayScrollArea
+              id={historyRegionId}
+              aria-label="Response history"
+              className="min-h-0 flex-1"
+              data-live-timeline-scroll="true"
+              tabIndex={0}
+              style={{ overscrollBehaviorY: 'contain' }}
+            >
+              {newReplyCount > 0 && (
+                <div className="sticky top-0 z-10 px-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={onJumpToNewReplies}
+                    className="w-full rounded-md border border-primary/35 bg-primary/10 px-2 py-1.5 text-xs font-medium text-primary hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {newReplyCount} new repl{newReplyCount === 1 ? 'y' : 'ies'} · Jump to new replies
+                  </button>
+                </div>
+              )}
+              <MessagesBrowser
+                messages={activeTimelineMessages}
+                selectedMessageId={selectedMessageId}
+                onSelect={(id) => {
+                  onSelectMessage(id);
+                }}
+                annotationCounts={annotationCounts}
+                captainEchoes={captainEchoes}
+                chronological
+                chatLayout
+                autoLoadOnScroll={false}
+                listLabel="Session responses"
+                emptyLabel="No assistant response in this session yet."
+                jumpToLatestSignal={jumpToLatestSignal}
+                rowBudgetOverride={activeTimelineMessages.length}
+                showCountControl={false}
+              />
+            </OverlayScrollArea>
+          </section>
+        </div>
+      )}
     </section>
   );
 });
 
 LiveSessionTimeline.displayName = 'LiveSessionTimeline';
+

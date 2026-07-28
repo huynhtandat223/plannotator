@@ -443,12 +443,26 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
     const isDefault = idx === latestIndex;
     const ts = formatTimestamp(msg.timestamp);
     const annotationCount = annotationCounts?.get(msg.messageId) ?? 0;
+
+    const rawLabel = msg.label ?? "";
+    const sanitizedLabel = rawLabel
+      .replace(/\bResponse\s+\d+(\s+·\s+latest)?\b/ig, "")
+      .replace(/\bAGENT\s*#?\d+(\s+·\s+latest)?\b/ig, "")
+      .trim()
+      .replace(/^\s*·\s*/, "")
+      .replace(/\s*·\s*$/, "")
+      .replace(/\s+/g, " ");
+
+    const isAnonymousLabel = !sanitizedLabel ||
+      /^Response\s+\d+(\s+·\s+latest)?$/i.test(rawLabel) ||
+      /^AGENT\s*#?\d+(\s+·\s+latest)?$/i.test(rawLabel);
+
+    const displayText = isAnonymousLabel ? previewText(msg.text ?? "") : sanitizedLabel;
+
     // Chat layout: the agent turn is a left-aligned bubble. It is STILL a
     // <button> and still the annotation target — only its shape changes, so the
     // picker and annotation semantics are untouched.
     if (chatLayout) {
-      const isAnonymousLabel = msg.label && /^Response \d+(\s+·\s+latest)?$/.test(msg.label);
-      const displayText = isAnonymousLabel ? previewText(msg.text ?? "") : (msg.label ?? previewText(msg.text ?? ""));
       return (
         <div key={msg.messageId} className="flex w-full justify-start">
           <button
@@ -472,7 +486,7 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
                 {annotationCount > 0 && (
                   <span
                     className="ml-auto min-w-4 h-4 px-1 rounded-full bg-primary/15 text-primary border border-primary/30 text-[9px] font-semibold inline-flex items-center justify-center"
-                    title={`${annotationCount} annotation${annotationCount === 1 ? "" : "s"}`}
+                    title={`${annotationCount} annotation${annotationCount === 1 ? "" : ""}`}
                   >
                     {annotationCount}
                   </span>
@@ -509,7 +523,7 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
             </span>
           )}
           <span className="line-clamp-2 leading-snug">
-            {msg.label ?? previewText(msg.text)}
+            {displayText}
           </span>
           {(msg.description || ts) && (
             <span className="block text-[10px] text-muted-foreground mt-0.5 line-clamp-2">
@@ -517,6 +531,7 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
             </span>
           )}
         </span>
+
         {annotationCount > 0 && (
           <span
             className="shrink-0 min-w-5 h-5 px-1 rounded-full bg-primary/10 text-primary border border-primary/30 text-[10px] font-semibold inline-flex items-center justify-center"
