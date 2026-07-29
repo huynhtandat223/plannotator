@@ -290,12 +290,21 @@ export function stableLiveSessionMessages(
   return stableMessageProjection(previous, wireMessages);
 }
 
-/** Oldest-first active-session projection with stable identity across telemetry-only frames. */
+/**
+ * Newest-first active-session projection with stable identity across
+ * telemetry-only frames.
+ *
+ * The newest response is the one the captain opened the panel for, so it leads
+ * the transcript rather than sitting at the bottom of it. That is a real DOM
+ * order — not a visual reversal — so reading order, tab order and the
+ * assistive reading of the list all agree, and the wire (already newest-first)
+ * needs no reversal at all.
+ */
 export function stableLiveTimelineMessages(
   previous: readonly PickerMessage[],
   wireMessages: readonly PickerMessage[],
   key: LiveSessionKey | null,
 ): PickerMessage[] {
   if (!key) return previous.length === 0 ? previous as PickerMessage[] : [];
-  return stableMessageProjection(previous, wireMessages.filter((message) => liveSessionKey(message) === key).reverse());
+  return stableMessageProjection(previous, wireMessages.filter((message) => liveSessionKey(message) === key));
 }

@@ -39,7 +39,7 @@ async function render(props: Partial<React.ComponentProps<typeof LiveSessionTime
   await act(async () => root!.render(
     <LiveSessionTimeline
       messages={messages}
-      activeTimelineMessages={[...messages.filter((item) => item.paneId === 'p1')].reverse()}
+      activeTimelineMessages={messages.filter((item) => item.paneId === 'p1')}
       activeSessionKey="pi:pi-1"
       selectedMessageId="p1:r1"
       unreadCountBySession={{ 'pi:pi-2': ['p2:r1'] }}
@@ -303,6 +303,57 @@ test.skipIf(!hasDom)('keeps one caption for the transcript rather than stacking 
   expect(transcript.textContent).toContain('newest compiler response');
 });
 
+test.skipIf(!hasDom)('leads the transcript with the newest response, in DOM and tab order', async () => {
+  const messages = Array.from({ length: 4 }, (_, index) =>
+    message(`p1:r${4 - index}`, 'p1', 'pi-1', 'compile', `response ${4 - index}`),
+  );
+  const el = await render({
+    messages,
+    activeTimelineMessages: messages,
+    selectedMessageId: 'p1:r4',
+    unreadCountBySession: {},
+    newReplyCount: 0,
+  });
+  const transcript = el.querySelector('[data-live-timeline-scroll="true"]') as HTMLElement;
+  const rows = Array.from(transcript.querySelectorAll('button')).filter(
+    (button) => button.textContent?.startsWith('response'),
+  );
+  // Real DOM order, not a CSS reversal: reading order and tab order agree, so
+  // the response the captain came for is both the first thing on screen and
+  // the first thing the keyboard reaches.
+  expect(rows.map((row) => row.textContent!.slice(0, 10))).toEqual([
+    'response 4', 'response 3', 'response 2', 'response 1',
+  ]);
+  // The ★ default annotation target rides with the newest row, at the top.
+  expect(rows[0]!.textContent).toContain('★ Latest');
+  // The region announces its ordering rather than leaving it to be inferred.
+  expect(transcript.getAttribute('aria-label')).toBe('Response history — newest first');
+});
+
+test.skipIf(!hasDom)('a controlled pane list reports opening to the host instead of forking state', async () => {
+  const opens: boolean[] = [];
+  const el = await render({ sessionListOpen: false, onSessionListOpenChange: (open) => opens.push(open) });
+  // The host (the left rail) owns the state, so the panel keeps no list of its own.
+  expect(el.querySelector('[role="listbox"]')).toBeNull();
+
+  await openSwitcher(el);
+  expect(opens).toEqual([true]);
+  // Controlled means controlled: it stays shut until the host says otherwise,
+  // which is what keeps the rail button and this switcher one toggle, not two.
+  expect(el.querySelector('[role="listbox"]')).toBeNull();
+});
+
+test.skipIf(!hasDom)('a host-opened pane list still closes back through the host', async () => {
+  const opens: boolean[] = [];
+  const el = await render({ sessionListOpen: true, onSessionListOpenChange: (open) => opens.push(open) });
+  expect(el.querySelector('[role="listbox"]')).toBeTruthy();
+  expect(el.querySelector('[data-live-session-switcher="true"]')!.getAttribute('aria-expanded')).toBe('true');
+
+  const option = el.querySelector('[role="option"]:not([aria-selected="true"])') as HTMLElement;
+  await act(async () => option.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+  expect(opens).toEqual([false]);
+});
+
 test.skipIf(!hasDom)('strips markdown syntax out of the session switcher previews', async () => {
   const noisy = message('p1:r1', 'p1', 'pi-1', 'compile', '# Heading\n\n> [!WARNING]\n> **Bold warning** body');
   const el = await render({
@@ -363,7 +414,7 @@ test.skipIf(!hasDom)('at mobile 412x915, history is collapsed by default, keeps 
     const selectedIds: string[] = [];
     const el = await render({
       messages,
-      activeTimelineMessages: [...messages].reverse(),
+      activeTimelineMessages: messages,
       selectedMessageId: 'p1:r3',
       onSelectMessage: (id) => selectedIds.push(id),
     });
@@ -379,7 +430,7 @@ test.skipIf(!hasDom)('at mobile 412x915, history is collapsed by default, keeps 
     await act(async () => showHistory.dispatchEvent(new MouseEvent('click', { bubbles: true })));
 
     const history = el.querySelector('[data-live-timeline-scroll="true"]') as HTMLElement;
-    expect(history.getAttribute('aria-label')).toBe('Response history');
+    expect(history.getAttribute('aria-label')).toBe('Response history — newest first');
     expect(history.style.overflowY).toBe('auto');
     const historyRows = Array.from(history.querySelectorAll('button')).filter((button) => button.textContent?.startsWith('response'));
     expect(historyRows).toHaveLength(6);

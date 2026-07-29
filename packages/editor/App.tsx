@@ -177,6 +177,7 @@ import { LiveSessionTimeline } from './LiveSessionTimeline';
 import {
   activateLiveSession,
   createLiveSessionTimelineState,
+  liveSessionKey,
   markLiveSessionRepliesSeen,
   reconcileLiveSessionTimeline,
   selectLiveSessionMessage,
@@ -699,6 +700,10 @@ const App: React.FC = () => {
   const liveSessionTimelineRef = useRef(liveSessionTimeline);
   useEffect(() => { liveSessionTimelineRef.current = liveSessionTimeline; }, [liveSessionTimeline]);
   const [liveTimelineJumpSignal, setLiveTimelineJumpSignal] = useState(0);
+  // The pane list is a disclosure inside the Agent Response panel, but its
+  // TOGGLE lives in the app's existing left rail (`SidebarTabs`), so the open
+  // state is owned here where both can reach it.
+  const [livePaneListOpen, setLivePaneListOpen] = useState(false);
   // The active transcript must not receive new object identities merely because
   // a host telemetry frame changed status/tool/context fields.
   const stableLiveTimelineMessagesRef = useRef<PickerMessage[]>([]);
@@ -1437,6 +1442,26 @@ const App: React.FC = () => {
     return activeLiveTimelineMessages;
   }, [liveMessageReview, activeLiveTimelineMessages, recentMessages]);
 
+  // Rail-toggle inputs, derived straight from session identity rather than from
+  // the panel's chip derivation: a lone pane has nothing to switch to, and the
+  // dot means replies waiting in the panes the captain is NOT reading.
+  const liveSessionKeys = React.useMemo(() => {
+    const keys = new Set<LiveSessionKey>();
+    for (const message of stableLiveSessions) {
+      const key = liveSessionKey(message);
+      if (key) keys.add(key);
+    }
+    return keys;
+  }, [stableLiveSessions]);
+  const liveUnreadElsewhere = React.useMemo(() => {
+    let total = 0;
+    for (const key of liveSessionKeys) {
+      if (key === activeLiveSessionKey) continue;
+      total += liveSessionTimeline.unreadMessageIdsBySession[key]?.length ?? 0;
+    }
+    return total;
+  }, [liveSessionKeys, activeLiveSessionKey, liveSessionTimeline.unreadMessageIdsBySession]);
+
   // A Global Comment in any real live Pi pane is a new user message.
   // Selection/code comments still use the review-annotation flow.
   const selectedLiveMessage = React.useMemo(
@@ -1922,15 +1947,10 @@ const App: React.FC = () => {
     [liveMessageReview, recentMessages, captainEchoes],
   );
 
-  // The live transcript reads top-to-bottom oldest-first (a real chat history),
-  // while the wire delivers responses newest-first. Reverse only for the live
-  // sidebar display; `recentMessages` stays newest-first everywhere else so
-  // selection, `#N` numbering, and echo anchoring (keyed by messageId, order-
-  // independent) are all untouched. Non-live surfaces keep the newest-first list.
-  const sidebarMessages = React.useMemo(
-    () => (liveMessageReview ? [...recentMessages].reverse() : recentMessages),
-    [liveMessageReview, recentMessages],
-  );
+  // Every message list in this app — live or not — now reads newest-first, so
+  // the wire order is the display order and nothing is reversed anywhere.
+  // Echo anchoring is keyed by messageId and stays order-independent.
+  const sidebarMessages = recentMessages;
 
   // Context-aware back label for linked doc navigation
   const backLabel = annotateSource === 'folder' ? 'file list'
@@ -5465,6 +5485,10 @@ const App: React.FC = () => {
               showChangesTab={liveMessageReview && !!projectRoot && !archive.archiveMode}
               showMessagesTab={!liveMessageReview && annotateSource === 'message' && recentMessages.length > 1}
               messagesTabTitle={undefined}
+              showPanesTab={liveMessageReview && liveSessionKeys.size > 1}
+              isPanesOpen={livePaneListOpen}
+              onTogglePanes={() => setLivePaneListOpen((open) => !open)}
+              panesUnreadCount={liveUnreadElsewhere}
               showAgentTerminalTab={showAgentTerminalControls}
               isAgentTerminalOpen={isAgentTerminalOpen}
               isAgentTerminalRunning={isAgentTerminalRunning}
@@ -5562,7 +5586,7 @@ const App: React.FC = () => {
                 onSelectMessage={handleSelectMessage}
                 messageAnnotationCounts={activeMessageAnnotationCounts}
                 messageCaptainEchoes={captainEchoAnchors}
-                messagesChronological={liveMessageReview}
+                messagesChronological={false}
                 messagesChatLayout={liveMessageReview}
                 messagesAutoLoadOnScroll={liveMessageReview}
                 messagePickerLabels={liveWorkspaceMode ? {
@@ -5717,6 +5741,8 @@ const App: React.FC = () => {
                       onSelectMessage={handleSelectMessage}
                       onJumpToNewReplies={handleJumpToLiveReplies}
                       jumpToLatestSignal={liveTimelineJumpSignal}
+                      sessionListOpen={livePaneListOpen}
+                      onSessionListOpenChange={setLivePaneListOpen}
                     />
                   </div>
                 )}

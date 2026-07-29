@@ -19,6 +19,19 @@ interface SidebarTabsProps {
   showChangesTab?: boolean;
   showMessagesTab?: boolean;
   messagesTabTitle?: string;
+  /**
+   * Live-pane switcher flag. The live Agent Response panel is one pane at a
+   * time, and this rail is the app's existing left-edge control strip — so the
+   * pane toggle belongs here rather than as a second, bespoke left control
+   * invented inside the panel. It drives the panel's own pane list; the rail
+   * only owns "where the toggle lives".
+   */
+  showPanesTab?: boolean;
+  panesTabTitle?: string;
+  isPanesOpen?: boolean;
+  onTogglePanes?: () => void;
+  /** Replies waiting in the panes the reviewer is NOT reading. */
+  panesUnreadCount?: number;
   /** A newer response finished in another pane while the reviewer stayed here. */
   hasPendingResponse?: boolean;
   showAgentTerminalTab?: boolean;
@@ -39,6 +52,11 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({
   showChangesTab,
   showMessagesTab,
   messagesTabTitle = "Pick a different message",
+  showPanesTab,
+  panesTabTitle = "Switch live pane",
+  isPanesOpen,
+  onTogglePanes,
+  panesUnreadCount = 0,
   hasPendingResponse,
   showAgentTerminalTab,
   isAgentTerminalOpen,
@@ -67,6 +85,35 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({
           <ReviewAgentsIcon className="w-3.5 h-3.5" />
           {isAgentTerminalRunning && (
             <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-primary" />
+          )}
+        </button>
+      )}
+
+      {/* Live panes — the pane/session toggle, sharing this rail rather than
+          adding a second left-edge control of its own. */}
+      {showPanesTab && onTogglePanes && (
+        <button
+          data-live-panes-tab="true"
+          onClick={onTogglePanes}
+          className={`sidebar-tab-flag group relative flex items-center justify-center w-7 h-9 rounded-r-md border border-l-0 border-border/50 bg-card/80 backdrop-blur-sm transition-colors ${
+            isPanesOpen
+              ? "text-primary"
+              : "text-muted-foreground hover:text-foreground hover:bg-card"
+          }`}
+          title={panesTabTitle}
+          aria-label={panesTabTitle}
+          aria-expanded={isPanesOpen ?? false}
+          aria-pressed={isPanesOpen ?? false}
+        >
+          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 5h16v14H4z" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M10 5v14" />
+          </svg>
+          {panesUnreadCount > 0 && (
+            <span
+              aria-label={`${panesUnreadCount} unread repl${panesUnreadCount === 1 ? "y" : "ies"} in other panes`}
+              className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-primary"
+            />
           )}
         </button>
       )}
