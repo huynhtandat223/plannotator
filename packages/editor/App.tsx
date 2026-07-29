@@ -155,7 +155,11 @@ import { fullReviewUrlForBrowser } from './fullReviewUrl';
 import { reconcileSourceDocuments, type SourceDocumentReconcileEvent } from './sourceDocumentReconciliation';
 import { dirnameBrowserPath, normalizeBrowserPath, pathIsInsideDir } from './sourceDocumentPaths';
 import { pickRestoredSingleFileDraftToDisplay } from './draftRestoreSelection';
-import { changedLivePaneSessionIds, discardMessageStatesForChangedPanes } from './liveMessageScope';
+import {
+  changedLivePaneSessionIds,
+  discardMessageStatesForChangedPanes,
+  hasMessageStateDraftsForChangedPanes,
+} from './liveMessageScope';
 import {
   appendCaptainEcho,
   buildCaptainEchoAnchors,
@@ -1585,8 +1589,18 @@ const App: React.FC = () => {
     liveSessionTimelineRef.current = nextTimeline;
     if (nextTimeline !== previousTimeline) setLiveSessionTimeline(nextTimeline);
     if (changedPaneIds.size > 0) {
+      // The selected response's annotations live in React state until the
+      // captain switches messages. Include them before deleting old-session
+      // states so they cannot survive the boundary or be delivered later.
+      const statesBeforeSessionChange = getMessageStatesWithCurrent();
+      const discardedDrafts = hasMessageStateDraftsForChangedPanes(
+        statesBeforeSessionChange,
+        previousMessages,
+        changedPaneIds,
+        (state) => countMessageAnnotations(state) > 0,
+      );
       messageStateCacheRef.current = discardMessageStatesForChangedPanes(
-        messageStateCacheRef.current,
+        statesBeforeSessionChange,
         previousMessages,
         changedPaneIds,
       );
@@ -1595,9 +1609,11 @@ const App: React.FC = () => {
       // session in this pane means its prior turns no longer describe what the
       // agent can see, so they are discarded at this one boundary.
       updateCaptainEchoes((store) => discardCaptainEchoesForPanes(store, changedPaneIds));
-      toast('Draft annotations discarded', {
-        description: 'The Pi session changed in this pane, so its prior review drafts cannot be sent to the new session.',
-      });
+      if (discardedDrafts) {
+        toast('Draft annotations discarded', {
+          description: 'The Pi session changed in this pane, so its prior review drafts cannot be sent to the new session.',
+        });
+      }
     }
     // Panes that vanished from the snapshot can never render their echo again;
     // drop them so a long-lived tab holds no orphan prompt text.
@@ -1638,7 +1654,7 @@ const App: React.FC = () => {
         setSelectedCodeAnnotationId(targetState.selectedCodeAnnotationId);
       }
     }
-  }, [selectedMessageId, recentMessages, followNextPaneResponse, linkedDocHook.restoreSession, updateCaptainEchoes]);
+  }, [selectedMessageId, recentMessages, followNextPaneResponse, getMessageStatesWithCurrent, linkedDocHook.restoreSession, updateCaptainEchoes]);
 
   const handleLiveReviewAction = React.useCallback(async (
     path: '/api/session/feedback/retry' | '/api/session/resume' | '/api/session/cancel-waiting',

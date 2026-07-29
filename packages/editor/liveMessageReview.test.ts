@@ -16,6 +16,10 @@ test('live-message updates are applied in place without a full-page reload', () 
   expect(callback).not.toContain('setRightSidebarTab');
   expect(callback).toContain('liveSnapshotMessagesRef.current = snapshot.messages');
   expect(callback).toContain('changedLivePaneSessionIds');
+  expect(callback).toContain('hasMessageStateDraftsForChangedPanes');
+  expect(callback).toContain('const statesBeforeSessionChange = getMessageStatesWithCurrent()');
+  expect(callback).toContain('discardMessageStatesForChangedPanes(\n        statesBeforeSessionChange');
+  expect(callback).toContain('if (discardedDrafts) {\n        toast(\'Draft annotations discarded\'');
   expect(callback).toContain('messageStateCacheRef.current');
   // This is the sole allowed incoming-frame selection transition: active
   // session removal. Arrival/focus/telemetry frames only update the reducer.

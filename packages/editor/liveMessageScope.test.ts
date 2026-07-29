@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   changedLivePaneSessionIds,
   discardMessageStatesForChangedPanes,
+  hasMessageStateDraftsForChangedPanes,
   reconcileLiveMessageSelection,
   type LiveScopedMessage,
 } from './liveMessageScope';
@@ -47,14 +48,27 @@ describe('live message session scope', () => {
     expect(discardMessageStatesForChangedPanes(drafts, previous, changedPaneIds)).toEqual(drafts);
   });
 
-  test('recognizes a pane session transition only once after its new snapshot is accepted', () => {
+  test('reports a discard notice once per old-draft/new-session transition', () => {
     const oldSnapshot = [message('w:p1:old-response', 'w:p1', 'pi-session-old')];
-    const newSnapshot = [message('w:p1:new-response', 'w:p1', 'pi-session-new')];
+    const middleSnapshot = [message('w:p1:middle-response', 'w:p1', 'pi-session-middle')];
+    const newestSnapshot = [message('w:p1:new-response', 'w:p1', 'pi-session-new')];
+    const hasDraft = (state: { draft: string }) => state.draft.length > 0;
+    let drafts = new Map([['w:p1:old-response', { draft: 'must not cross sessions' }]]);
 
-    expect(changedLivePaneSessionIds(oldSnapshot, newSnapshot)).toEqual(new Set(['w:p1']));
-    // Repeated SSE events contain the same accepted snapshot. They must not
-    // be treated as another session replacement or produce another warning.
-    expect(changedLivePaneSessionIds(newSnapshot, newSnapshot)).toEqual(new Set());
+    const firstChange = changedLivePaneSessionIds(oldSnapshot, middleSnapshot);
+    expect(hasMessageStateDraftsForChangedPanes(drafts, oldSnapshot, firstChange, hasDraft)).toBe(true);
+    drafts = discardMessageStatesForChangedPanes(drafts, oldSnapshot, firstChange);
+
+    // A repeated transition frame cannot notify again: its old draft was deleted.
+    expect(hasMessageStateDraftsForChangedPanes(drafts, oldSnapshot, firstChange, hasDraft)).toBe(false);
+
+    // A later transition with a newly-created draft is a distinct loss and gets
+    // exactly one new notice. It is deleted before the next frame as well.
+    drafts.set('w:p1:middle-response', { draft: 'new session draft' });
+    const secondChange = changedLivePaneSessionIds(middleSnapshot, newestSnapshot);
+    expect(hasMessageStateDraftsForChangedPanes(drafts, middleSnapshot, secondChange, hasDraft)).toBe(true);
+    drafts = discardMessageStatesForChangedPanes(drafts, middleSnapshot, secondChange);
+    expect(hasMessageStateDraftsForChangedPanes(drafts, middleSnapshot, secondChange, hasDraft)).toBe(false);
   });
 
   test('legacy picker reconciles selection off a synthetic waiting document when a real assistant response arrives', () => {
