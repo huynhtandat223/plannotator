@@ -31,7 +31,12 @@ import {
   getWorkspaceStatusForDirectory,
   parseGitNumstat,
 } from "../../packages/shared/workspace-status";
-import { readFileSync, createReadStream, type Dirent } from "node:fs";
+import { readFileSync, readdirSync, statSync, createReadStream, type Dirent } from "node:fs";
+import {
+  describeEditorBundleFreshness,
+  formatStaleEditorBundleWarning,
+  type EditorSourceStamp,
+} from "./editor-bundle-freshness";
 import { createInterface } from "node:readline";
 import { ExAICompanionCoordinator } from "./ex-ai-companion";
 import { mkdir, readFile, readdir, realpath, stat } from "node:fs/promises";
@@ -135,10 +140,83 @@ export class LiveSnapshotPublisher<T> {
 // not at module load: this module also exports pure helpers that tests import,
 // and an eager read made importing it throw ENOENT in any checkout that had
 // not run the corresponding build.
+const EDITOR_BUNDLE_PATH = join(import.meta.dir, "..", "ex-pi-extension", "ex-plannotator.html");
+
 let editorHtmlCache: string | undefined;
 function loadEditorHtml(): string {
-  editorHtmlCache ??= readFileSync(join(import.meta.dir, "..", "ex-pi-extension", "ex-plannotator.html"), "utf8");
+  editorHtmlCache ??= readFileSync(EDITOR_BUNDLE_PATH, "utf8");
   return editorHtmlCache;
+}
+
+/** Sources the editor bundle is built from, relative to this service. */
+const EDITOR_SOURCE_ROOTS = [
+  join(import.meta.dir, "..", "..", "packages", "editor"),
+  join(import.meta.dir, "..", "..", "packages", "ui"),
+  join(import.meta.dir, "..", "..", "packages", "core"),
+  join(import.meta.dir, "..", "hook"),
+];
+const EDITOR_SOURCE_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".css", ".html"];
+const EDITOR_SOURCE_SKIP_DIRS = new Set(["node_modules", "dist", ".git", "coverage", "test-setup"]);
+/** Bounds the walk so a startup check can never become a startup cost. */
+const EDITOR_SOURCE_SCAN_BUDGET = 20_000;
+
+/**
+ * Newest source file the editor bundle is built from, or null when there is no
+ * source tree here (an installed package rather than a checkout) — in which
+ * case there is nothing to compare and nothing to claim.
+ */
+function newestEditorSource(): EditorSourceStamp | null {
+  let newest: EditorSourceStamp | null = null;
+  let budget = EDITOR_SOURCE_SCAN_BUDGET;
+  const walk = (dir: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (budget <= 0) return;
+      if (entry.isDirectory()) {
+        if (EDITOR_SOURCE_SKIP_DIRS.has(entry.name)) continue;
+        walk(join(dir, entry.name));
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      // Tests move constantly and never change the bundle; counting them would
+      // make the warning cry wolf until nobody reads it.
+      if (entry.name.includes(".test.") || entry.name.includes(".spec.")) continue;
+      if (!EDITOR_SOURCE_EXTENSIONS.some(ext => entry.name.endsWith(ext))) continue;
+      budget -= 1;
+      const path = join(dir, entry.name);
+      try {
+        const { mtimeMs } = statSync(path);
+        if (!newest || mtimeMs > newest.mtimeMs) newest = { path, mtimeMs };
+      } catch {
+        // Raced with a checkout; the next startup will see it.
+      }
+    }
+  };
+  for (const root of EDITOR_SOURCE_ROOTS) walk(root);
+  return newest;
+}
+
+/**
+ * A restart is not a build. Say so at startup when the served bundle predates
+ * the sources, so nobody debugs UI code the browser has never been given.
+ */
+export function warnIfEditorBundleIsStale(): void {
+  let bundleMtimeMs: number | null = null;
+  try {
+    bundleMtimeMs = statSync(EDITOR_BUNDLE_PATH).mtimeMs;
+  } catch {
+    return;
+  }
+  const warning = formatStaleEditorBundleWarning(
+    describeEditorBundleFreshness({ bundleMtimeMs, newestSource: newestEditorSource() }),
+    mtimeMs => new Date(mtimeMs).toLocaleString(),
+  );
+  if (warning) console.warn(warning);
 }
 
 let reviewHtmlCache: string | undefined;
@@ -3548,5 +3626,6 @@ if (import.meta.main) {
   });
   server.listen(port, host, () => {
     console.log(`Plannotator Herdr service listening on http://${host}:${port}`);
+    warnIfEditorBundleIsStale();
   });
 }

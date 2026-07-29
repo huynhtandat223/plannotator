@@ -18,6 +18,12 @@ interface SidebarTabsProps {
   activeTab: SidebarTab;
   onToggleTab: (tab: SidebarTab) => void;
   hasDiff: boolean;
+  /**
+   * Off only where the rail is deliberately reduced to a single flag — wide /
+   * focus mode keeps its promise to put the panels away while still carrying
+   * the Agent Response toggle, which has no other home above `lg`.
+   */
+  showTocTab?: boolean;
   showVersionsTab?: boolean;
   showFilesTab?: boolean;
   showChangesTab?: boolean;
@@ -52,6 +58,7 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({
   activeTab,
   onToggleTab,
   hasDiff,
+  showTocTab = true,
   showVersionsTab,
   showFilesTab,
   showChangesTab,
@@ -122,25 +129,27 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({
       )}
 
       {/* TOC tab */}
-      <button
-        onClick={() => onToggleTab("toc")}
-        className="sidebar-tab-flag group flex items-center justify-center w-7 h-9 rounded-r-md border border-l-0 border-border/50 bg-card/80 backdrop-blur-sm text-muted-foreground hover:text-foreground hover:bg-card transition-colors"
-        title="Table of Contents"
-      >
-        <svg
-          className="w-3.5 h-3.5"
-          fill="none"
-          viewBox="0 0 24 24"
-          stroke="currentColor"
-          strokeWidth={2}
+      {showTocTab && (
+        <button
+          onClick={() => onToggleTab("toc")}
+          className="sidebar-tab-flag group flex items-center justify-center w-7 h-9 rounded-r-md border border-l-0 border-border/50 bg-card/80 backdrop-blur-sm text-muted-foreground hover:text-foreground hover:bg-card transition-colors"
+          title="Table of Contents"
         >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="M4 6h16M4 10h16M4 14h10M4 18h10"
-          />
-        </svg>
-      </button>
+          <svg
+            className="w-3.5 h-3.5"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+            strokeWidth={2}
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M4 6h16M4 10h16M4 14h10M4 18h10"
+            />
+          </svg>
+        </button>
+      )}
 
       {/* Versions tab — only shown when multiple versions exist */}
       {showVersionsTab && (

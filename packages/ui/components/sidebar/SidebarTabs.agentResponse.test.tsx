@@ -122,3 +122,26 @@ test.skipIf(!hasDom)('announces replies that arrived while the panel was away', 
   });
   expect(flag(quiet)!.querySelector('[aria-label*="unread"]')).toBeNull();
 });
+
+test.skipIf(!hasDom)('a rail reduced to one flag still carries the Agent Response toggle', async () => {
+  // Wide/focus mode keeps its promise to put the panels away, so every other
+  // flag is suppressed — but the rail is the toggle's only home above `lg`, so
+  // suppressing it too is what strands the panel on screen with no control.
+  const el = await render({
+    showTocTab: false,
+    showAgentResponseTab: true,
+    isAgentResponseVisible: true,
+    onToggleAgentResponse: () => {},
+  });
+  const buttons = Array.from(el.querySelectorAll('button'));
+  expect(buttons).toHaveLength(1);
+  expect(buttons[0]).toBe(flag(el)!);
+  expect(flag(el)!.getAttribute('aria-label')).toBe('Hide Agent Response panel');
+  expect(flag(el)!.getAttribute('aria-pressed')).toBe('true');
+});
+
+test.skipIf(!hasDom)('the TOC flag is on by default, so no other caller loses it', async () => {
+  const el = await render({ showAgentResponseTab: true, onToggleAgentResponse: () => {} });
+  const titles = Array.from(el.querySelectorAll('button')).map(b => b.getAttribute('title'));
+  expect(titles).toContain('Table of Contents');
+});

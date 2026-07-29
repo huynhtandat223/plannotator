@@ -34,3 +34,100 @@ export function agentResponsePanelWrapperClass(visible: boolean): string {
     ? AGENT_RESPONSE_PANEL_BOX_CLASS
     : `${AGENT_RESPONSE_PANEL_BOX_CLASS} ${AGENT_RESPONSE_PANEL_HIDDEN_CLASS}`;
 }
+
+/**
+ * Where the toggle lives, and — the part that actually bites — where it does
+ * not.
+ *
+ * The toggle has three homes because the left rail has breakpoints and comes
+ * and goes: the collapsed rail (`SidebarTabs`), the open sidebar's tab bar
+ * (`SidebarContainer`), and the header cluster. The first two are `hidden
+ * lg:flex`; the header one is `lg:hidden`. So at >= lg the rail and the tab bar
+ * are the ONLY homes, and every condition that unmounts the rail has to be
+ * checked against whether the live panel is still on screen — otherwise the
+ * panel is stranded with no control at all, which is the exact shape the
+ * captain reported.
+ *
+ * Wide/focus mode was such a condition. It drops the rail (and closes the
+ * sidebar) to give the document the width, but it does NOT unmount the live
+ * Agent Response panel — measured in the browser at 1440px: panel 380x558 on
+ * screen, zero toggles with a non-zero box. So the rail now survives wide mode
+ * while live review is on, carrying only this one flag; wide mode's own promise
+ * to put the panels away is untouched because the other flags stay suppressed.
+ *
+ * These are pure so the invariant below can be asserted over every combination
+ * of layout state, rather than only over the handful a mounted test happens to
+ * exercise.
+ */
+export type AgentResponseLayoutState = {
+  /** Live message review — the only mode that renders the panel at all. */
+  liveMessageReview: boolean;
+  planReview: boolean;
+  goalSetupMode: boolean;
+  sidebarOpen: boolean;
+  agentTerminalOpen: boolean;
+  /** `wideModeType !== null` — the Wide and Focus reading modes. */
+  wideMode: boolean;
+};
+
+/** `lg` and up gets the rail / sidebar tab bar; below it gets the header. */
+export type AgentResponseViewport = "below-lg" | "lg-and-up";
+
+/**
+ * Whether the collapsed left rail is mounted at all. Drives both the rail and
+ * the document's matching 30px left gutter, so the two cannot drift and the
+ * rail can never overlap the text it sits beside.
+ */
+export function sidebarRailMounted(state: AgentResponseLayoutState): boolean {
+  return (
+    !state.planReview &&
+    !state.goalSetupMode &&
+    !state.sidebarOpen &&
+    !state.agentTerminalOpen &&
+    (!state.wideMode || state.liveMessageReview)
+  );
+}
+
+/** Whether the panel itself can be on screen — hidden-by-the-toggle aside. */
+export function agentResponsePanelOnScreen(state: AgentResponseLayoutState): boolean {
+  return state.liveMessageReview && !state.goalSetupMode;
+}
+
+/** Which of the three homes render for this layout state. */
+export function agentResponseToggleHomes(state: AgentResponseLayoutState): {
+  rail: boolean;
+  sidebarTabBar: boolean;
+  header: boolean;
+  /**
+   * The header copy is `lg:hidden`, because above `lg` the rail or the tab bar
+   * owns the control. It drops that gate only when neither of them is mounted.
+   *
+   * This is a backstop, not the fix: the rail surviving wide/focus mode is what
+   * covers the case the captain hit. It exists because "which surface owns the
+   * un-hide at this width" was answered once, per known layout mode, and a
+   * later mode that unmounted every home silently invalidated the answer. A
+   * fallback that is defined for ALL states cannot be invalidated that way.
+   */
+  headerAtLargeWidths: boolean;
+} {
+  const rail = state.liveMessageReview && sidebarRailMounted(state);
+  const sidebarTabBar =
+    state.liveMessageReview && !state.planReview && !state.goalSetupMode && state.sidebarOpen;
+  return {
+    rail,
+    sidebarTabBar,
+    header: state.liveMessageReview,
+    headerAtLargeWidths: state.liveMessageReview && !rail && !sidebarTabBar,
+  };
+}
+
+/** Whether a captain at this width can actually reach the toggle. */
+export function agentResponseToggleReachable(
+  state: AgentResponseLayoutState,
+  viewport: AgentResponseViewport,
+): boolean {
+  const homes = agentResponseToggleHomes(state);
+  return viewport === "below-lg"
+    ? homes.header
+    : homes.rail || homes.sidebarTabBar || homes.headerAtLargeWidths;
+}

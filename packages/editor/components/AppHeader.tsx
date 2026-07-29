@@ -9,7 +9,7 @@ import { PlanHeaderMenu } from '@plannotator/ui/components/PlanHeaderMenu';
 import type { CallbackConfig } from '@plannotator/ui/utils/callback';
 import type { UIPreferences } from '@plannotator/ui/utils/uiPreferences';
 import { SparklesIcon } from '@plannotator/ui/components/SparklesIcon';
-import { agentResponseToggleLabel } from '@plannotator/ui/components/agentResponsePanelToggle';
+import { agentResponseHeaderToggleClass, agentResponseToggleLabel } from '@plannotator/ui/components/agentResponsePanelToggle';
 import { HerdrProcessPanelLauncher } from './HerdrProcessPanelLauncher';
 
 interface AppHeaderProps {
@@ -63,6 +63,8 @@ interface AppHeaderProps {
   isAgentResponseVisible?: boolean;
   onToggleAgentResponse?: () => void;
   agentResponseUnreadCount?: number;
+  /** No rail and no open sidebar tab bar — this copy is the only way back. */
+  agentResponseToggleIsOnlyHome?: boolean;
   onOpenLiveMessages?: () => void;
   onOpenLiveFolder?: () => void;
   onOpenLiveChanges?: () => void;
@@ -195,6 +197,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   isAgentResponseVisible,
   onToggleAgentResponse,
   agentResponseUnreadCount = 0,
+  agentResponseToggleIsOnlyHome,
   onOpenLiveMessages,
   onOpenLiveFolder,
   onOpenLiveChanges,
@@ -260,9 +263,11 @@ export const AppHeader = React.memo<AppHeaderProps>(({
         {/* Agent Response visibility. Below `lg` the left rail and the open
             sidebar that both carry this toggle are unmounted, so without it
             here a hidden panel could not be brought back at exactly the widths
-            where hiding it buys the most room. */}
+            where hiding it buys the most room. Above `lg` it normally defers to
+            those two — but it stays when a layout mode has unmounted both, so
+            the panel can never be on screen with no control at all. */}
         {showAgentResponseToggle && (
-          <div className="flex items-center gap-0.5 lg:hidden">
+          <div className={agentResponseHeaderToggleClass(!!agentResponseToggleIsOnlyHome)}>
             <HeaderIconButton
               onClick={onToggleAgentResponse}
               title={agentResponseToggleLabel(!!isAgentResponseVisible)}
