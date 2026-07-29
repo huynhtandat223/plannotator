@@ -76,3 +76,43 @@ export function sessionAge(timestamp: string | undefined | null, now: number = D
   if (days < 7) return `${days}d`;
   return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
+
+/**
+ * The accessible name for a live-pane switcher row.
+ *
+ * Left to fall out of DOM text order, a row's name was an unpunctuated
+ * run-on — measured verbatim on the live surface:
+ *
+ *   `●firstmate · fm-plannotator-uiux-top10-audit1m4The Close path is confirmed…`
+ *
+ * The `1m` age ran straight into the `4` unread badge to read "one m four",
+ * agent state was carried only by a `●`/`○` glyph with no text equivalent, and
+ * the unread count had no unit at all. The switcher is the navigation spine of
+ * this surface, so a screen-reader captain got the least usable version of the
+ * most important control.
+ *
+ * Composing the name explicitly — and hiding the decorative parts — makes each
+ * field a separate, labelled clause in a fixed order.
+ */
+export function sessionRowAccessibleName(parts: {
+  identity: string;
+  /** Agent state, already human-readable, e.g. "Thinking…". */
+  activity?: string | null;
+  /** Compact age, e.g. "1m". Omitted when the host sent no usable timestamp. */
+  age?: string | null;
+  unread?: number;
+  preview?: string | null;
+}): string {
+  const clauses: string[] = [parts.identity.trim()];
+  if (parts.activity && parts.activity.trim()) clauses.push(parts.activity.trim());
+  if (parts.age) {
+    // "now" is already a phrase; the rest are durations that need a unit noun.
+    clauses.push(parts.age === "now" ? "active now" : `last active ${parts.age} ago`);
+  }
+  if (parts.unread && parts.unread > 0) {
+    clauses.push(`${parts.unread} unread ${parts.unread === 1 ? "response" : "responses"}`);
+  }
+  const preview = parts.preview?.trim();
+  if (preview) clauses.push(`latest: ${preview}`);
+  return clauses.join(", ");
+}

@@ -100,34 +100,6 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({
         </button>
       )}
 
-      {/* Agent Response — shows/hides the whole panel, sharing this rail rather
-          than adding a left-edge control of its own. */}
-      {showAgentResponseTab && onToggleAgentResponse && (
-        <button
-          type="button"
-          data-agent-response-tab="true"
-          onClick={onToggleAgentResponse}
-          className={`sidebar-tab-flag group relative flex items-center justify-center w-7 h-9 rounded-r-md border border-l-0 border-border/50 bg-card/80 backdrop-blur-sm transition-colors ${
-            isAgentResponseVisible
-              ? "text-primary"
-              : "text-muted-foreground hover:text-foreground hover:bg-card"
-          }`}
-          title={agentResponseToggleLabel(isAgentResponseVisible)}
-          aria-label={agentResponseToggleLabel(isAgentResponseVisible)}
-          aria-pressed={isAgentResponseVisible}
-        >
-          <AgentResponsePanelIcon className="w-3.5 h-3.5" visible={isAgentResponseVisible} />
-          {/* Only meaningful while the panel is away: with it on screen the
-              unread lives on the panel's own rows. */}
-          {!isAgentResponseVisible && agentResponseUnreadCount > 0 && (
-            <span
-              aria-label={`${agentResponseUnreadCount} unread repl${agentResponseUnreadCount === 1 ? "y" : "ies"} while hidden`}
-              className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-primary"
-            />
-          )}
-        </button>
-      )}
-
       {/* TOC tab */}
       {showTocTab && (
         <button
@@ -228,6 +200,41 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({
           <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
+        </button>
+      )}
+
+      {/* Agent Response — shows/hides the whole panel, sharing this rail rather
+          than adding a left-edge control of its own.
+
+          It sits LAST on purpose. The captain reads the rail top-down as
+          document navigation (contents, files, changes) and asked for the
+          Agent Response flag to be the final slot beneath them, so the
+          navigation group stays contiguous and the panel toggle reads as a
+          separate kind of thing. This rail is now the toggle's home at EVERY
+          width, not just `lg` and up — see `agentResponseToggleHomes`. */}
+      {showAgentResponseTab && onToggleAgentResponse && (
+        <button
+          type="button"
+          data-agent-response-tab="true"
+          onClick={onToggleAgentResponse}
+          className={`sidebar-tab-flag group relative flex items-center justify-center w-7 h-9 rounded-r-md border border-l-0 border-border/50 bg-card/80 backdrop-blur-sm transition-colors ${
+            isAgentResponseVisible
+              ? "text-primary"
+              : "text-muted-foreground hover:text-foreground hover:bg-card"
+          }`}
+          title={agentResponseToggleLabel(isAgentResponseVisible)}
+          aria-label={agentResponseToggleLabel(isAgentResponseVisible)}
+          aria-pressed={isAgentResponseVisible}
+        >
+          <AgentResponsePanelIcon className="w-3.5 h-3.5" visible={isAgentResponseVisible} />
+          {/* Only meaningful while the panel is away: with it on screen the
+              unread lives on the panel's own rows. */}
+          {!isAgentResponseVisible && agentResponseUnreadCount > 0 && (
+            <span
+              aria-label={`${agentResponseUnreadCount} unread repl${agentResponseUnreadCount === 1 ? "y" : "ies"} while hidden`}
+              className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-primary"
+            />
+          )}
         </button>
       )}
     </div>

@@ -371,8 +371,14 @@ test.skipIf(!hasDom)('routes the one switcher to the inline picker on desktop an
   await atMobileViewport(async () => {
     const mobile = await render();
     expect(mobile.querySelector('[data-live-session-switcher="true"]')!.getAttribute('aria-haspopup')).toBe('dialog');
-    const history = Array.from(mobile.querySelectorAll('button')).find((button) => button.textContent === 'History')!;
+    const history = mobile.querySelector('[data-live-history-toggle="true"]') as HTMLElement;
+    expect(history).toBeTruthy();
     expect(history.className).toContain('lg:hidden');
+    // Below `lg` the panel renders only the SELECTED response, so the
+    // new-replies banner lives behind this button. The count therefore has to
+    // ride the button itself, or a mobile reader has no unread signal at all.
+    expect(history.getAttribute('aria-label')).toBe('Response history — 1 new reply');
+    expect(history.textContent).toContain('1');
   });
 });
 
@@ -400,7 +406,7 @@ test.skipIf(!hasDom)('at mobile 412x915, history is collapsed by default, keeps 
     expect(selectedResponse.textContent).not.toContain('response 6');
     expect(el.querySelector('[data-live-timeline-scroll="true"]')).toBeNull();
 
-    const showHistory = Array.from(el.querySelectorAll('button')).find((button) => button.textContent === 'History')!;
+    const showHistory = el.querySelector('[data-live-history-toggle="true"]') as HTMLButtonElement;
     expect(showHistory).toBeTruthy();
 
     await act(async () => showHistory.dispatchEvent(new MouseEvent('click', { bubbles: true })));
@@ -420,9 +426,16 @@ test.skipIf(!hasDom)('at mobile 412x915, history is collapsed by default, keeps 
     expect(el.querySelector('[data-live-timeline-selected-response="true"]')?.textContent).toContain('response 3');
 
     await act(async () => showHistory.dispatchEvent(new MouseEvent('click', { bubbles: true })));
-    const backToLatest = Array.from(el.querySelectorAll('[data-live-timeline-scroll="true"] button')).find((button) => button.textContent === 'Back to latest')!;
-    expect(backToLatest).toBeTruthy();
-    await act(async () => backToLatest.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    // The selection is on an older response, so the control offered is the one
+    // that OPENS the newest — the stronger action, which subsumes scrolling.
+    // It used to be a "Back to latest" that sat one word away from a
+    // "Jump to latest" doing something else entirely.
+    const buttons = Array.from(el.querySelectorAll('[data-live-timeline-scroll="true"] button'));
+    const openNewest = buttons.find((button) => button.textContent === 'Open newest response')!;
+    expect(openNewest).toBeTruthy();
+    // And never both at once.
+    expect(buttons.some((button) => button.textContent === 'Scroll to newest')).toBe(false);
+    await act(async () => openNewest.dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(selectedIds).toEqual(['p1:r6']);
   } finally {
     window.innerWidth = originalWidth;

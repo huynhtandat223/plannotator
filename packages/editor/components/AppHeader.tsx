@@ -70,6 +70,9 @@ interface AppHeaderProps {
   onOpenLiveChanges?: () => void;
   liveFeedbackCount?: number;
   liveCloseCurrentPane?: boolean;
+  /** Agent kind of the selected live pane, e.g. "Claude Code". Live panes are
+   *  multi-agent, so no user-facing string here may name one kind outright. */
+  livePaneAgentLabel?: string;
 
   // Callback config (null when no bot callback)
   callbackConfig: CallbackConfig | null;
@@ -203,6 +206,7 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   onOpenLiveChanges,
   liveFeedbackCount = 0,
   liveCloseCurrentPane,
+  livePaneAgentLabel = 'agent',
   callbackConfig,
   taterMode,
   mobileSettingsOpen,
@@ -244,7 +248,14 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   octarineConfigured,
 }) => {
   return (
-    <header data-app-header="true" className="h-12 shrink-0 flex items-center justify-between px-2 md:px-4 border-b border-border/50 bg-card/50 backdrop-blur-xl z-[50]">
+    // `relative` is load-bearing, not decoration: `z-[50]` only applies to a
+    // positioned element or a flex item, and this header is neither — App.tsx
+    // wraps it in a plain block <div> to carry the live-review `inert` flag.
+    // Without it the z-index is inert while `backdrop-blur-xl` still makes the
+    // header a stacking context, so header popovers (the Options menu) paint
+    // UNDER the `relative z-0` content area and stop being clickable below the
+    // 48px header band. See AppHeader.stacking.test.ts.
+    <header data-app-header="true" className="relative h-12 shrink-0 flex items-center justify-between px-2 md:px-4 border-b border-border/50 bg-card/50 backdrop-blur-xl z-[50]">
       <div className="flex items-center gap-2">
         <AppHeaderLogo />
         {htmlSurface && onToggleHtmlTools && (
@@ -379,7 +390,14 @@ export const AppHeader = React.memo<AppHeaderProps>(({
                   onClick={onAnnotateExit}
                   disabled={isSubmitting || isExiting}
                   isLoading={isExiting}
-                  title={liveCloseCurrentPane ? 'Close the selected live Pi panel' : undefined}
+                  title={
+                    liveCloseCurrentPane
+                      ? `End the selected live ${livePaneAgentLabel} pane — stops that agent's session`
+                      : undefined
+                  }
+                  label={liveCloseCurrentPane ? `End ${livePaneAgentLabel} pane` : undefined}
+                  shortLabel={liveCloseCurrentPane ? 'End pane' : undefined}
+                  destructive={liveCloseCurrentPane}
                 />
                 {(hasAnyAnnotations || liveFeedbackCount > 0) && (
                   <FeedbackButton

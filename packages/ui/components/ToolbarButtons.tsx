@@ -114,6 +114,26 @@ interface ExitButtonProps {
   isLoading?: boolean;
   title?: string;
   labelBreakpoint?: ToolbarLabelBreakpoint;
+  /**
+   * Text shown instead of "Close". Set by callers whose click does something
+   * other than close the review session.
+   *
+   * The live-pane surface reuses this button to END AN AGENT'S PANE, and it
+   * read "Close" in muted secondary styling — the same word, weight and colour
+   * this button uses everywhere else for the entirely benign "close this review
+   * without sending feedback". Below the label breakpoint it collapsed further,
+   * to a bare `×` among six other header glyphs, which is the single most
+   * over-learned "dismiss this view" idiom there is.
+   */
+  label?: string;
+  /** Compact form for narrow viewports; falls back to `label`. */
+  shortLabel?: string;
+  /**
+   * Destructive intent: the click ends something that is running and cannot be
+   * undone. Such a control never degrades to an icon at any width — the word is
+   * the whole warning.
+   */
+  destructive?: boolean;
 }
 
 export const ExitButton: React.FC<ExitButtonProps> = ({
@@ -122,6 +142,9 @@ export const ExitButton: React.FC<ExitButtonProps> = ({
   isLoading = false,
   title = 'Close session without sending feedback',
   labelBreakpoint = 'md',
+  label = 'Close',
+  shortLabel,
+  destructive = false,
 }) => (
   <Button
     variant="secondary"
@@ -130,11 +153,31 @@ export const ExitButton: React.FC<ExitButtonProps> = ({
     disabled={disabled || isLoading}
     title={title}
     aria-label={title}
-    className="bg-muted text-muted-foreground hover:bg-muted/80"
+    className={
+      destructive
+        ? 'bg-destructive/12 text-destructive border border-destructive/35 hover:bg-destructive/20'
+        : 'bg-muted text-muted-foreground hover:bg-muted/80'
+    }
   >
-    <span className={labelBreakpoint === 'lg' ? 'lg:hidden' : 'md:hidden'}>
-      {isLoading ? '…' : <X className="size-3.5" aria-hidden="true" />}
-    </span>
-    <span className={labelBreakpoint === 'lg' ? 'hidden lg:inline' : 'hidden md:inline'}>{isLoading ? 'Closing...' : 'Close'}</span>
+    {destructive ? (
+      // Always words, never a lone glyph — including on a phone.
+      <>
+        <span className={labelBreakpoint === 'lg' ? 'lg:hidden' : 'md:hidden'}>
+          {isLoading ? '…' : (shortLabel ?? label)}
+        </span>
+        <span className={labelBreakpoint === 'lg' ? 'hidden lg:inline' : 'hidden md:inline'}>
+          {isLoading ? 'Ending…' : label}
+        </span>
+      </>
+    ) : (
+      <>
+        <span className={labelBreakpoint === 'lg' ? 'lg:hidden' : 'md:hidden'}>
+          {isLoading ? '…' : <X className="size-3.5" aria-hidden="true" />}
+        </span>
+        <span className={labelBreakpoint === 'lg' ? 'hidden lg:inline' : 'hidden md:inline'}>
+          {isLoading ? 'Closing...' : label}
+        </span>
+      </>
+    )}
   </Button>
 );

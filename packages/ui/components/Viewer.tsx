@@ -119,8 +119,18 @@ interface ViewerProps {
    *  comment, attachments, checkbox toggles). Existing annotations still
    *  render and remain selectable. Default false — today's behavior. */
   readOnly?: boolean;
-  /** Selected live Pi pane accepts a direct text message. */
+  /** Selected live pane accepts a direct text message. */
   directMessage?: boolean;
+  /**
+   * Which agent kind the direct message actually reaches, e.g. "Claude Code".
+   *
+   * Live panes are multi-agent — Herdr runs Pi, Claude Code, Codex and
+   * OpenCode side by side — so hardcoding "Pi" here told a captain messaging
+   * Claude Code that they were messaging Pi. Hosts that pass nothing keep the
+   * old wording, so this is an additive seam rather than a behaviour change for
+   * anyone but the live-pane surface, which passes `livePaneAgentLabel(...)`.
+   */
+  directMessageAgentLabel?: string;
   /** Synthetic direct-message document only: suppress document annotations while
    * preserving the direct-message composer. Structured responses leave this
    * false, even when their pane also accepts direct messages. */
@@ -234,6 +244,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
   allowImages = true,
   readOnly = false,
   directMessage = false,
+  directMessageAgentLabel = 'Pi',
   disableSelectionAnnotations = false,
   imageFeedbackTarget,
   livePiCommands = [],
@@ -664,10 +675,20 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         {badgeClearance > 0 && <div data-print-hide style={{ height: badgeClearance }} aria-hidden="true" />}
 
         {/* Sentinel for sticky detection */}
-        {stickyActions && <div ref={stickySentinelRef} className="h-0 w-0 float-right" aria-hidden="true" />}
+        {stickyActions && <div ref={stickySentinelRef} className="h-0 w-0 sm:float-right" aria-hidden="true" />}
 
         {/* Header buttons - top right */}
-        <div data-print-hide data-sticky-actions className={`${stickyActions ? 'sticky top-3' : ''} z-30 float-right flex items-start gap-1 md:gap-2 rounded-lg p-1 md:p-2 transition-colors duration-150 ${isStuck ? 'bg-card/95 backdrop-blur-sm shadow-sm' : ''} ${gridEnabled ? '-mr-3 md:-mr-5 lg:-mr-7 xl:-mr-9' : '-mr-1 md:-mr-2'} mt-6 md:-mt-5 lg:-mt-7 xl:-mt-9`}>
+        {/* Below `sm` this cluster does NOT float.
+
+            Floated, it sat inside the prose column and the message wrapped
+            around it: at 390px the opening lines of every response were laid
+            out in roughly half the available width before the text reflowed
+            past the buttons. Icon-only labels shrink the cluster but do not fix
+            the shape — a float is a float. So on a phone it becomes an ordinary
+            right-aligned block above the text, and the prose keeps the full
+            column. From `sm` up the original floating/sticky behaviour is
+            unchanged. */}
+        <div data-print-hide data-sticky-actions className={`${stickyActions ? 'sm:sticky sm:top-3' : ''} z-30 flex w-full justify-end sm:float-right sm:w-auto items-start gap-1 md:gap-2 rounded-lg p-1 md:p-2 transition-colors duration-150 ${isStuck ? 'bg-card/95 backdrop-blur-sm shadow-sm' : ''} ${gridEnabled ? 'sm:-mr-3 md:-mr-5 lg:-mr-7 xl:-mr-9' : 'sm:-mr-1 md:-mr-2'} mb-2 sm:mb-0 mt-0 sm:mt-6 md:-mt-5 lg:-mt-7 xl:-mt-9`}>
           {messagePickerInfo && (
             <button
               onClick={messagePickerInfo.onOpen}
@@ -696,7 +717,12 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 onAdd={onAddGlobalAttachment}
                 onRemove={onRemoveGlobalAttachment}
                 variant="toolbar"
-                hideLabel={directMessage ? false : actionsLabelMode === 'icon'}
+                // Follows the same width buckets as every other action now.
+                // Forcing this label on regardless of width is what made the
+                // secondary "attach an image" control the loudest thing in the
+                // cluster, and on a narrow viewport it is also what pushed the
+                // floating toolbar into the prose it sits beside.
+                hideLabel={actionsLabelMode === 'icon'}
                 label={directMessage ? 'Attach image feedback' : undefined}
                 ariaLabel={directMessage ? `Attach image feedback to ${imageFeedbackTarget}` : undefined}
                 feedbackTarget={directMessage ? imageFeedbackTarget : undefined}
@@ -720,13 +746,25 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
                 ? 'bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm cursor-pointer'
                 : 'text-muted-foreground hover:text-foreground bg-muted/50 hover:bg-muted cursor-pointer'
             }`}
-            title={directMessage ? 'Message Pi' : 'Add global comment'}
-            aria-label={directMessage ? 'Message Pi' : 'Add global comment'}
+            title={directMessage ? `Message ${directMessageAgentLabel}` : 'Add global comment'}
+            aria-label={directMessage ? `Message ${directMessageAgentLabel}` : 'Add global comment'}
           >
             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
             </svg>
-            {!directMessage && (
+            {/* The direct-message action is the most consequential control in
+                this cluster and used to be the ONLY one without a visible
+                label, so "attach an image" and "copy to clipboard" both shouted
+                louder than "send this to the agent". It now follows the same
+                width buckets as its neighbours: text where there is room,
+                icon-only on a narrow viewport — where the accessible name above
+                still carries the meaning. */}
+            {directMessage ? (
+              <>
+                {actionsLabelMode === 'full' && <span>Message {directMessageAgentLabel}</span>}
+                {actionsLabelMode === 'short' && <span>Message</span>}
+              </>
+            ) : (
               <>
                 {actionsLabelMode === 'full' && <span>Global comment</span>}
                 {actionsLabelMode === 'short' && <span>Comment</span>}
@@ -1037,7 +1075,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         {directMessage && !imageFeedbackTarget && (
           <div className="mt-8 p-6 rounded-lg border border-primary/20 bg-primary/5 text-center flex flex-col items-center justify-center gap-3">
             <p className="text-sm font-medium text-foreground">
-              Waiting for the Pi session to publish its latest assistant response.
+              Waiting for the {directMessageAgentLabel} session to publish its latest assistant response.
             </p>
             <button
               type="button"
@@ -1053,7 +1091,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
               </svg>
-              Message Pi
+              Message {directMessageAgentLabel}
             </button>
           </div>
         )}

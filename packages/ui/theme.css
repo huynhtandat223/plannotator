@@ -78,6 +78,7 @@
   --color-success-foreground: var(--success-foreground);
   --color-warning: var(--warning);
   --color-warning-foreground: var(--warning-foreground);
+  --color-warning-strong: var(--warning-strong);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
@@ -142,6 +143,19 @@
      * per-theme files override these. */
     --warning: oklch(0.75 0.15 85);
     --warning-foreground: oklch(0.20 0.02 260);
+    /* Warning TEXT that sits on a tinted or plain surface, as opposed to
+     * `--warning-foreground`, which is the on-solid-`--warning` pairing and is
+     * therefore a near-black in every theme. Using that near-black as a text
+     * colour over `bg-warning/10` or over the page itself renders near-black on
+     * near-black on any dark theme — measured at 1.05:1 against `bg-warning/10`
+     * and 1.09:1 against the page, i.e. invisible, which is how the live
+     * "this pane is limited" notice, the agent-stopped banner and the
+     * context-handoff warning all came to be unreadable.
+     *
+     * Derived from each theme's own `--warning` with the same color-mix idiom
+     * the terminal palette uses, so every theme — including the ones that only
+     * define hex values — gets a correct value without editing 20 files. */
+    --warning-strong: color-mix(in oklab, var(--warning) 88%, white);
     --card-ring: rgba(255, 255, 255, 0.08);
     --card-shadow:
       0 0 0 1px var(--card-ring), 0 1px 3px 0 rgba(0, 0, 0, 0.2), 0 2px 8px -2px rgba(0, 0, 0, 0.3);
@@ -176,6 +190,9 @@
   .light {
     --warning: oklch(0.55 0.18 85);
     --warning-foreground: oklch(0.18 0.02 260);
+    /* Same token, opposite direction: on a light surface warning text has to
+     * go darker, not lighter. */
+    --warning-strong: color-mix(in oklab, var(--warning) 72%, black);
     --terminal-bright-red: color-mix(in oklab, var(--destructive) 84%, black);
     --terminal-bright-green: color-mix(in oklab, var(--success) 84%, black);
     --terminal-bright-yellow: color-mix(in oklab, var(--warning) 84%, black);

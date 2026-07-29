@@ -323,7 +323,7 @@ const TreeNode: React.FC<{
     editStatus?.status === "conflict" || editStatus?.status === "error"
       ? { label: "!", className: "bg-destructive/15 text-destructive", title: editStatus.status === "conflict" ? "Save conflict" : "Save failed" }
       : editStatus?.status === "missing"
-        ? { label: "!", className: "bg-warning/15 text-warning-foreground", title: "File missing on disk" }
+        ? { label: "!", className: "bg-warning/15 text-warning-strong", title: "File missing on disk" }
       : editStatus?.status === "saving"
         ? { label: "...", className: "bg-primary/10 text-primary", title: "Saving" }
         : editStatus?.dirty

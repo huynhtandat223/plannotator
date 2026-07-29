@@ -24,9 +24,14 @@ test('the shown panel is an ordinary in-flow block, above or beside the document
   // Nothing takes it out of the flex flow, so it occupies real space.
   expect(shown).not.toContain('absolute');
   expect(shown).not.toContain('invisible');
-  // Full-width block when the layout stacks; a fixed column when it does not.
+  // Full-width block when the layout stacks; a wide column when it does not.
   expect(shown).toContain('w-full');
-  expect(shown).toContain('lg:w-[380px]');
+  // Opened deliberately from the rail, the panel is substantially wider than
+  // the old fixed 380px ribbon, and clamped so it can never starve the reader.
+  expect(shown).toContain('lg:w-[clamp(24rem,32vw,34rem)]');
+  expect(shown).not.toContain('lg:w-[380px]');
+  // And it uses the height it is given instead of stopping at 62dvh.
+  expect(shown).toContain('lg:h-[min(84dvh,60rem)]');
 });
 
 test('the hidden panel leaves the flow entirely rather than merely emptying', () => {
@@ -144,18 +149,36 @@ test('the ordinary live desktop keeps the rail as its home, unchanged', () => {
   expect(agentResponseToggleHomes(desktopLive)).toEqual({
     rail: true,
     sidebarTabBar: false,
-    header: true,
-    // The rail owns it here, so the header copy stays `lg:hidden` — the desktop
-    // header does not grow a second visible control.
+    // The rail owns it at every width now, so the header grows no copy at all —
+    // not a hidden one. One control, one place, desktop and phone alike.
+    header: false,
     headerAtLargeWidths: false,
   });
-  // Opening the sidebar unmounts the rail and hands the toggle to the tab bar.
+  // Opening the sidebar unmounts the rail. The tab bar picks it up above `lg`,
+  // but the tab bar is itself `hidden lg:flex`, so the header copy has to
+  // render too or a phone with the sidebar open could not reach the toggle.
   expect(agentResponseToggleHomes({ ...desktopLive, sidebarOpen: true })).toEqual({
     rail: false,
     sidebarTabBar: true,
     header: true,
-    headerAtLargeWidths: false,
+    headerAtLargeWidths: true,
   });
+});
+
+test('the rail carries the toggle on a phone, not just above lg', () => {
+  const phoneLive: AgentResponseLayoutState = {
+    liveMessageReview: true,
+    planReview: false,
+    goalSetupMode: false,
+    sidebarOpen: false,
+    agentTerminalOpen: false,
+    wideMode: false,
+  };
+  // The captain's ask: Agent Response is reachable from the same rail slot on
+  // desktop and mobile. Below `lg` that used to be the header's job alone.
+  expect(agentResponseToggleHomes(phoneLive).rail).toBe(true);
+  expect(agentResponseToggleReachable(phoneLive, 'below-lg')).toBe(true);
+  expect(agentResponseToggleReachable(phoneLive, 'lg-and-up')).toBe(true);
 });
 
 test('the header stops deferring only when no other home is mounted', () => {
@@ -183,4 +206,13 @@ test('the header stops deferring only when no other home is mounted', () => {
       wideMode: false,
     }).headerAtLargeWidths,
   ).toBe(true);
+});
+
+test('the rail and the header copy are never both mounted', () => {
+  // Two visible toggles driving one state is the confusion the rail move was
+  // meant to end, so this is an invariant rather than an incidental property.
+  for (const state of everyLayoutState()) {
+    const homes = agentResponseToggleHomes(state);
+    expect(homes.rail && homes.header).toBe(false);
+  }
 });
