@@ -51,13 +51,42 @@ type SessionRowModel = LivePaneChip & {
   timestamp?: string;
 };
 
+/** `workspace · tab`, with the tab carrying the weight — panes in one workspace
+ * share the prefix, so the tab is what actually tells them apart. */
+const SessionIdentity = ({ workspace, tab, fallback }: { workspace: string; tab: string; fallback: string }) =>
+  workspace && tab ? (
+    <>
+      <span className="text-muted-foreground">{workspace}</span>
+      <span className="text-muted-foreground/50">{' · '}</span>
+      <span className="font-semibold">{tab}</span>
+    </>
+  ) : (
+    <span className="font-semibold">{fallback}</span>
+  );
+
+const identityParts = (session: Pick<SessionRowModel, 'workspace' | 'tab' | 'label'>) => {
+  const workspace = sanitizeLabel(session.workspace);
+  const tab = sanitizeLabel(session.tab);
+  const fallback = sanitizeLabel(session.label) || 'Pane';
+  return { workspace, tab, fallback, title: workspace && tab ? `${workspace} · ${tab}` : fallback };
+};
+
+/** Small tinted count. The panel's ONE tinted signal, so it always means unread. */
+const UnreadBadge = ({ count, scope }: { count: number; scope: string }) => (
+  <span
+    aria-label={`${count} unread repl${count === 1 ? 'y' : 'ies'}${scope}`}
+    className="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold tabular-nums text-primary-foreground"
+  >
+    {count}
+  </span>
+);
+
 /**
  * One scannable line of pane identity plus one line of what it last said.
  *
- * The row deliberately carries a single signal per meaning: selection is a
- * SHAPE (the left rail), unread is the only tinted badge, and recency is plain
- * text. Before this the selected border, the unread pill and the activity glyph
- * were all `primary`, so at a glance none of them read as anything.
+ * Selection is a SHAPE (the left rail) rather than another tint: the unread
+ * badge and the activity glyph already compete for `primary`, and three
+ * primary-coloured signals on one row read as none.
  */
 const SessionRow = ({
   session,
@@ -71,19 +100,15 @@ const SessionRow = ({
   onSelect: () => void;
 }) => {
   const activity = session.activity?.label;
-  const workspace = sanitizeLabel(session.workspace);
-  const tab = sanitizeLabel(session.tab);
-  const fallback = sanitizeLabel(session.label) || 'Pane';
-  const title = workspace && tab ? `${workspace} · ${tab}` : fallback;
+  const { workspace, tab, fallback, title } = identityParts(session);
   const age = sessionAge(session.timestamp);
   return (
     <button
       type="button"
       role="option"
       aria-selected={active}
-      // Roving tabindex: the listbox is one stop, then Arrow/Home/End move
-      // within it. Tabbing through every live pane to reach the document was
-      // the previous behavior.
+      // Roving tabindex: the list is one tab stop, then Arrow/Home/End move
+      // within it, rather than a tab stop per live pane.
       tabIndex={active ? 0 : -1}
       onClick={onSelect}
       className={`relative w-full rounded-md border py-1.5 pl-3 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
@@ -99,28 +124,11 @@ const SessionRow = ({
             {session.activity.glyph}
           </span>
         )}
-        {/* Workspace is de-emphasised and the tab carries the weight: panes in
-            one workspace share the prefix, so the tab is the differentiator. */}
         <span className="min-w-0 flex-1 truncate text-xs" title={title}>
-          {workspace && tab ? (
-            <>
-              <span className="text-muted-foreground">{workspace}</span>
-              <span className="text-muted-foreground/50">{' · '}</span>
-              <span className="font-semibold">{tab}</span>
-            </>
-          ) : (
-            <span className="font-semibold">{fallback}</span>
-          )}
+          <SessionIdentity workspace={workspace} tab={tab} fallback={fallback} />
         </span>
         {age && <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/70">{age}</span>}
-        {unread > 0 && (
-          <span
-            aria-label={`${unread} unread repl${unread === 1 ? 'y' : 'ies'}`}
-            className="ml-0.5 inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold tabular-nums text-primary-foreground"
-          >
-            {unread}
-          </span>
-        )}
+        {unread > 0 && <UnreadBadge count={unread} scope="" />}
       </span>
       <span className="mt-0.5 block truncate text-[11px] leading-snug text-muted-foreground">
         {session.preview}
@@ -136,23 +144,30 @@ const SessionList = ({
   unreadCountBySession,
   onActivateSession,
   onAfterActivate,
+  autoFocusActive = false,
 }: {
   sessions: SessionRowModel[];
   activeSessionKey: LiveSessionKey | null;
   unreadCountBySession: Readonly<Record<string, readonly string[]>>;
   onActivateSession: (key: LiveSessionKey) => void;
   onAfterActivate?: () => void;
+  /** Put the keyboard on the current pane the moment the picker opens. */
+  autoFocusActive?: boolean;
 }) => {
   const listRef = React.useRef<HTMLDivElement | null>(null);
 
-  // The active session must be visible in its own picker. With five panes in a
-  // short scroller the active one could sit entirely below the fold on first
-  // paint, so the panel showed a session the list never displayed.
+  // The active session must be visible in its own picker: with several panes in
+  // a short scroller it could otherwise sit entirely below the fold, so the
+  // panel showed a session the list never displayed.
   React.useEffect(() => {
-    listRef.current
-      ?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]')
-      ?.scrollIntoView({ block: 'nearest' });
+    const option = listRef.current?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
+    option?.scrollIntoView({ block: 'nearest' });
   }, [activeSessionKey]);
+
+  React.useEffect(() => {
+    if (!autoFocusActive) return;
+    listRef.current?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]')?.focus();
+  }, [autoFocusActive]);
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
@@ -222,7 +237,7 @@ function useSheetDismiss(open: boolean, onClose: () => void): React.RefObject<HT
 }
 
 /** Bottom sheet: bounded by its content up to 85dvh instead of a full-screen
- * takeover, so five sessions no longer occupy a mostly-empty 100dvh page. */
+ * takeover, so a handful of sessions no longer occupy a mostly-empty page. */
 const MobileSheet = ({
   label,
   title,
@@ -285,6 +300,11 @@ const NewRepliesJump = ({ count, onJump }: { count: number; onJump: () => void }
  * Live-only master/detail history owner. The host owns state and transport;
  * this component only projects its active session and provides explicit captain
  * actions. `MessagesBrowser` remains the shared transcript/paging/anchor seam.
+ *
+ * The panel is ONE pane at a time: the header names the pane you are on and is
+ * itself the switcher, so the pane list is a toggle rather than a permanent
+ * band. Closed — which is the default, and where a captain reading one agent
+ * spends nearly all their time — the response history owns the whole panel.
  */
 export const LiveSessionTimeline = React.memo(({
   messages,
@@ -302,10 +322,12 @@ export const LiveSessionTimeline = React.memo(({
   onJumpToNewReplies,
   jumpToLatestSignal,
 }: LiveSessionTimelineProps) => {
+  const [sessionListOpen, setSessionListOpen] = React.useState(false);
   const [mobileSessionsOpen, setMobileSessionsOpen] = React.useState(false);
   const [mobileHistoryOpen, setMobileHistoryOpen] = React.useState(false);
   const isMobile = useIsMobile(1024);
   const historyRegionId = React.useId();
+  const sessionListId = React.useId();
   const closeSessions = React.useCallback(() => setMobileSessionsOpen(false), []);
   const closeHistory = React.useCallback(() => setMobileHistoryOpen(false), []);
 
@@ -320,7 +342,7 @@ export const LiveSessionTimeline = React.memo(({
   );
   const sessions = React.useMemo<SessionRowModel[]>(() => [...visible, ...overflow].flatMap((chip) => {
     // The snapshot is newest-first, while chip derivation's representative may
-    // be an older selected annotation target. The card preview must always be
+    // be an older selected annotation target. The row preview must always be
     // the actual newest response in the session.
     const source = messages.find((message) => message.paneId === chip.paneId);
     const sessionKey = source ? sessionKeyFor(source) : null;
@@ -334,6 +356,18 @@ export const LiveSessionTimeline = React.memo(({
   }), [visible, overflow, messages]);
   const active = sessions.find((session) => session.sessionKey === activeSessionKey) ?? sessions[0];
 
+  // Unread waiting in the panes you are NOT reading — the only reason to open
+  // the switcher without being asked to, so it rides on the switcher itself.
+  const unreadElsewhere = React.useMemo(
+    () => sessions.reduce(
+      (total, session) => session.sessionKey === activeSessionKey
+        ? total
+        : total + (unreadCountBySession[session.sessionKey]?.length ?? 0),
+      0,
+    ),
+    [sessions, activeSessionKey, unreadCountBySession],
+  );
+
   const selectedMessage = React.useMemo(
     () => activeTimelineMessages.find((message) => message.messageId === selectedMessageId)
       ?? activeTimelineMessages.at(-1)
@@ -341,21 +375,26 @@ export const LiveSessionTimeline = React.memo(({
     [activeTimelineMessages, selectedMessageId],
   );
 
+  // The inline picker is transient: Escape dismisses it like the sheets do.
+  React.useEffect(() => {
+    if (!sessionListOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      setSessionListOpen(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [sessionListOpen]);
+
   if (!active) return null;
 
-  const activeWorkspace = sanitizeLabel(active.workspace);
-  const activeTab = sanitizeLabel(active.tab);
-  const activeLabel = sanitizeLabel(active.label) || 'Pane';
-  const activeIdentity = activeWorkspace && activeTab ? (
-    <>
-      <span>{activeWorkspace}</span>
-      <span className="text-muted-foreground/60 mx-1.5">·</span>
-      <span>{activeTab}</span>
-    </>
-  ) : (
-    activeLabel
-  );
-  const activeIdentityTitle = activeWorkspace && activeTab ? `${activeWorkspace} · ${activeTab}` : activeLabel;
+  const { workspace, tab, fallback, title } = identityParts(active);
+  const activeIdentity = <SessionIdentity workspace={workspace} tab={tab} fallback={fallback} />;
+  // A single pane has nothing to switch to, so it gets no switcher at all.
+  const canSwitch = sessions.length > 1;
+  const switcherLabel = `Switch live pane — currently ${title}, ${sessions.length} panes`;
+  const openSwitcher = () => (isMobile ? setMobileSessionsOpen(true) : setSessionListOpen((open) => !open));
 
   return (
     <section
@@ -365,46 +404,61 @@ export const LiveSessionTimeline = React.memo(({
       <header className="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-2 lg:px-4">
         <div className="min-w-0 flex-1">
           <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Agent Response</p>
-          <p className="truncate text-sm font-semibold" title={activeIdentityTitle}>
-            {activeIdentity}
-          </p>
-        </div>
-        <div className="flex items-center gap-1.5 lg:hidden">
-          {activeTimelineMessages.length > 1 && (
+          {canSwitch ? (
             <button
               type="button"
-              onClick={() => setMobileHistoryOpen(true)}
-              aria-haspopup="dialog"
-              aria-expanded={mobileHistoryOpen}
-              className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs font-medium hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              data-live-session-switcher="true"
+              onClick={openSwitcher}
+              aria-label={switcherLabel}
+              aria-haspopup={isMobile ? 'dialog' : 'listbox'}
+              aria-expanded={isMobile ? mobileSessionsOpen : sessionListOpen}
+              aria-controls={isMobile ? undefined : sessionListId}
+              title={switcherLabel}
+              className="-ml-1 flex w-full min-w-0 items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-sm hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
-              History
+              <span className="min-w-0 flex-1 truncate">{activeIdentity}</span>
+              {unreadElsewhere > 0 && <UnreadBadge count={unreadElsewhere} scope=" in other panes" />}
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 12 12"
+                className={`h-3 w-3 shrink-0 text-muted-foreground transition-transform ${sessionListOpen && !isMobile ? 'rotate-180' : ''}`}
+              >
+                <path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
             </button>
+          ) : (
+            <p className="truncate text-sm" title={title}>{activeIdentity}</p>
           )}
+        </div>
+        {activeTimelineMessages.length > 1 && (
           <button
             type="button"
-            onClick={() => setMobileSessionsOpen(true)}
+            onClick={() => setMobileHistoryOpen(true)}
             aria-haspopup="dialog"
-            aria-expanded={mobileSessionsOpen}
-            className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs font-medium hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:hidden"
+            aria-expanded={mobileHistoryOpen}
+            className="shrink-0 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs font-medium hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:hidden"
           >
-            Sessions
+            History
           </button>
-        </div>
+        )}
       </header>
-      {/* The switcher is capped well under the transcript's share of the panel.
-          At 208px it took MORE of a 450px panel than the response it switches
-          between; compact rows fit ~3 sessions in 144px and scroll for more. */}
-      <div className="hidden min-h-0 shrink-0 border-b border-border/60 lg:block">
-        <OverlayScrollArea className="max-h-36" style={{ overscrollBehaviorY: 'contain' }}>
-          <SessionList
-            sessions={sessions}
-            activeSessionKey={activeSessionKey}
-            unreadCountBySession={unreadCountBySession}
-            onActivateSession={onActivateSession}
-          />
-        </OverlayScrollArea>
-      </div>
+      {/* Toggled, not permanent: a band that is always mounted spends the
+          panel's height on switching even for a captain who never switches.
+          Closed, the response history below owns the whole panel. */}
+      {canSwitch && sessionListOpen && !isMobile && (
+        <div id={sessionListId} className="hidden min-h-0 shrink-0 border-b border-border/60 lg:block">
+          <OverlayScrollArea className="max-h-56" style={{ overscrollBehaviorY: 'contain' }}>
+            <SessionList
+              sessions={sessions}
+              activeSessionKey={activeSessionKey}
+              unreadCountBySession={unreadCountBySession}
+              onActivateSession={onActivateSession}
+              onAfterActivate={() => setSessionListOpen(false)}
+              autoFocusActive
+            />
+          </OverlayScrollArea>
+        </div>
+      )}
       {isMobile ? (
         <div data-live-timeline-selected-response="true" className="p-2">
           {selectedMessage ? (
