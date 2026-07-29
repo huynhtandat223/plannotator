@@ -675,10 +675,20 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
         {badgeClearance > 0 && <div data-print-hide style={{ height: badgeClearance }} aria-hidden="true" />}
 
         {/* Sentinel for sticky detection */}
-        {stickyActions && <div ref={stickySentinelRef} className="h-0 w-0 float-right" aria-hidden="true" />}
+        {stickyActions && <div ref={stickySentinelRef} className="h-0 w-0 sm:float-right" aria-hidden="true" />}
 
         {/* Header buttons - top right */}
-        <div data-print-hide data-sticky-actions className={`${stickyActions ? 'sticky top-3' : ''} z-30 float-right flex items-start gap-1 md:gap-2 rounded-lg p-1 md:p-2 transition-colors duration-150 ${isStuck ? 'bg-card/95 backdrop-blur-sm shadow-sm' : ''} ${gridEnabled ? '-mr-3 md:-mr-5 lg:-mr-7 xl:-mr-9' : '-mr-1 md:-mr-2'} mt-6 md:-mt-5 lg:-mt-7 xl:-mt-9`}>
+        {/* Below `sm` this cluster does NOT float.
+
+            Floated, it sat inside the prose column and the message wrapped
+            around it: at 390px the opening lines of every response were laid
+            out in roughly half the available width before the text reflowed
+            past the buttons. Icon-only labels shrink the cluster but do not fix
+            the shape — a float is a float. So on a phone it becomes an ordinary
+            right-aligned block above the text, and the prose keeps the full
+            column. From `sm` up the original floating/sticky behaviour is
+            unchanged. */}
+        <div data-print-hide data-sticky-actions className={`${stickyActions ? 'sm:sticky sm:top-3' : ''} z-30 flex w-full justify-end sm:float-right sm:w-auto items-start gap-1 md:gap-2 rounded-lg p-1 md:p-2 transition-colors duration-150 ${isStuck ? 'bg-card/95 backdrop-blur-sm shadow-sm' : ''} ${gridEnabled ? 'sm:-mr-3 md:-mr-5 lg:-mr-7 xl:-mr-9' : 'sm:-mr-1 md:-mr-2'} mb-2 sm:mb-0 mt-0 sm:mt-6 md:-mt-5 lg:-mt-7 xl:-mt-9`}>
           {messagePickerInfo && (
             <button
               onClick={messagePickerInfo.onOpen}
