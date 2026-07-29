@@ -44,6 +44,27 @@ async function render(node: React.ReactElement): Promise<HTMLElement> {
   return host;
 }
 
+/**
+ * happy-dom performs no layout, so a scroll test has to supply the metrics the
+ * component reads. The host div is the nearest scrollable ancestor, exactly as
+ * `OverlayScrollArea` is in the live panel.
+ */
+async function renderInScroller(
+  node: React.ReactElement,
+  metrics: { scrollHeight: number; clientHeight: number },
+): Promise<HTMLElement> {
+  host = document.createElement('div');
+  host.style.overflowY = 'auto';
+  Object.defineProperty(host, 'scrollHeight', { value: metrics.scrollHeight, configurable: true });
+  Object.defineProperty(host, 'clientHeight', { value: metrics.clientHeight, configurable: true });
+  document.body.appendChild(host);
+  const mount = document.createElement('div');
+  host.appendChild(mount);
+  root = createRoot(mount);
+  await act(async () => { root!.render(node); });
+  return host;
+}
+
 afterEach(() => {
   if (root) act(() => root!.unmount());
   host?.remove();
@@ -119,4 +140,73 @@ test.skipIf(!hasDom)('chronological budget keeps the newest rows and pages older
 
   await act(async () => { pager!.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
   expect((container.textContent ?? '')).toContain('Response 1');
+});
+
+test.skipIf(!hasDom)('a chat transcript shows one conversation, so it drops the workspace section heading', async () => {
+  useMemoryStorage();
+  const messages = MESSAGES.map((message) => ({ ...message, paneLabel: 'firstmate' }));
+  const container = await render(
+    <MessagesBrowser messages={messages} selectedMessageId="pane-a:r2" onSelect={() => {}} chronological chatLayout />,
+  );
+  expect(container.textContent).not.toContain('firstmate');
+  // Both turns still render — only the redundant heading is gone.
+  expect(container.textContent).toContain('Older agent response');
+  expect(container.textContent).toContain('Newest agent response');
+
+  // The non-chat picker is a cross-pane list and keeps its grouping.
+  await act(async () => { root!.render(
+    <MessagesBrowser messages={messages} selectedMessageId="pane-a:r2" onSelect={() => {}} chronological />,
+  ); });
+  expect(container.textContent).toContain('firstmate');
+});
+
+test.skipIf(!hasDom)('showListLabel hides a caption a host already renders in its own chrome', async () => {
+  useMemoryStorage();
+  const container = await render(
+    <MessagesBrowser messages={MESSAGES} selectedMessageId="pane-a:r2" onSelect={() => {}} chronological chatLayout showCountControl={false} />,
+  );
+  expect(container.textContent).toContain('Recent responses — oldest first');
+
+  await act(async () => { root!.render(
+    <MessagesBrowser messages={MESSAGES} selectedMessageId="pane-a:r2" onSelect={() => {}} chronological chatLayout showCountControl={false} showListLabel={false} />,
+  ); });
+  expect(container.textContent).not.toContain('Recent responses — oldest first');
+});
+
+test.skipIf(!hasDom)('pinLatestKey opens a chronological transcript on its newest turn', async () => {
+  useMemoryStorage();
+  const scroller = await renderInScroller(
+    <MessagesBrowser messages={MESSAGES} selectedMessageId="pane-a:r2" onSelect={() => {}} chronological chatLayout pinLatestKey="pi:s1" />,
+    { scrollHeight: 600, clientHeight: 200 },
+  );
+  // Oldest-first: the newest turn lives at the BOTTOM, so a fresh mount parked
+  // at scrollTop 0 would show the oldest response and clip the newest.
+  expect(scroller.scrollTop).toBe(600);
+});
+
+test.skipIf(!hasDom)('an incoming frame never moves the viewport; a session switch re-pins', async () => {
+  useMemoryStorage();
+  const scroller = await renderInScroller(
+    <MessagesBrowser messages={MESSAGES} selectedMessageId="pane-a:r2" onSelect={() => {}} chronological chatLayout pinLatestKey="pi:s1" />,
+    { scrollHeight: 600, clientHeight: 200 },
+  );
+
+  // The captain scrolls back through history, then a live reply arrives.
+  await act(async () => {
+    scroller.scrollTop = 120;
+    scroller.dispatchEvent(new Event('scroll'));
+  });
+  const withReply = [...MESSAGES, {
+    messageId: 'pane-a:r3', paneId: 'pane-a', piSessionId: 's1', assistantMessageId: 'r3', text: 'Incoming agent response',
+  }];
+  await act(async () => { root!.render(
+    <MessagesBrowser messages={withReply} selectedMessageId="pane-a:r2" onSelect={() => {}} chronological chatLayout pinLatestKey="pi:s1" />,
+  ); });
+  expect(scroller.scrollTop).toBe(120);
+
+  // Switching sessions is explicit navigation, so that DOES land on the newest.
+  await act(async () => { root!.render(
+    <MessagesBrowser messages={withReply} selectedMessageId="pane-a:r2" onSelect={() => {}} chronological chatLayout pinLatestKey="pi:s2" />,
+  ); });
+  expect(scroller.scrollTop).toBe(600);
 });

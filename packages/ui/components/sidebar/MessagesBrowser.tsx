@@ -164,6 +164,25 @@ interface MessagesBrowserProps {
   rowBudgetOverride?: number;
   /** Hide the saved per-pane count selector for a host-owned history view. */
   showCountControl?: boolean;
+  /**
+   * Hide the list caption. A host that already names this list in its own
+   * chrome (the live Agent Response panel header) would otherwise stack a
+   * second, weaker label on top of it. Defaults to showing the caption so
+   * every existing picker is unchanged.
+   */
+  showListLabel?: boolean;
+  /**
+   * Identity of the conversation being shown. Opening a transcript must land
+   * on its NEWEST turn, and in a chronological (oldest-first) transcript that
+   * is the bottom — whereas a fresh mount starts at scrollTop 0, i.e. the
+   * OLDEST turn, clipping the response the reader came for.
+   *
+   * The jump fires on mount and whenever this key changes (the host switched
+   * conversations), and deliberately NOT when `messages` changes: an incoming
+   * live frame must never move the viewport under the reader. Omit the prop to
+   * keep a caller's scroll position entirely untouched.
+   */
+  pinLatestKey?: string | null;
 }
 
 // Hard cap for browsers where line-clamp is unavailable, and to avoid huge sidebar text nodes.
@@ -309,6 +328,8 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   jumpToLatestSignal,
   rowBudgetOverride,
   showCountControl = true,
+  showListLabel = true,
+  pinLatestKey,
 }) => {
   const [count, setCount] = React.useState<MessagePickerCount>(() => getMessagePickerCount());
   // Rows paged in past the per-pane quota. Additive, and deliberately NOT
@@ -365,6 +386,23 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
       scroller.scrollHeight > scroller.clientHeight + MESSAGE_AUTOLOAD_THRESHOLD_PX;
     if (!overflows) pageOlder();
   }, [autoLoadOnScroll, messages, count, pagedRows, pageOlder]);
+
+  // Land on the newest turn when this conversation is opened or swapped.
+  // Declared last so it wins over the anchor on the frame the key changes, and
+  // guarded on the key (not on `messages`) so an arriving live frame — which
+  // re-runs this effect — leaves the reader exactly where they were. The pin is
+  // only claimed once there are rows to pin to, so a key that changes ahead of
+  // its content still lands correctly.
+  const pinnedKeyRef = React.useRef<string | null | undefined>(undefined);
+  React.useLayoutEffect(() => {
+    if (pinLatestKey === undefined || pinnedKeyRef.current === pinLatestKey) return;
+    if (messages.length === 0) return;
+    const scroller = scrollableAncestor(rootRef.current);
+    if (!scroller) return;
+    pinnedKeyRef.current = pinLatestKey;
+    scroller.scrollTop = chronological ? scroller.scrollHeight : 0;
+    scrollMetricsRef.current = { scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight };
+  }, [pinLatestKey, chronological, messages]);
 
   // Track whether the latest row has scrolled out of view, which is what makes
   // the explicit `Jump to latest` affordance necessary rather than decorative.
@@ -429,7 +467,12 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   // Rows carry pane identity when the host is a live/grouped picker (Herdr).
   // In that mode we cluster rows under herd/workspace section headers instead
   // of repeating the workspace name inline on every row.
-  const groupedByPane = messages.some((message) => message.paneId !== undefined);
+  //
+  // A chat transcript is exempt: `chatLayout` renders ONE conversation, so a
+  // workspace section header there labels a group of one and just repeats the
+  // panel header. Grouping and the flat path select identical rows for a
+  // single session, so this only removes the redundant heading.
+  const groupedByPane = !chatLayout && messages.some((message) => message.paneId !== undefined);
   // Per-pane budget = selected quota + rows the reader paged in.
   const rowBudget = rowBudgetOverride ?? resolveRowBudget(count, pagedRows);
   // The newest response: last row when the host is chronological (live panes),
@@ -486,7 +529,7 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
                 {annotationCount > 0 && (
                   <span
                     className="ml-auto min-w-4 h-4 px-1 rounded-full bg-primary/15 text-primary border border-primary/30 text-[9px] font-semibold inline-flex items-center justify-center"
-                    title={`${annotationCount} annotation${annotationCount === 1 ? "" : ""}`}
+                    title={`${annotationCount} annotation${annotationCount === 1 ? "" : "s"}`}
                   >
                     {annotationCount}
                   </span>
@@ -614,10 +657,16 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
 
   return (
     <div className="p-2" ref={rootRef}>
-      <div className="px-2 pt-1 pb-2 flex items-center justify-between gap-2">
-        <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-          {chronological ? "Recent responses — oldest first" : listLabel}
-        </span>
+      <div
+        className={`px-2 flex items-center gap-2 ${showListLabel ? "justify-between" : "justify-end"} ${
+          showListLabel || showCountControl ? "pt-1 pb-2" : ""
+        }`}
+      >
+        {showListLabel && (
+          <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+            {chronological ? "Recent responses — oldest first" : listLabel}
+          </span>
+        )}
         {showCountControl && (
           <label className="flex items-center gap-1 text-[10px] text-muted-foreground shrink-0">
             <span className="sr-only">Responses to show per pane</span>

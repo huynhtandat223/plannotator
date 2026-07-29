@@ -3,6 +3,7 @@ import { MessagesBrowser, type CaptainEcho, type PickerMessage } from '@plannota
 import { OverlayScrollArea } from '@plannotator/ui/components/OverlayScrollArea';
 import { useIsMobile } from '@plannotator/ui/hooks/useIsMobile';
 import { deriveLivePaneChips, type LivePaneChip } from './livePaneChips';
+import { sessionAge, sessionPreview } from './live/sessionRowPreview';
 import { type LiveSessionKey } from './live/liveSessionTimeline';
 
 export type LiveSessionTimelineProps = {
@@ -27,11 +28,6 @@ export type LiveSessionTimelineProps = {
 const sessionKeyFor = (message: Pick<PickerMessage, 'piSessionId' | 'paneId'>): LiveSessionKey | null =>
   message.piSessionId ? `pi:${message.piSessionId}` : message.paneId ? `pane:${message.paneId}` : null;
 
-const preview = (text: string): string => {
-  const normalized = text.replace(/\s+/g, ' ').trim();
-  return normalized.length > 96 ? `${normalized.slice(0, 96).trimEnd()}…` : normalized;
-};
-
 const sanitizeLabel = (label?: string | null): string => {
   if (!label) return "";
   let cleaned = label
@@ -42,56 +38,92 @@ const sanitizeLabel = (label?: string | null): string => {
   return cleaned;
 };
 
-const SessionCard = ({
-  chip,
-  sessionKey,
+const toneClass = (tone?: string): string =>
+  tone === 'blocked' ? 'text-destructive'
+    : tone === 'waiting' ? 'text-warning-foreground'
+      : tone === 'active' ? 'text-primary'
+        : 'text-muted-foreground/70';
+
+/** A session as this panel renders it: chip telemetry plus its newest response. */
+type SessionRowModel = LivePaneChip & {
+  sessionKey: LiveSessionKey;
+  preview: string;
+  timestamp?: string;
+};
+
+/**
+ * One scannable line of pane identity plus one line of what it last said.
+ *
+ * The row deliberately carries a single signal per meaning: selection is a
+ * SHAPE (the left rail), unread is the only tinted badge, and recency is plain
+ * text. Before this the selected border, the unread pill and the activity glyph
+ * were all `primary`, so at a glance none of them read as anything.
+ */
+const SessionRow = ({
+  session,
   unread,
   active,
   onSelect,
 }: {
-  chip: LivePaneChip & { preview: string };
-  sessionKey: LiveSessionKey;
+  session: SessionRowModel;
   unread: number;
   active: boolean;
   onSelect: () => void;
 }) => {
-  const activity = chip.activity?.label;
-  const chipWorkspace = sanitizeLabel(chip.workspace);
-  const chipTab = sanitizeLabel(chip.tab);
-  const chipLabel = sanitizeLabel(chip.label) || 'Pane';
-  const displayName = chipWorkspace && chipTab ? `${chipWorkspace} · ${chipTab}` : chipLabel;
+  const activity = session.activity?.label;
+  const workspace = sanitizeLabel(session.workspace);
+  const tab = sanitizeLabel(session.tab);
+  const fallback = sanitizeLabel(session.label) || 'Pane';
+  const title = workspace && tab ? `${workspace} · ${tab}` : fallback;
+  const age = sessionAge(session.timestamp);
   return (
     <button
       type="button"
       role="option"
       aria-selected={active}
+      // Roving tabindex: the listbox is one stop, then Arrow/Home/End move
+      // within it. Tabbing through every live pane to reach the document was
+      // the previous behavior.
+      tabIndex={active ? 0 : -1}
       onClick={onSelect}
-      className={`w-full rounded-lg border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+      className={`relative w-full rounded-md border py-1.5 pl-3 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
         active
-          ? 'border-primary/60 bg-primary/10 text-foreground'
-          : 'border-border/70 bg-card hover:bg-muted/50 text-foreground'
+          ? 'border-primary/50 bg-primary/10 text-foreground'
+          : 'border-transparent hover:bg-muted/50 text-foreground'
       }`}
     >
-      <span className="flex min-w-0 items-center gap-2">
-        {chip.activity && (
-          <span
-            aria-hidden="true"
-            className={chip.activity.tone === 'blocked' ? 'text-destructive' : chip.activity.tone === 'waiting' ? 'text-warning-foreground' : chip.activity.tone === 'active' ? 'text-primary' : 'text-muted-foreground'}
-          >
-            {chip.activity.glyph}
+      {active && <span aria-hidden="true" className="absolute inset-y-1.5 left-0 w-0.5 rounded-full bg-primary" />}
+      <span className="flex min-w-0 items-center gap-1.5">
+        {session.activity && (
+          <span aria-hidden="true" className={`shrink-0 ${toneClass(session.activity.tone)}`}>
+            {session.activity.glyph}
           </span>
         )}
-        <span className="min-w-0 flex-1 truncate text-xs font-semibold" title={displayName}>
-          {displayName}
+        {/* Workspace is de-emphasised and the tab carries the weight: panes in
+            one workspace share the prefix, so the tab is the differentiator. */}
+        <span className="min-w-0 flex-1 truncate text-xs" title={title}>
+          {workspace && tab ? (
+            <>
+              <span className="text-muted-foreground">{workspace}</span>
+              <span className="text-muted-foreground/50">{' · '}</span>
+              <span className="font-semibold">{tab}</span>
+            </>
+          ) : (
+            <span className="font-semibold">{fallback}</span>
+          )}
         </span>
+        {age && <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/70">{age}</span>}
         {unread > 0 && (
-          <span aria-label={`${unread} unread repl${unread === 1 ? 'y' : 'ies'}`} className="inline-flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full bg-primary px-1.5 text-[10px] font-semibold tabular-nums text-primary-foreground">
+          <span
+            aria-label={`${unread} unread repl${unread === 1 ? 'y' : 'ies'}`}
+            className="ml-0.5 inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold tabular-nums text-primary-foreground"
+          >
             {unread}
           </span>
         )}
       </span>
-      <span className="mt-1 block line-clamp-2 text-[11px] leading-snug text-muted-foreground">
-        {preview(chip.preview)}
+      <span className="mt-0.5 block truncate text-[11px] leading-snug text-muted-foreground">
+        {session.preview}
       </span>
       {activity && <span className="sr-only">Activity: {activity}.</span>}
     </button>
@@ -99,29 +131,153 @@ const SessionCard = ({
 };
 
 const SessionList = ({
-  chips,
+  sessions,
   activeSessionKey,
   unreadCountBySession,
   onActivateSession,
   onAfterActivate,
 }: {
-  chips: Array<LivePaneChip & { sessionKey: LiveSessionKey; preview: string }>;
+  sessions: SessionRowModel[];
   activeSessionKey: LiveSessionKey | null;
   unreadCountBySession: Readonly<Record<string, readonly string[]>>;
   onActivateSession: (key: LiveSessionKey) => void;
   onAfterActivate?: () => void;
-}) => (
-  <div role="listbox" aria-label="Live sessions" className="space-y-2 p-3">
-    {chips.map((chip) => (
-      <SessionCard
-        key={chip.sessionKey}
-        chip={chip}
-        sessionKey={chip.sessionKey}
-        unread={unreadCountBySession[chip.sessionKey]?.length ?? 0}
-        active={activeSessionKey === chip.sessionKey}
-        onSelect={() => { onActivateSession(chip.sessionKey); onAfterActivate?.(); }}
-      />
-    ))}
+}) => {
+  const listRef = React.useRef<HTMLDivElement | null>(null);
+
+  // The active session must be visible in its own picker. With five panes in a
+  // short scroller the active one could sit entirely below the fold on first
+  // paint, so the panel showed a session the list never displayed.
+  React.useEffect(() => {
+    listRef.current
+      ?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]')
+      ?.scrollIntoView({ block: 'nearest' });
+  }, [activeSessionKey]);
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const options = Array.from(listRef.current?.querySelectorAll<HTMLElement>('[role="option"]') ?? []);
+    if (options.length === 0) return;
+    const focused = options.findIndex((option) => option === document.activeElement);
+    const from = focused === -1
+      ? Math.max(0, options.findIndex((option) => option.getAttribute('aria-selected') === 'true'))
+      : focused;
+    const next = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? options.length - 1
+        : event.key === 'ArrowDown'
+          ? Math.min(options.length - 1, from + 1)
+          : Math.max(0, from - 1);
+    event.preventDefault();
+    options[next]?.focus();
+  };
+
+  return (
+    <div
+      ref={listRef}
+      role="listbox"
+      aria-label="Live sessions"
+      onKeyDown={onKeyDown}
+      className="space-y-0.5 p-1.5"
+    >
+      {sessions.map((session) => (
+        <SessionRow
+          key={session.sessionKey}
+          session={session}
+          unread={unreadCountBySession[session.sessionKey]?.length ?? 0}
+          active={activeSessionKey === session.sessionKey}
+          onSelect={() => { onActivateSession(session.sessionKey); onAfterActivate?.(); }}
+        />
+      ))}
+    </div>
+  );
+};
+
+/**
+ * Escape-to-close plus focus handoff for the mobile sheets. Without it the
+ * sheets opened with focus still on `<body>` behind the overlay and Escape did
+ * nothing, so a keyboard or screen-reader captain could not work them at all.
+ */
+function useSheetDismiss(open: boolean, onClose: () => void): React.RefObject<HTMLElement | null> {
+  const ref = React.useRef<HTMLElement | null>(null);
+  const closeRef = React.useRef(onClose);
+  React.useEffect(() => { closeRef.current = onClose; }, [onClose]);
+  React.useEffect(() => {
+    if (!open) return;
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    ref.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      closeRef.current();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      previouslyFocused?.focus?.();
+    };
+  }, [open]);
+  return ref;
+}
+
+/** Bottom sheet: bounded by its content up to 85dvh instead of a full-screen
+ * takeover, so five sessions no longer occupy a mostly-empty 100dvh page. */
+const MobileSheet = ({
+  label,
+  title,
+  subtitle,
+  closeLabel,
+  onClose,
+  children,
+}: {
+  label: string;
+  title: string;
+  subtitle: React.ReactNode;
+  closeLabel: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) => {
+  const sheetRef = useSheetDismiss(true, onClose);
+  return (
+    <div className="fixed inset-0 z-[80] flex items-end bg-black/50 lg:hidden" role="presentation" onClick={onClose}>
+      <section
+        ref={sheetRef as React.RefObject<HTMLElement>}
+        role="dialog"
+        aria-modal="true"
+        aria-label={label}
+        tabIndex={-1}
+        className="flex max-h-[85dvh] w-full flex-col rounded-t-xl border-t border-border bg-card shadow-xl focus:outline-none"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold">{title}</h2>
+            <p className="truncate text-xs text-muted-foreground">{subtitle}</p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="shrink-0 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-muted/50 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {closeLabel}
+          </button>
+        </header>
+        {children}
+      </section>
+    </div>
+  );
+};
+
+const NewRepliesJump = ({ count, onJump }: { count: number; onJump: () => void }) => (
+  <div className="sticky top-0 z-10 px-3 pt-2">
+    <button
+      type="button"
+      onClick={onJump}
+      className="w-full rounded-md border border-primary/35 bg-primary/10 px-2 py-1.5 text-xs font-medium text-primary hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      {count} new repl{count === 1 ? 'y' : 'ies'} · Jump to new replies
+    </button>
   </div>
 );
 
@@ -150,6 +306,8 @@ export const LiveSessionTimeline = React.memo(({
   const [mobileHistoryOpen, setMobileHistoryOpen] = React.useState(false);
   const isMobile = useIsMobile(1024);
   const historyRegionId = React.useId();
+  const closeSessions = React.useCallback(() => setMobileSessionsOpen(false), []);
+  const closeHistory = React.useCallback(() => setMobileHistoryOpen(false), []);
 
   const { visible, overflow } = React.useMemo(
     () => deriveLivePaneChips(messages, {
@@ -160,13 +318,19 @@ export const LiveSessionTimeline = React.memo(({
     }),
     [messages, selectedMessageId, reviewRoundStatus, contextHandoffHighPercent],
   );
-  const sessions = React.useMemo(() => [...visible, ...overflow].flatMap((chip) => {
+  const sessions = React.useMemo<SessionRowModel[]>(() => [...visible, ...overflow].flatMap((chip) => {
     // The snapshot is newest-first, while chip derivation's representative may
     // be an older selected annotation target. The card preview must always be
     // the actual newest response in the session.
     const source = messages.find((message) => message.paneId === chip.paneId);
     const sessionKey = source ? sessionKeyFor(source) : null;
-    return source && sessionKey ? [{ ...chip, sessionKey, preview: source.text || source.label || '' }] : [];
+    if (!source || !sessionKey) return [];
+    return [{
+      ...chip,
+      sessionKey,
+      preview: sessionPreview(source.text || source.label || ''),
+      timestamp: source.timestamp,
+    }];
   }), [visible, overflow, messages]);
   const active = sessions.find((session) => session.sessionKey === activeSessionKey) ?? sessions[0];
 
@@ -182,6 +346,16 @@ export const LiveSessionTimeline = React.memo(({
   const activeWorkspace = sanitizeLabel(active.workspace);
   const activeTab = sanitizeLabel(active.tab);
   const activeLabel = sanitizeLabel(active.label) || 'Pane';
+  const activeIdentity = activeWorkspace && activeTab ? (
+    <>
+      <span>{activeWorkspace}</span>
+      <span className="text-muted-foreground/60 mx-1.5">·</span>
+      <span>{activeTab}</span>
+    </>
+  ) : (
+    activeLabel
+  );
+  const activeIdentityTitle = activeWorkspace && activeTab ? `${activeWorkspace} · ${activeTab}` : activeLabel;
 
   return (
     <section
@@ -191,16 +365,8 @@ export const LiveSessionTimeline = React.memo(({
       <header className="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-2 lg:px-4">
         <div className="min-w-0 flex-1">
           <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">Agent Response</p>
-          <p className="truncate text-sm font-semibold" title={activeWorkspace && activeTab ? `${activeWorkspace} · ${activeTab}` : activeLabel}>
-            {activeWorkspace && activeTab ? (
-              <>
-                <span>{activeWorkspace}</span>
-                <span className="text-muted-foreground/60 mx-1.5">·</span>
-                <span>{activeTab}</span>
-              </>
-            ) : (
-              activeLabel
-            )}
+          <p className="truncate text-sm font-semibold" title={activeIdentityTitle}>
+            {activeIdentity}
           </p>
         </div>
         <div className="flex items-center gap-1.5 lg:hidden">
@@ -208,6 +374,8 @@ export const LiveSessionTimeline = React.memo(({
             <button
               type="button"
               onClick={() => setMobileHistoryOpen(true)}
+              aria-haspopup="dialog"
+              aria-expanded={mobileHistoryOpen}
               className="rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs font-medium hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               History
@@ -224,9 +392,17 @@ export const LiveSessionTimeline = React.memo(({
           </button>
         </div>
       </header>
-      <div className="hidden min-h-0 border-b border-border/60 lg:block">
-        <OverlayScrollArea className="max-h-52" style={{ overscrollBehaviorY: 'contain' }}>
-          <SessionList chips={sessions} activeSessionKey={activeSessionKey} unreadCountBySession={unreadCountBySession} onActivateSession={onActivateSession} />
+      {/* The switcher is capped well under the transcript's share of the panel.
+          At 208px it took MORE of a 450px panel than the response it switches
+          between; compact rows fit ~3 sessions in 144px and scroll for more. */}
+      <div className="hidden min-h-0 shrink-0 border-b border-border/60 lg:block">
+        <OverlayScrollArea className="max-h-36" style={{ overscrollBehaviorY: 'contain' }}>
+          <SessionList
+            sessions={sessions}
+            activeSessionKey={activeSessionKey}
+            unreadCountBySession={unreadCountBySession}
+            onActivateSession={onActivateSession}
+          />
         </OverlayScrollArea>
       </div>
       {isMobile ? (
@@ -242,6 +418,7 @@ export const LiveSessionTimeline = React.memo(({
               listLabel="Selected response"
               emptyLabel="No assistant response in this session yet."
               showCountControl={false}
+              showListLabel={false}
             />
           ) : (
             <p className="p-2 text-xs text-muted-foreground">No assistant response in this session yet.</p>
@@ -256,17 +433,7 @@ export const LiveSessionTimeline = React.memo(({
           tabIndex={0}
           style={{ overscrollBehaviorY: 'contain' }}
         >
-          {newReplyCount > 0 && (
-            <div className="sticky top-0 z-10 px-3 pt-2">
-              <button
-                type="button"
-                onClick={onJumpToNewReplies}
-                className="w-full rounded-md border border-primary/35 bg-primary/10 px-2 py-1.5 text-xs font-medium text-primary hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                {newReplyCount} new repl{newReplyCount === 1 ? 'y' : 'ies'} · Jump to new replies
-              </button>
-            </div>
-          )}
+          {newReplyCount > 0 && <NewRepliesJump count={newReplyCount} onJump={onJumpToNewReplies} />}
           <MessagesBrowser
             messages={activeTimelineMessages}
             selectedMessageId={selectedMessageId}
@@ -280,109 +447,69 @@ export const LiveSessionTimeline = React.memo(({
             emptyLabel="No assistant response in this session yet."
             jumpToLatestSignal={jumpToLatestSignal}
             showCountControl={false}
+            showListLabel={false}
+            pinLatestKey={activeSessionKey}
           />
         </OverlayScrollArea>
       )}
       {mobileSessionsOpen && (
-        <div className="fixed inset-0 z-[80] flex bg-black/50 lg:hidden" role="presentation" onClick={() => setMobileSessionsOpen(false)}>
-          <section
-            role="dialog"
-            aria-modal="true"
-            aria-label="Choose live session"
-            className="flex h-[100dvh] w-full flex-col bg-card"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <header className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
-              <div><h2 className="text-sm font-semibold">Live sessions</h2><p className="text-xs text-muted-foreground">Choose a pane without leaving this response.</p></div>
-              <button type="button" onClick={() => setMobileSessionsOpen(false)} className="rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-muted/50 hover:text-foreground">Done</button>
-            </header>
-            <OverlayScrollArea className="min-h-0 flex-1" style={{ overscrollBehaviorY: 'contain' }}>
-              <SessionList
-                chips={sessions}
-                activeSessionKey={activeSessionKey}
-                unreadCountBySession={unreadCountBySession}
-                onActivateSession={onActivateSession}
-                onAfterActivate={() => setMobileSessionsOpen(false)}
-              />
-            </OverlayScrollArea>
-          </section>
-        </div>
+        <MobileSheet
+          label="Choose live session"
+          title="Live sessions"
+          subtitle="Choose a pane without leaving this response."
+          closeLabel="Done"
+          onClose={closeSessions}
+        >
+          <OverlayScrollArea className="min-h-0 flex-1" style={{ overscrollBehaviorY: 'contain' }}>
+            <SessionList
+              sessions={sessions}
+              activeSessionKey={activeSessionKey}
+              unreadCountBySession={unreadCountBySession}
+              onActivateSession={onActivateSession}
+              onAfterActivate={closeSessions}
+            />
+          </OverlayScrollArea>
+        </MobileSheet>
       )}
       {mobileHistoryOpen && (
-        <div className="fixed inset-0 z-[80] flex bg-black/50 lg:hidden" role="presentation" onClick={() => setMobileHistoryOpen(false)}>
-          <section
-            role="dialog"
-            aria-modal="true"
+        <MobileSheet
+          label="Response history"
+          title="Response history"
+          subtitle={activeIdentity}
+          closeLabel="Close"
+          onClose={closeHistory}
+        >
+          <OverlayScrollArea
+            id={historyRegionId}
             aria-label="Response history"
-            className="flex h-[100dvh] w-full flex-col bg-card"
-            onClick={(event) => event.stopPropagation()}
+            className="min-h-0 flex-1"
+            data-live-timeline-scroll="true"
+            tabIndex={0}
+            style={{ overscrollBehaviorY: 'contain' }}
           >
-            <header className="flex shrink-0 items-center justify-between border-b border-border px-4 py-3">
-              <div>
-                <h2 className="text-sm font-semibold">Response history</h2>
-                <p className="text-xs text-muted-foreground">
-                  {activeWorkspace && activeTab ? (
-                    <>
-                      <span>{activeWorkspace}</span>
-                      <span className="text-muted-foreground/60 mx-1">·</span>
-                      <span>{activeTab}</span>
-                    </>
-                  ) : (
-                    activeLabel
-                  )}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setMobileHistoryOpen(false)}
-                className="rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-muted/50 hover:text-foreground"
-              >
-                Close
-              </button>
-            </header>
-            <OverlayScrollArea
-              id={historyRegionId}
-              aria-label="Response history"
-              className="min-h-0 flex-1"
-              data-live-timeline-scroll="true"
-              tabIndex={0}
-              style={{ overscrollBehaviorY: 'contain' }}
-            >
-              {newReplyCount > 0 && (
-                <div className="sticky top-0 z-10 px-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={onJumpToNewReplies}
-                    className="w-full rounded-md border border-primary/35 bg-primary/10 px-2 py-1.5 text-xs font-medium text-primary hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    {newReplyCount} new repl{newReplyCount === 1 ? 'y' : 'ies'} · Jump to new replies
-                  </button>
-                </div>
-              )}
-              <MessagesBrowser
-                messages={activeTimelineMessages}
-                selectedMessageId={selectedMessageId}
-                onSelect={(id) => {
-                  onSelectMessage(id);
-                }}
-                annotationCounts={annotationCounts}
-                captainEchoes={captainEchoes}
-                chronological
-                chatLayout
-                autoLoadOnScroll={false}
-                listLabel="Session responses"
-                emptyLabel="No assistant response in this session yet."
-                jumpToLatestSignal={jumpToLatestSignal}
-                rowBudgetOverride={activeTimelineMessages.length}
-                showCountControl={false}
-              />
-            </OverlayScrollArea>
-          </section>
-        </div>
+            {newReplyCount > 0 && <NewRepliesJump count={newReplyCount} onJump={onJumpToNewReplies} />}
+            <MessagesBrowser
+              messages={activeTimelineMessages}
+              selectedMessageId={selectedMessageId}
+              onSelect={onSelectMessage}
+              annotationCounts={annotationCounts}
+              captainEchoes={captainEchoes}
+              chronological
+              chatLayout
+              autoLoadOnScroll={false}
+              listLabel="Session responses"
+              emptyLabel="No assistant response in this session yet."
+              jumpToLatestSignal={jumpToLatestSignal}
+              rowBudgetOverride={activeTimelineMessages.length}
+              showCountControl={false}
+              showListLabel={false}
+              pinLatestKey={activeSessionKey}
+            />
+          </OverlayScrollArea>
+        </MobileSheet>
       )}
     </section>
   );
 });
 
 LiveSessionTimeline.displayName = 'LiveSessionTimeline';
-

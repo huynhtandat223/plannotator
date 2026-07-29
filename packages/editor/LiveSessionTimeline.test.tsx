@@ -142,15 +142,104 @@ test.skipIf(!hasDom)('preserves independent session selection when a parent appl
   expect(el.textContent).toContain('2');
 });
 
-test.skipIf(!hasDom)('mobile opens a full-height accessible session selection sheet without removing the timeline', async () => {
+test.skipIf(!hasDom)('mobile opens a bounded session sheet that takes focus and closes on Escape', async () => {
   const el = await render();
   const opener = Array.from(el.querySelectorAll('button')).find((button) => button.textContent === 'Sessions')!;
   await act(async () => opener.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+
   const dialog = el.querySelector('[role="dialog"][aria-label="Choose live session"]') as HTMLElement;
   expect(dialog).toBeTruthy();
-  expect(dialog.className).toContain('h-[100dvh]');
+  // Content-bounded bottom sheet, not a mostly-empty full-screen takeover.
+  expect(dialog.className).toContain('max-h-[85dvh]');
+  expect(dialog.className).not.toContain('h-[100dvh]');
   expect(dialog.textContent).toContain('firstmate · compile');
   expect(el.querySelector('[data-live-timeline-scroll="true"]')).toBeTruthy();
+
+  // Focus must move into the modal, not stay stranded behind the overlay.
+  expect(dialog.contains(document.activeElement)).toBe(true);
+
+  await act(async () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+  expect(el.querySelector('[role="dialog"][aria-label="Choose live session"]')).toBeNull();
+});
+
+test.skipIf(!hasDom)('gives the session listbox one tab stop and arrow-key navigation', async () => {
+  const el = await render();
+  const listbox = el.querySelector('[role="listbox"]') as HTMLElement;
+  const options = Array.from(listbox.querySelectorAll<HTMLElement>('[role="option"]'));
+  expect(options.length).toBe(2);
+
+  // Roving tabindex: only the active session is in the tab order.
+  expect(options.filter((option) => option.tabIndex === 0).length).toBe(1);
+  expect(options.find((option) => option.tabIndex === 0)!.getAttribute('aria-selected')).toBe('true');
+
+  await act(async () => listbox.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })));
+  expect(document.activeElement).toBe(options[1]);
+  await act(async () => listbox.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true })));
+  expect(document.activeElement).toBe(options[0]);
+  await act(async () => listbox.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })));
+  expect(document.activeElement).toBe(options[1]);
+});
+
+test.skipIf(!hasDom)('scrolls the active session into view instead of leaving it below the fold', async () => {
+  const scrolled: string[] = [];
+  const original = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView = function scrollIntoViewSpy(this: Element) {
+    scrolled.push(this.getAttribute('aria-selected') ?? 'none');
+  };
+  try {
+    await render();
+    // The active row asks to be revealed on mount…
+    expect(scrolled).toContain('true');
+    scrolled.length = 0;
+    // …and again when the captain switches sessions.
+    await act(async () => root!.render(
+      <LiveSessionTimeline
+        messages={[
+          message('p1:r2', 'p1', 'pi-1', 'compile', 'newest compiler response'),
+          message('p2:r1', 'p2', 'pi-2', 'tests', 'latest tests response'),
+        ]}
+        activeTimelineMessages={[message('p2:r1', 'p2', 'pi-2', 'tests', 'latest tests response')]}
+        activeSessionKey="pi:pi-2"
+        selectedMessageId="p2:r1"
+        unreadCountBySession={{}}
+        newReplyCount={0}
+        annotationCounts={new Map()}
+        captainEchoes={new Map()}
+        onActivateSession={() => {}}
+        onSelectMessage={() => {}}
+        onJumpToNewReplies={() => {}}
+        jumpToLatestSignal={0}
+      />,
+    ));
+    expect(scrolled).toContain('true');
+  } finally {
+    Element.prototype.scrollIntoView = original;
+  }
+});
+
+test.skipIf(!hasDom)('keeps one caption for the transcript rather than stacking list and workspace headings', async () => {
+  const el = await render();
+  const transcript = el.querySelector('[data-live-timeline-scroll="true"]')!;
+  // The panel header already names the session; the browser must not repeat it.
+  expect(transcript.textContent).not.toContain('Recent responses');
+  expect(transcript.textContent).not.toContain('FIRSTMATE');
+  expect(transcript.textContent).toContain('newest compiler response');
+});
+
+test.skipIf(!hasDom)('strips markdown syntax out of the session switcher previews', async () => {
+  const noisy = message('p1:r1', 'p1', 'pi-1', 'compile', '# Heading\n\n> [!WARNING]\n> **Bold warning** body');
+  const el = await render({
+    messages: [noisy],
+    activeTimelineMessages: [noisy],
+    activeSessionKey: 'pi:pi-1',
+    selectedMessageId: 'p1:r1',
+    unreadCountBySession: {},
+    newReplyCount: 0,
+  });
+  const listbox = el.querySelector('[role="listbox"]')!;
+  expect(listbox.textContent).toContain('Heading Bold warning body');
+  expect(listbox.textContent).not.toContain('[!WARNING]');
+  expect(listbox.textContent).not.toContain('**');
 });
 
 test.skipIf(!hasDom)('unambiguously maps session headers to workspace and tab', async () => {
