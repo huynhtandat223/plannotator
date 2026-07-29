@@ -19,6 +19,11 @@ import { MessagesBrowser, type CaptainEcho, type PickerMessage } from "./Message
 import { MessagesIcon } from "../icons/MessagesIcon";
 import { OverlayScrollArea } from "../OverlayScrollArea";
 import { ReviewAgentsIcon } from "../ReviewAgentsIcon";
+import {
+  AGENT_RESPONSE_TOGGLE_SHORT_LABEL,
+  AgentResponsePanelIcon,
+  agentResponseToggleLabel,
+} from "../agentResponsePanelToggle";
 
 interface SidebarContainerProps {
   activeTab: SidebarTab;
@@ -89,6 +94,16 @@ interface SidebarContainerProps {
   messagesAutoLoadOnScroll?: boolean;
   /** A newer response finished in another pane while the reviewer stayed here. */
   hasPendingResponse?: boolean;
+  /**
+   * Whole-panel visibility toggle for the live Agent Response panel — the same
+   * control the collapsed rail (`SidebarTabs`) carries. It lives here too
+   * because this sidebar REPLACES that rail when it opens, and a panel the
+   * captain has hidden must never become unrecoverable behind an open sidebar.
+   */
+  showAgentResponseToggle?: boolean;
+  isAgentResponseVisible?: boolean;
+  onToggleAgentResponse?: () => void;
+  agentResponseUnreadCount?: number;
   messagePickerLabels?: {
     tab: string;
     list: string;
@@ -156,6 +171,10 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
   messagesChatLayout,
   messagesAutoLoadOnScroll,
   hasPendingResponse,
+  showAgentResponseToggle,
+  isAgentResponseVisible = true,
+  onToggleAgentResponse,
+  agentResponseUnreadCount = 0,
   messagePickerLabels,
 }) => {
   const pickerLabels = messagePickerLabels ?? {
@@ -173,6 +192,16 @@ export const SidebarContainer: React.FC<SidebarContainerProps> = ({
     >
       {/* Tab bar */}
       <div className="flex h-10 items-center border-b border-border/50 px-2 gap-0.5 flex-shrink-0 overflow-hidden min-w-0">
+        {showAgentResponseToggle && onToggleAgentResponse && (
+          <ActionButton
+            active={isAgentResponseVisible}
+            onClick={onToggleAgentResponse}
+            ariaLabel={agentResponseToggleLabel(isAgentResponseVisible)}
+            badge={!isAgentResponseVisible && agentResponseUnreadCount > 0}
+            icon={<AgentResponsePanelIcon className="w-3 h-3" visible={isAgentResponseVisible} />}
+            label={AGENT_RESPONSE_TOGGLE_SHORT_LABEL}
+          />
+        )}
         {showAgentTerminalButton && onToggleAgentTerminal && (
           <ActionButton
             active={!!isAgentTerminalOpen}
@@ -505,12 +534,17 @@ const ActionButton: React.FC<{
   onClick: () => void;
   icon: React.ReactNode;
   label: string;
-}> = ({ active, running, onClick, icon, label }) => (
+  /** Spell the action out for assistive tech when the visible text is a noun
+   *  ("Response") rather than the verb the press performs. */
+  ariaLabel?: string;
+  badge?: boolean;
+}> = ({ active, running, onClick, icon, label, ariaLabel, badge }) => (
   <button
     type="button"
     onClick={onClick}
     aria-pressed={active}
-    title={running ? "Agent running" : label}
+    aria-label={ariaLabel}
+    title={ariaLabel ?? (running ? "Agent running" : label)}
     className={`relative flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors min-w-0 shrink-0 ${
       active || running
         ? "bg-primary/10 text-primary"
@@ -519,7 +553,7 @@ const ActionButton: React.FC<{
   >
     {icon}
     {label}
-    {running && (
+    {(running || badge) && (
       <span className="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-primary" />
     )}
   </button>

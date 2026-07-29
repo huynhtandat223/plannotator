@@ -174,6 +174,7 @@ import { deriveLiveActivityChip } from './liveActivityChip';
 import { LiveActivityChip } from './LiveActivityChipView';
 import { deriveLiveActivityTrail, formatLiveActivityTrail, formatTrailStep, type LiveActivityTrailStep } from './liveActivityTrail';
 import { LiveSessionTimeline } from './LiveSessionTimeline';
+import { agentResponsePanelWrapperClass } from './live/agentResponsePanelLayout';
 import {
   activateLiveSession,
   createLiveSessionTimelineState,
@@ -700,10 +701,13 @@ const App: React.FC = () => {
   const liveSessionTimelineRef = useRef(liveSessionTimeline);
   useEffect(() => { liveSessionTimelineRef.current = liveSessionTimeline; }, [liveSessionTimeline]);
   const [liveTimelineJumpSignal, setLiveTimelineJumpSignal] = useState(0);
-  // The pane list is a disclosure inside the Agent Response panel, but its
-  // TOGGLE lives in the app's existing left rail (`SidebarTabs`), so the open
-  // state is owned here where both can reach it.
-  const [livePaneListOpen, setLivePaneListOpen] = useState(false);
+  // Whether the WHOLE Agent Response panel — header, session row, history, and
+  // the space it occupies — is on screen. Owned here because the toggle lives
+  // in the app's existing left-edge controls (the collapsed rail, the open
+  // sidebar's tab bar, and the narrow-viewport header), never inside the panel
+  // it hides.
+  const [liveResponsePanelVisible, setLiveResponsePanelVisible] = useState(true);
+  const toggleLiveResponsePanel = useCallback(() => setLiveResponsePanelVisible((visible) => !visible), []);
   // The active transcript must not receive new object identities merely because
   // a host telemetry frame changed status/tool/context fields.
   const stableLiveTimelineMessagesRef = useRef<PickerMessage[]>([]);
@@ -1443,8 +1447,7 @@ const App: React.FC = () => {
   }, [liveMessageReview, activeLiveTimelineMessages, recentMessages]);
 
   // Rail-toggle inputs, derived straight from session identity rather than from
-  // the panel's chip derivation: a lone pane has nothing to switch to, and the
-  // dot means replies waiting in the panes the captain is NOT reading.
+  // the panel's chip derivation.
   const liveSessionKeys = React.useMemo(() => {
     const keys = new Set<LiveSessionKey>();
     for (const message of stableLiveSessions) {
@@ -1453,14 +1456,16 @@ const App: React.FC = () => {
     }
     return keys;
   }, [stableLiveSessions]);
-  const liveUnreadElsewhere = React.useMemo(() => {
+  // Dot on the panel-visibility toggle: with the panel away, unread in the
+  // session the captain was reading is just as invisible as unread elsewhere,
+  // so this counts every session rather than only the inactive ones.
+  const liveUnreadTotal = React.useMemo(() => {
     let total = 0;
     for (const key of liveSessionKeys) {
-      if (key === activeLiveSessionKey) continue;
       total += liveSessionTimeline.unreadMessageIdsBySession[key]?.length ?? 0;
     }
     return total;
-  }, [liveSessionKeys, activeLiveSessionKey, liveSessionTimeline.unreadMessageIdsBySession]);
+  }, [liveSessionKeys, liveSessionTimeline.unreadMessageIdsBySession]);
 
   // A Global Comment in any real live Pi pane is a new user message.
   // Selection/code comments still use the review-annotation flow.
@@ -5250,6 +5255,10 @@ const App: React.FC = () => {
           onOpenLiveMessages={undefined}
           onOpenLiveFolder={() => openSidebarTab('files')}
           onOpenLiveChanges={() => openSidebarTab('changes')}
+          showAgentResponseToggle={liveMessageReview}
+          isAgentResponseVisible={liveResponsePanelVisible}
+          onToggleAgentResponse={toggleLiveResponsePanel}
+          agentResponseUnreadCount={liveUnreadTotal}
           liveFeedbackCount={liveMessageReview ? selectedLiveMessageAnnotationCount : 0}
           callbackConfig={callbackConfig}
           taterMode={taterMode}
@@ -5485,10 +5494,10 @@ const App: React.FC = () => {
               showChangesTab={liveMessageReview && !!projectRoot && !archive.archiveMode}
               showMessagesTab={!liveMessageReview && annotateSource === 'message' && recentMessages.length > 1}
               messagesTabTitle={undefined}
-              showPanesTab={liveMessageReview && liveSessionKeys.size > 1}
-              isPanesOpen={livePaneListOpen}
-              onTogglePanes={() => setLivePaneListOpen((open) => !open)}
-              panesUnreadCount={liveUnreadElsewhere}
+              showAgentResponseTab={liveMessageReview}
+              isAgentResponseVisible={liveResponsePanelVisible}
+              onToggleAgentResponse={toggleLiveResponsePanel}
+              agentResponseUnreadCount={liveUnreadTotal}
               showAgentTerminalTab={showAgentTerminalControls}
               isAgentTerminalOpen={isAgentTerminalOpen}
               isAgentTerminalRunning={isAgentTerminalRunning}
@@ -5596,6 +5605,10 @@ const App: React.FC = () => {
                   mobileTitle: 'Workspaces',
                   mobileSubtitle: 'Pick a response from a live Pi panel',
                 } : undefined}
+                showAgentResponseToggle={liveMessageReview}
+                isAgentResponseVisible={liveResponsePanelVisible}
+                onToggleAgentResponse={toggleLiveResponsePanel}
+                agentResponseUnreadCount={liveUnreadTotal}
               />
               {sidebar.isOpen && <ResizeHandle {...tocResize.handleProps} className="hidden lg:block z-[55]" side="left" hideHoverTrack tooltip={RESIZE_HANDLE_TOOLTIP} onCollapse={sidebar.close} />}
             </div>
@@ -5723,9 +5736,17 @@ const App: React.FC = () => {
                 {/* The transcript — not the session switcher — is what this
                     column is for, so the panel gets enough height that the
                     response stays readable once the switcher is capped above
-                    it (see LiveSessionTimeline). */}
+                    it (see LiveSessionTimeline). The whole block leaves the
+                    layout when the captain hides it from the rail; see
+                    `agentResponsePanelWrapperClass` for why it stays mounted. */}
                 {liveMessageReview && (
-                  <div className="mb-4 w-full lg:h-[min(62dvh,42rem)] lg:min-h-[26rem] lg:w-[380px] lg:shrink-0 lg:max-w-none">
+                  <div
+                    data-agent-response-panel="true"
+                    data-agent-response-hidden={liveResponsePanelVisible ? undefined : 'true'}
+                    className={agentResponsePanelWrapperClass(liveResponsePanelVisible)}
+                    aria-hidden={!liveResponsePanelVisible}
+                    inert={!liveResponsePanelVisible ? true : undefined}
+                  >
                     <LiveSessionTimeline
                       messages={stableLiveSessions}
                       activeTimelineMessages={activeLiveTimelineMessages}
@@ -5741,8 +5762,6 @@ const App: React.FC = () => {
                       onSelectMessage={handleSelectMessage}
                       onJumpToNewReplies={handleJumpToLiveReplies}
                       jumpToLatestSignal={liveTimelineJumpSignal}
-                      sessionListOpen={livePaneListOpen}
-                      onSessionListOpenChange={setLivePaneListOpen}
                     />
                   </div>
                 )}

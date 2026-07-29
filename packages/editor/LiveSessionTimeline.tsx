@@ -23,14 +23,6 @@ export type LiveSessionTimelineProps = {
   onSelectMessage: (messageId: string) => void;
   onJumpToNewReplies: () => void;
   jumpToLatestSignal: number;
-  /**
-   * Optional controlled state for the desktop pane list, so the host's existing
-   * left rail (`SidebarTabs`) can be the toggle instead of this panel growing a
-   * second left-edge control. Omit both and the panel keeps its own state, so
-   * every uncontrolled caller is unchanged.
-   */
-  sessionListOpen?: boolean;
-  onSessionListOpenChange?: (open: boolean) => void;
 };
 
 const sessionKeyFor = (message: Pick<PickerMessage, 'piSessionId' | 'paneId'>): LiveSessionKey | null =>
@@ -334,15 +326,8 @@ export const LiveSessionTimeline = React.memo(({
   onSelectMessage,
   onJumpToNewReplies,
   jumpToLatestSignal,
-  sessionListOpen: controlledSessionListOpen,
-  onSessionListOpenChange,
 }: LiveSessionTimelineProps) => {
-  const [uncontrolledSessionListOpen, setUncontrolledSessionListOpen] = React.useState(false);
-  const sessionListOpen = controlledSessionListOpen ?? uncontrolledSessionListOpen;
-  const setSessionListOpen = React.useCallback((next: boolean) => {
-    if (controlledSessionListOpen === undefined) setUncontrolledSessionListOpen(next);
-    onSessionListOpenChange?.(next);
-  }, [controlledSessionListOpen, onSessionListOpenChange]);
+  const [sessionListOpen, setSessionListOpen] = React.useState(false);
   const [mobileSessionsOpen, setMobileSessionsOpen] = React.useState(false);
   const [mobileHistoryOpen, setMobileHistoryOpen] = React.useState(false);
   const isMobile = useIsMobile(1024);

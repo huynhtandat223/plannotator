@@ -330,30 +330,6 @@ test.skipIf(!hasDom)('leads the transcript with the newest response, in DOM and 
   expect(transcript.getAttribute('aria-label')).toBe('Response history — newest first');
 });
 
-test.skipIf(!hasDom)('a controlled pane list reports opening to the host instead of forking state', async () => {
-  const opens: boolean[] = [];
-  const el = await render({ sessionListOpen: false, onSessionListOpenChange: (open) => opens.push(open) });
-  // The host (the left rail) owns the state, so the panel keeps no list of its own.
-  expect(el.querySelector('[role="listbox"]')).toBeNull();
-
-  await openSwitcher(el);
-  expect(opens).toEqual([true]);
-  // Controlled means controlled: it stays shut until the host says otherwise,
-  // which is what keeps the rail button and this switcher one toggle, not two.
-  expect(el.querySelector('[role="listbox"]')).toBeNull();
-});
-
-test.skipIf(!hasDom)('a host-opened pane list still closes back through the host', async () => {
-  const opens: boolean[] = [];
-  const el = await render({ sessionListOpen: true, onSessionListOpenChange: (open) => opens.push(open) });
-  expect(el.querySelector('[role="listbox"]')).toBeTruthy();
-  expect(el.querySelector('[data-live-session-switcher="true"]')!.getAttribute('aria-expanded')).toBe('true');
-
-  const option = el.querySelector('[role="option"]:not([aria-selected="true"])') as HTMLElement;
-  await act(async () => option.dispatchEvent(new MouseEvent('click', { bubbles: true })));
-  expect(opens).toEqual([false]);
-});
-
 test.skipIf(!hasDom)('strips markdown syntax out of the session switcher previews', async () => {
   const noisy = message('p1:r1', 'p1', 'pi-1', 'compile', '# Heading\n\n> [!WARNING]\n> **Bold warning** body');
   const el = await render({

@@ -9,6 +9,7 @@ import { PlanHeaderMenu } from '@plannotator/ui/components/PlanHeaderMenu';
 import type { CallbackConfig } from '@plannotator/ui/utils/callback';
 import type { UIPreferences } from '@plannotator/ui/utils/uiPreferences';
 import { SparklesIcon } from '@plannotator/ui/components/SparklesIcon';
+import { agentResponseToggleLabel } from '@plannotator/ui/components/agentResponsePanelToggle';
 import { HerdrProcessPanelLauncher } from './HerdrProcessPanelLauncher';
 
 interface AppHeaderProps {
@@ -57,6 +58,11 @@ interface AppHeaderProps {
   onLiveProcessPanelCreated?: (panel: { paneId: string; panelName: string }) => void;
   showLiveFolder?: boolean;
   showLiveChanges?: boolean;
+  /** Narrow-viewport instance of the rail's whole-panel Agent Response toggle. */
+  showAgentResponseToggle?: boolean;
+  isAgentResponseVisible?: boolean;
+  onToggleAgentResponse?: () => void;
+  agentResponseUnreadCount?: number;
   onOpenLiveMessages?: () => void;
   onOpenLiveFolder?: () => void;
   onOpenLiveChanges?: () => void;
@@ -123,15 +129,26 @@ const HeaderTooltip: React.FC<{ label: string }> = ({ label }) => (
   </span>
 );
 
-const HeaderIconButton: React.FC<{ onClick?: () => void; title: string; children: React.ReactNode }> = ({ onClick, title, children }) => (
+const HeaderIconButton: React.FC<{
+  onClick?: () => void;
+  title: string;
+  /** Present only for controls that are a two-state toggle rather than a jump. */
+  pressed?: boolean;
+  badge?: boolean;
+  children: React.ReactNode;
+}> = ({ onClick, title, pressed, badge, children }) => (
   <span className="group relative inline-flex">
     <button
       type="button"
       onClick={onClick}
       aria-label={title}
-      className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+      aria-pressed={pressed}
+      className={`relative flex h-8 w-8 items-center justify-center rounded-md hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
+        pressed ? "text-primary" : "text-muted-foreground"
+      }`}
     >
       <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>{children}</svg>
+      {badge && <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-primary" />}
     </button>
     <HeaderTooltip label={title} />
   </span>
@@ -174,6 +191,10 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   onLiveProcessPanelCreated,
   showLiveFolder,
   showLiveChanges,
+  showAgentResponseToggle,
+  isAgentResponseVisible,
+  onToggleAgentResponse,
+  agentResponseUnreadCount = 0,
   onOpenLiveMessages,
   onOpenLiveFolder,
   onOpenLiveChanges,
@@ -236,6 +257,24 @@ export const AppHeader = React.memo<AppHeaderProps>(({
       </div>
 
       <div className="flex items-center gap-1 md:gap-2">
+        {/* Agent Response visibility. Below `lg` the left rail and the open
+            sidebar that both carry this toggle are unmounted, so without it
+            here a hidden panel could not be brought back at exactly the widths
+            where hiding it buys the most room. */}
+        {showAgentResponseToggle && (
+          <div className="flex items-center gap-0.5 lg:hidden">
+            <HeaderIconButton
+              onClick={onToggleAgentResponse}
+              title={agentResponseToggleLabel(!!isAgentResponseVisible)}
+              pressed={!!isAgentResponseVisible}
+              badge={!isAgentResponseVisible && agentResponseUnreadCount > 0}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4 5h16v14H4z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M10 5v14" />
+            </HeaderIconButton>
+          </div>
+        )}
+
         {/* Live workspace navigation is pinned in the mobile header, not in
             the document viewport, so it never overlaps selected text or Send. */}
         {(showLiveMessagePicker || showLiveFolder || showLiveChanges) && (
