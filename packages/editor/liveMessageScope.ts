@@ -27,6 +27,24 @@ export function changedLivePaneSessionIds(
   return changed;
 }
 
+/**
+ * Whether a session boundary actually removes a review draft. The caller owns
+ * the draft predicate because this module deliberately does not know the
+ * editor's annotation-state shape.
+ */
+export function hasMessageStateDraftsForChangedPanes<T>(
+  states: ReadonlyMap<string, T>,
+  previous: readonly LiveScopedMessage[],
+  changedPaneIds: ReadonlySet<string>,
+  hasDraft: (state: T) => boolean,
+): boolean {
+  if (changedPaneIds.size === 0) return false;
+  const paneByMessageId = new Map(previous.map((message) => [message.messageId, message.paneId]));
+  return [...states].some(([messageId, state]) =>
+    changedPaneIds.has(paneByMessageId.get(messageId) ?? "") && hasDraft(state),
+  );
+}
+
 /** Drops cached browser-only drafts belonging to panes whose Pi session changed. */
 export function discardMessageStatesForChangedPanes<T>(
   states: ReadonlyMap<string, T>,
