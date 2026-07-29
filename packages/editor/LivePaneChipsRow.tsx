@@ -25,7 +25,7 @@ const PaneChipContext = ({ percent, warning }: { percent: number | null; warning
   return (
     <span
       className={`inline-flex items-center rounded px-1 text-[10px] font-medium tabular-nums ${
-        warning ? 'bg-warning/20 text-warning-foreground' : 'text-muted-foreground/80'
+        warning ? 'bg-warning/20 text-warning-strong' : 'text-muted-foreground/80'
       }`}
       title={warning ? `Context ${percent}% — near full` : `Context ${percent}%`}
     >
@@ -78,7 +78,7 @@ export const LivePaneChipButton = ({
               chip.activity.tone === 'active'
                 ? 'text-primary'
                 : chip.activity.tone === 'waiting'
-                  ? 'text-warning-foreground'
+                  ? 'text-warning-strong'
                   : chip.activity.tone === 'blocked'
                     ? 'text-destructive'
                     : 'text-muted-foreground/60'

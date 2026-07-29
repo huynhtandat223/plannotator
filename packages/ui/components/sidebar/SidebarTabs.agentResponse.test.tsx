@@ -51,7 +51,7 @@ test.skipIf(!hasDom)('offers no panel flag outside a live session', async () => 
   expect(flag(await render({ showAgentResponseTab: true }))).toBeNull();
 });
 
-test.skipIf(!hasDom)('puts the panel toggle in the existing rail, ahead of the other flags', async () => {
+test.skipIf(!hasDom)('puts the panel toggle in the existing rail, in its last slot', async () => {
   const toggles: number[] = [];
   const el = await render({
     showAgentResponseTab: true,
@@ -63,7 +63,12 @@ test.skipIf(!hasDom)('puts the panel toggle in the existing rail, ahead of the o
   expect(control).toBeTruthy();
   // Same rail, same flag shape — one left-edge control strip, not two.
   expect(control.className).toContain('sidebar-tab-flag');
-  expect(Array.from(rail.children).indexOf(control)).toBe(0);
+  // LAST, not first: the captain reads the flags above it as document
+  // navigation (contents, files, changes) and asked for Agent Response to sit
+  // beneath them as the rail's final slot.
+  const children = Array.from(rail.children);
+  expect(children.indexOf(control)).toBe(children.length - 1);
+  expect(children.length).toBeGreaterThan(1);
 
   await act(async () => control.dispatchEvent(new MouseEvent('click', { bubbles: true })));
   expect(toggles).toEqual([1]);

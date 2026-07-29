@@ -1,5 +1,10 @@
 import { expect, test } from 'bun:test';
-import { SESSION_PREVIEW_MAX_CHARS, sessionAge, sessionPreview } from './sessionRowPreview';
+import {
+  SESSION_PREVIEW_MAX_CHARS,
+  sessionAge,
+  sessionPreview,
+  sessionRowAccessibleName,
+} from './sessionRowPreview';
 
 test('strips the markdown syntax a live pane actually emits', () => {
   // Verbatim shape of a real switcher row before this helper existed.
@@ -63,4 +68,41 @@ test('reports a compact age and stays silent when the host sent none', () => {
   expect(at('2026-07-29T15:00:30Z')).toBe('now');
   expect(sessionAge(undefined, now)).toBeNull();
   expect(sessionAge('not-a-date', now)).toBeNull();
+});
+
+// --- accessible name -------------------------------------------------------
+
+test('composes a switcher row name with separated, labelled fields', () => {
+  // The bug this replaces, measured verbatim from the live surface:
+  //   "●firstmate · fm-plannotator-uiux-top10-audit1m4The Close path is…"
+  // where "1m" (age) ran into "4" (unread) and read as "one m four".
+  expect(
+    sessionRowAccessibleName({
+      identity: 'firstmate · fm-plannotator-uiux-top10-audit',
+      activity: 'Thinking…',
+      age: '1m',
+      unread: 4,
+      preview: 'The Close path is confirmed',
+    }),
+  ).toBe(
+    'firstmate · fm-plannotator-uiux-top10-audit, Thinking…, last active 1m ago, 4 unread responses, latest: The Close path is confirmed',
+  );
+});
+
+test('gives the unread count a unit and gets the singular right', () => {
+  const name = sessionRowAccessibleName({ identity: 'ws · tab', unread: 1 });
+  expect(name).toContain('1 unread response');
+  expect(name).not.toContain('1 unread responses');
+});
+
+test('omits fields the host did not supply rather than inventing them', () => {
+  // No timestamp, no activity, nothing unread, no preview.
+  expect(sessionRowAccessibleName({ identity: 'ws · tab' })).toBe('ws · tab');
+  expect(sessionRowAccessibleName({ identity: 'ws · tab', unread: 0, age: null, activity: null }))
+    .toBe('ws · tab');
+});
+
+test('reads "now" as a phrase rather than a duration', () => {
+  expect(sessionRowAccessibleName({ identity: 'ws · tab', age: 'now' })).toBe('ws · tab, active now');
+  expect(sessionRowAccessibleName({ identity: 'ws · tab', age: '3h' })).toBe('ws · tab, last active 3h ago');
 });

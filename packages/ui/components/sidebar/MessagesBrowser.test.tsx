@@ -369,8 +369,14 @@ test.skipIf(!hasDom)('Jump to latest reliably targets the chronological newest r
   await act(async () => {
     scroller.dispatchEvent(new Event('scroll'));
   });
-  const jump = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Jump to latest');
+  // The selection is already the newest row here, so the control on offer is
+  // the pure SCROLL one. Its label says so: the pair of near-identical
+  // "Jump to latest" / "Back to latest" buttons that could both render at once
+  // is now one control that states its own effect.
+  const jump = Array.from(host.querySelectorAll('button')).find((button) => button.textContent === 'Scroll to newest');
   expect(jump).toBeTruthy();
+  // And only one of the two ever renders.
+  expect(Array.from(host.querySelectorAll('button')).some((b) => b.textContent === 'Open newest response')).toBe(false);
   await act(async () => {
     jump!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   });

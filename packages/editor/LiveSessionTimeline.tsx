@@ -3,7 +3,7 @@ import { MessagesBrowser, type CaptainEcho, type PickerMessage } from '@plannota
 import { OverlayScrollArea } from '@plannotator/ui/components/OverlayScrollArea';
 import { useIsMobile } from '@plannotator/ui/hooks/useIsMobile';
 import { deriveLivePaneChips, type LivePaneChip } from './livePaneChips';
-import { sessionAge, sessionPreview } from './live/sessionRowPreview';
+import { sessionAge, sessionPreview, sessionRowAccessibleName } from './live/sessionRowPreview';
 import { type LiveSessionKey } from './live/liveSessionTimeline';
 
 export type LiveSessionTimelineProps = {
@@ -40,7 +40,7 @@ const sanitizeLabel = (label?: string | null): string => {
 
 const toneClass = (tone?: string): string =>
   tone === 'blocked' ? 'text-destructive'
-    : tone === 'waiting' ? 'text-warning-foreground'
+    : tone === 'waiting' ? 'text-warning-strong'
       : tone === 'active' ? 'text-primary'
         : 'text-muted-foreground/70';
 
@@ -111,6 +111,18 @@ const SessionRow = ({
       // within it, rather than a tab stop per live pane.
       tabIndex={active ? 0 : -1}
       onClick={onSelect}
+      // Composed explicitly rather than left to DOM text order, which ran the
+      // age straight into the unread badge ("…audit1m4The Close path…") and
+      // gave the `●`/`○` state glyph no text equivalent at all. See
+      // `sessionRowAccessibleName`. Everything inside is decorative once the
+      // name is set, so the visual bits are hidden from the a11y tree.
+      aria-label={sessionRowAccessibleName({
+        identity: title,
+        activity,
+        age,
+        unread,
+        preview: session.preview,
+      })}
       className={`relative w-full rounded-md border py-1.5 pl-3 pr-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
         active
           ? 'border-primary/50 bg-primary/10 text-foreground'
@@ -118,9 +130,9 @@ const SessionRow = ({
       }`}
     >
       {active && <span aria-hidden="true" className="absolute inset-y-1.5 left-0 w-0.5 rounded-full bg-primary" />}
-      <span className="flex min-w-0 items-center gap-1.5">
+      <span aria-hidden="true" className="flex min-w-0 items-center gap-1.5">
         {session.activity && (
-          <span aria-hidden="true" className={`shrink-0 ${toneClass(session.activity.tone)}`}>
+          <span className={`shrink-0 ${toneClass(session.activity.tone)}`}>
             {session.activity.glyph}
           </span>
         )}
@@ -130,10 +142,9 @@ const SessionRow = ({
         {age && <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/70">{age}</span>}
         {unread > 0 && <UnreadBadge count={unread} scope="" />}
       </span>
-      <span className="mt-0.5 block truncate text-[11px] leading-snug text-muted-foreground">
+      <span aria-hidden="true" className="mt-0.5 block truncate text-[11px] leading-snug text-muted-foreground">
         {session.preview}
       </span>
-      {activity && <span className="sr-only">Activity: {activity}.</span>}
     </button>
   );
 };
@@ -399,7 +410,19 @@ export const LiveSessionTimeline = React.memo(({
   const activeIdentity = <SessionIdentity workspace={workspace} tab={tab} fallback={fallback} />;
   // A single pane has nothing to switch to, so it gets no switcher at all.
   const canSwitch = sessions.length > 1;
-  const switcherLabel = `Switch live pane — currently ${title}, ${sessions.length} panes`;
+  // The unread count belongs IN the name. The switcher carried a bare numeric
+  // badge that a sighted captain had to interpret — and that a screen-reader
+  // captain never heard at all, because the name stopped at the pane count. The
+  // badge counts replies in the panes you are NOT reading, which is a different
+  // number from the "N new replies" in this pane shown just below it; saying so
+  // is what stops the two from reading as one contradictory pair.
+  const switcherLabel = [
+    `Switch live pane — currently ${title}`,
+    `${sessions.length} panes`,
+    unreadElsewhere > 0
+      ? `${unreadElsewhere} unread in other panes`
+      : null,
+  ].filter(Boolean).join(', ');
   const openSwitcher = () => (isMobile ? setMobileSessionsOpen(true) : setSessionListOpen(!sessionListOpen));
   const switcherExpanded = isMobile ? mobileSessionsOpen : sessionListOpen;
 
@@ -445,12 +468,31 @@ export const LiveSessionTimeline = React.memo(({
         {activeTimelineMessages.length > 1 && (
           <button
             type="button"
+            data-live-history-toggle="true"
             onClick={() => setMobileHistoryOpen(true)}
             aria-haspopup="dialog"
             aria-expanded={mobileHistoryOpen}
-            className="shrink-0 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs font-medium hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:hidden"
+            // The count rides the button because below `lg` the panel renders
+            // only the SELECTED response — the new-replies banner inside the
+            // history list is behind this button. Without it the sole way to
+            // discover that 15 replies had arrived was to open the sheet on
+            // spec, so the mobile reader had no unread signal at all.
+            aria-label={
+              newReplyCount > 0
+                ? `Response history — ${newReplyCount} new ${newReplyCount === 1 ? 'reply' : 'replies'}`
+                : 'Response history'
+            }
+            className="shrink-0 inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs font-medium hover:bg-muted/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:hidden"
           >
             History
+            {newReplyCount > 0 && (
+              <span
+                aria-hidden="true"
+                className="inline-flex min-w-4 items-center justify-center rounded-full bg-primary px-1 text-[10px] font-semibold leading-4 text-primary-foreground"
+              >
+                {newReplyCount > 99 ? '99+' : newReplyCount}
+              </span>
+            )}
           </button>
         )}
       </header>

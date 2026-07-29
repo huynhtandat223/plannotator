@@ -25,7 +25,7 @@ export const LiveActivityChip = ({
     chip.tone === 'active'
       ? 'border-primary/40 bg-primary/15 text-foreground'
       : chip.tone === 'waiting'
-        ? 'border-warning/40 bg-warning/15 text-warning-foreground'
+        ? 'border-warning/40 bg-warning/15 text-warning-strong'
         : chip.tone === 'blocked'
           ? 'border-destructive/40 bg-destructive/15 text-destructive'
           : 'border-border bg-muted/50 text-foreground/80';

@@ -779,16 +779,20 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
           </label>
         )}
       </div>
-      {isAwayFromLatest && (
-        <button
-          type="button"
-          onClick={jumpToLatest}
-          className="w-full mb-1 px-2 py-1 rounded text-[10px] font-medium text-primary border border-primary/30 bg-primary/10 hover:bg-primary/20 transition-colors"
-        >
-          Jump to latest
-        </button>
-      )}
-      {selectedMessageId !== undefined && selectedMessageId !== null && messages[latestIndex] !== undefined && selectedMessageId !== messages[latestIndex].messageId && (
+      {/* One control, never two.
+
+          These used to be a pair of full-width, identically-styled, primary
+          tinted buttons reading "Jump to latest" and "Back to latest" — one
+          word apart, stacked, and doing genuinely different things: the first
+          only SCROLLS the list, the second CHANGES which response is open. They
+          could render simultaneously, and nobody could tell which was which.
+
+          Selecting is the stronger action and subsumes the scroll, so when the
+          reader is on an older response that is the one offered; the pure
+          scroll control only appears when the selection is already the newest
+          and the list has merely been scrolled away from it. Both now say what
+          they do rather than sharing a vague "latest". */}
+      {selectedMessageId !== undefined && selectedMessageId !== null && messages[latestIndex] !== undefined && selectedMessageId !== messages[latestIndex].messageId ? (
         <button
           type="button"
           onClick={() => {
@@ -805,9 +809,17 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
           }}
           className="w-full mb-1 px-2 py-1 rounded text-[10px] font-medium text-primary border border-primary/30 bg-primary/10 hover:bg-primary/20 transition-colors"
         >
-          Back to latest
+          Open newest response
         </button>
-      )}
+      ) : isAwayFromLatest ? (
+        <button
+          type="button"
+          onClick={jumpToLatest}
+          className="w-full mb-1 px-2 py-1 rounded text-[10px] font-medium text-primary border border-primary/30 bg-primary/10 hover:bg-primary/20 transition-colors"
+        >
+          Scroll to newest
+        </button>
+      ) : null}
       <div className="space-y-0.5">
         {herdGroups
           ? herdGroups.map((group) => (

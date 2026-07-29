@@ -188,6 +188,8 @@ import {
   type LiveSessionTimelineState,
 } from './live/liveSessionTimeline';
 import { LivePaneLimitationsNotice } from './LivePaneLimitationsNotice';
+import { ReaderStalenessBanner } from './ReaderStalenessBanner';
+import { readerStaleness } from './live/readerStaleness';
 import {
   livePaneAgentLabel,
   livePaneCapabilityReason,
@@ -304,7 +306,7 @@ const LivePaneContextBar = ({ context }: { context: LivePaneContext }) => {
   const clamped = pct === null ? 0 : Math.max(0, Math.min(100, pct));
   const level = clamped >= 90 ? 'critical' : clamped >= 75 ? 'warn' : 'ok';
   const barColor = level === 'critical' ? 'bg-destructive' : level === 'warn' ? 'bg-warning' : 'bg-primary';
-  const pctColor = level === 'critical' ? 'text-destructive' : level === 'warn' ? 'text-warning-foreground' : 'text-foreground';
+  const pctColor = level === 'critical' ? 'text-destructive' : level === 'warn' ? 'text-warning-strong' : 'text-foreground';
   return (
     <span className="inline-flex items-center gap-1.5" title={`Context: ${context.label}${pct === null ? '' : ` (${pct.toFixed(1)}%)`}`}>
       <span className="text-[10px] uppercase tracking-wide text-muted-foreground/70">ctx</span>
@@ -315,6 +317,15 @@ const LivePaneContextBar = ({ context }: { context: LivePaneContext }) => {
         aria-valuemin={0}
         aria-valuemax={100}
         aria-label="Context usage"
+        // Without this the bar announced a bare number with no unit and no
+        // sense of whether it was good or bad — and `aria-valuetext` was
+        // present but EMPTY, which is worse than absent. `null` percent means
+        // the host sent no usable signal; say so rather than implying zero.
+        aria-valuetext={
+          pct === null
+            ? `Context usage unknown: ${context.label}`
+            : `${pct.toFixed(0)}% of context used${level === 'critical' ? ', critical' : level === 'warn' ? ', high' : ''}`
+        }
       >
         <span className={`absolute inset-y-0 left-0 rounded-full ${barColor}`} style={{ width: `${clamped}%` }} />
       </span>
@@ -390,9 +401,16 @@ const LivePaneMetaBar = ({ meta }: { meta: LivePaneMeta }) => {
       )}
       {meta.context && <LivePaneContextBar context={meta.context} />}
       {meta.used && (
-        <span className="inline-flex items-center gap-1">
-          <span className="text-muted-foreground/70">used</span>
-          <span className="font-medium tabular-nums text-foreground/90">{meta.used}</span>
+        // "used 970.3k" of WHAT was anybody's guess. The visible text stays
+        // compact because this strip is dense, so the unit rides the
+        // accessible name and the tooltip instead of the layout.
+        <span
+          className="inline-flex items-center gap-1"
+          title={`${meta.used} tokens used in this pane's session`}
+          aria-label={`${meta.used} tokens used`}
+        >
+          <span aria-hidden="true" className="text-muted-foreground/70">used</span>
+          <span aria-hidden="true" className="font-medium tabular-nums text-foreground/90">{meta.used}</span>
         </span>
       )}
       {meta.compacted && (
@@ -612,7 +630,24 @@ const App: React.FC = () => {
   const [exitWarningAction, setExitWarningAction] = useState<'close' | 'approve'>('close');
   const [showAgentWarning, setShowAgentWarning] = useState(false);
   const [agentWarningMessage, setAgentWarningMessage] = useState('');
-  const [isPanelOpen, setIsPanelOpen] = useState(() => window.innerWidth >= 768);
+  /**
+   * The right-hand annotations panel starts CLOSED.
+   *
+   * It used to open on every desktop load, which meant a fixed 288px column
+   * spending — measured at 1600x1000 — 16.8% of the viewport to render 52
+   * characters of "No annotations yet / Select text to annotate", against 9.6%
+   * for the agent response the captain actually came to read. Below the mobile
+   * breakpoint that same open state is a scrimmed full-height sheet, so the
+   * first thing a narrow viewport showed was an empty modal over the document.
+   *
+   * It is not hidden, only unopened: every path that creates or selects an
+   * annotation already opens it, and `annotationsAppearedRef` below opens it
+   * for annotations that arrive at load (a shared URL, a restored draft).
+   */
+  const [isPanelOpen, setIsPanelOpen] = useState(false);
+  /** Set once the panel has been opened for an existing set of annotations, so
+   *  a captain who deliberately closes it is not fought on the next render. */
+  const annotationsAppearedRef = useRef(false);
   const [rightSidebarTab, setRightSidebarTab] = useState<'annotations' | 'ai' | 'ex-ai'>('annotations');
   const [mobileSettingsOpen, setMobileSettingsOpen] = useState(false);
   const [editorMode, setEditorMode] = useState<EditorMode>(getEditorMode);
@@ -1446,6 +1481,18 @@ const App: React.FC = () => {
     return activeLiveTimelineMessages;
   }, [liveMessageReview, activeLiveTimelineMessages, recentMessages]);
 
+  // How far behind the newest response the reader is sitting. Derived from the
+  // same newest-first timeline the panel renders, so the banner and the panel
+  // can never disagree about which response is the latest.
+  const readerStalenessState = React.useMemo(
+    () => readerStaleness(liveMessageReview ? activeLiveTimelineMessages : null, selectedMessageId),
+    [liveMessageReview, activeLiveTimelineMessages, selectedMessageId],
+  );
+  // Read by the jump handler, which must stay identity-stable: putting the id
+  // in its dep array would rebuild the callback on every live frame.
+  const readerStalenessRef = React.useRef<string | null>(null);
+  readerStalenessRef.current = readerStalenessState.latestMessageId;
+
   // Rail-toggle inputs, derived straight from session identity rather than from
   // the panel's chip derivation.
   const liveSessionKeys = React.useMemo(() => {
@@ -1595,6 +1642,21 @@ const App: React.FC = () => {
     setLiveSessionTimeline(nextTimeline);
     setLiveTimelineJumpSignal((current) => current + 1);
   }, []);
+
+  /**
+   * The in-reader banner's only action: move the reader onto the newest
+   * response in the active pane, on an explicit click and never otherwise.
+   *
+   * It goes through the same `handleSelectMessage` every other selection uses,
+   * so per-message annotation state is saved and restored exactly as if the
+   * captain had clicked the row — and it also clears the panel's unread marks,
+   * so the two surfaces cannot end up disagreeing about what has been seen.
+   */
+  const handleReadNewestResponse = React.useCallback(() => {
+    const latestMessageId = readerStalenessRef.current;
+    if (latestMessageId) handleSelectMessage(latestMessageId);
+    handleJumpToLiveReplies();
+  }, [handleSelectMessage, handleJumpToLiveReplies]);
 
   // Applies the Ex-only server snapshot without changing the normal
   // annotate-last state flow. Existing message states stay keyed by messageId,
@@ -2058,6 +2120,15 @@ const App: React.FC = () => {
       globalAttachments.length,
     ],
   );
+  // Annotations that arrive at load rather than by a click — a shared URL, a
+  // restored draft — have no "create" path to open the panel for them, so this
+  // is what keeps "hidden only while empty" true rather than "hidden until you
+  // annotate". It fires once: closing the panel afterwards sticks.
+  useEffect(() => {
+    if (!hasAnyAnnotations || annotationsAppearedRef.current) return;
+    annotationsAppearedRef.current = true;
+    if (window.innerWidth >= 768) setIsPanelOpen(true);
+  }, [hasAnyAnnotations]);
   const feedbackAnnotationCount = planReview
     ? planReviewDraftCount
     : messageMultiSelectMode
@@ -4005,13 +4076,13 @@ const App: React.FC = () => {
       const response = await fetch(`/api/process-panels?paneId=${encodeURIComponent(selectedLiveMessage.paneId)}`, { method: 'DELETE' });
       if (!response.ok) {
         const body = await response.json().catch(() => ({})) as { error?: string };
-        throw new Error(body.error || 'Failed to close Pi panel');
+        throw new Error(body.error || `Failed to end the ${selectedLivePaneAgentLabel} pane`);
       }
       // Do not set `submitted`: this closes only the Herdr pane. The viewer
       // remains open and receives the next live snapshot.
-      toast('Pi panel closed', { description: 'This viewer remains open.' });
+      toast(`${selectedLivePaneAgentLabel} pane ended`, { description: 'This viewer remains open.' });
     } catch (error) {
-      toast(error instanceof Error ? error.message : 'Failed to close Pi panel', { description: 'The panel is still running.' });
+      toast(error instanceof Error ? error.message : `Failed to end the ${selectedLivePaneAgentLabel} pane`, { description: 'The pane is still running.' });
     } finally {
       setIsExiting(false);
     }
@@ -5267,13 +5338,13 @@ const App: React.FC = () => {
           showAnnotationsWarning={hasFeedbackToSend}
           showLiveMessagePicker={false}
           showLiveProcessPanel={liveMessageReview}
-          onLiveProcessPanelCreated={({ panelName }) => toast('Pi panel created', { description: `${panelName} is ready in Herdr.` })}
+          onLiveProcessPanelCreated={({ panelName }) => toast('Agent pane created', { description: `${panelName} is ready in Herdr.` })}
           showLiveFolder={liveMessageReview && !!projectRoot && !archive.archiveMode}
           showLiveChanges={liveMessageReview && !!projectRoot && !archive.archiveMode}
           onOpenLiveMessages={undefined}
           onOpenLiveFolder={() => openSidebarTab('files')}
           onOpenLiveChanges={() => openSidebarTab('changes')}
-          showAgentResponseToggle={liveMessageReview}
+          showAgentResponseToggle={agentResponseHomes.header}
           isAgentResponseVisible={liveResponsePanelVisible}
           onToggleAgentResponse={toggleLiveResponsePanel}
           agentResponseUnreadCount={liveUnreadTotal}
@@ -5287,6 +5358,7 @@ const App: React.FC = () => {
           onCallbackApprove={handleCallbackApprove}
           onAnnotateExit={handleHeaderAnnotateExit}
           liveCloseCurrentPane={liveMessageReview && Boolean(selectedLiveMessage?.paneId)}
+          livePaneAgentLabel={selectedLivePaneAgentLabel}
           onGoalSetupExit={handleGoalSetupExit}
           onGoalSetupSubmit={handleGoalSetupSubmit}
           onAnnotateFeedback={handleHeaderAnnotateFeedback}
@@ -5337,7 +5409,7 @@ const App: React.FC = () => {
 
         {activeEditableDocument?.diskConflict && (
           <div className="bg-warning/10 border-b border-warning/25 px-4 py-2 flex items-center gap-3 flex-shrink-0">
-            <span className="min-w-0 flex-1 text-xs text-warning-foreground">
+            <span className="min-w-0 flex-1 text-xs text-warning-strong">
               {activeEditableDocument.basename} changed on disk{isEditingMarkdown ? ' while you were editing' : ''}.
             </span>
             {canOverwriteDiskConflict && (
@@ -5361,7 +5433,7 @@ const App: React.FC = () => {
 
         {activeEditableDocument?.missingOnDisk && !activeEditableDocument.diskConflict && (
           <div className="bg-warning/10 border-b border-warning/25 px-4 py-2 flex items-center gap-3 flex-shrink-0">
-            <span className="min-w-0 flex-1 text-xs text-warning-foreground">
+            <span className="min-w-0 flex-1 text-xs text-warning-strong">
               {activeEditableDocument.basename} no longer exists on disk. Save to recreate it.
             </span>
             <button
@@ -5405,7 +5477,7 @@ const App: React.FC = () => {
             status === 'delivery_failed'
               ? 'border-destructive/25 bg-destructive/10 text-destructive'
               : status === 'agent_stopped'
-                ? 'border-warning/25 bg-warning/10 text-warning-foreground'
+                ? 'border-warning/25 bg-warning/10 text-warning-strong'
                 : 'border-primary/20 bg-primary/5 text-muted-foreground'
           }`}>
             {isSubmitting || status === 'submitting' ? (
@@ -5447,7 +5519,7 @@ const App: React.FC = () => {
                     ● Working duplication. */}
                 {activityChip
                   ? <LiveActivityChip chip={activityChip} paneName={selectedPaneName} />
-                  : agentStatusLabel && <span className={`shrink-0 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${agentStatus === 'working' ? 'border-primary/30 bg-primary/10 text-foreground' : agentStatus === 'blocked' ? 'border-warning/30 bg-warning/10 text-warning-foreground' : 'border-border bg-muted/40 text-muted-foreground'}`}><span aria-hidden="true">●</span>{agentStatusLabel}</span>}
+                  : agentStatusLabel && <span className={`shrink-0 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${agentStatus === 'working' ? 'border-primary/30 bg-primary/10 text-foreground' : agentStatus === 'blocked' ? 'border-warning/30 bg-warning/10 text-warning-strong' : 'border-border bg-muted/40 text-muted-foreground'}`}><span aria-hidden="true">●</span>{agentStatusLabel}</span>}
                 {liveMessageReview && !liveWorkspaceMode && <LiveActivityTrail steps={activityTrailSteps} />}
               </span>
             )}
@@ -5524,7 +5596,11 @@ const App: React.FC = () => {
               onToggleAgentTerminal={toggleAgentTerminal}
               hasMessageAnnotations={activeMessageAnnotationCounts.size > 0}
               hasFileAnnotations={hasFileAnnotations}
-              className="hidden lg:flex absolute left-0 top-0 z-20"
+              // Live review keeps the rail at every width, because the Agent
+              // Response toggle lives here on desktop AND mobile now. The
+              // document's matching left gutter below is driven by the same
+              // condition so the rail can never overlap the text beside it.
+              className={`${liveMessageReview ? 'flex' : 'hidden lg:flex'} absolute left-0 top-0 z-20`}
             />
           )}
 
@@ -5623,7 +5699,7 @@ const App: React.FC = () => {
                   list: 'Live Pi responses · newest first',
                   empty: 'No live Pi responses found.',
                   mobileTitle: 'Workspaces',
-                  mobileSubtitle: 'Pick a response from a live Pi panel',
+                  mobileSubtitle: 'Pick a response from a live agent pane',
                 } : undefined}
                 showAgentResponseToggle={liveMessageReview}
                 isAgentResponseVisible={liveResponsePanelVisible}
@@ -5639,7 +5715,7 @@ const App: React.FC = () => {
 
           <OverlayScrollArea
             element="main"
-            className={`flex-1 min-w-0 ${isHtmlSurface ? 'bg-background' : `${gridEnabled ? "bg-grid " : "bg-card "}${!goalSetupMode && !sidebar.isOpen && !isAgentTerminalOpen && (wideModeType === null || railMounted) ? 'lg:pl-[30px]' : ''}`}`}
+            className={`flex-1 min-w-0 ${isHtmlSurface ? 'bg-background' : `${gridEnabled ? "bg-grid " : "bg-card "}${!goalSetupMode && !sidebar.isOpen && !isAgentTerminalOpen && (wideModeType === null || railMounted) ? (liveMessageReview ? 'pl-[30px]' : 'lg:pl-[30px]') : ''}`}`}
             data-print-region="document"
             onViewportReady={handleViewportReady}
           >
@@ -5745,6 +5821,13 @@ const App: React.FC = () => {
                     <p className="text-sm">Pick a markdown or HTML file from the sidebar to begin.</p>
                   </div>
                 </div>
+              )}
+              {/* Staleness is stated in the document area, above everything the
+                  captain reads — the panel's own jump control sits inside a
+                  block that can be hidden from the rail, and below `lg` it did
+                  not render at all. Selection still never moves on its own. */}
+              {liveMessageReview && !goalSetupMode && !isPlanDiffActive && (
+                <ReaderStalenessBanner state={readerStalenessState} onJumpToLatest={handleReadNewestResponse} />
               )}
               <div className={`w-full relative ${
                 isHtmlSurface
@@ -5942,6 +6025,7 @@ const App: React.FC = () => {
                     onSelectAnnotation={handleSelectAnnotation}
                     selectedAnnotationId={selectedAnnotationId}
                     directMessage={sendsGlobalCommentAsUserMessage}
+                    directMessageAgentLabel={selectedLivePaneAgentLabel}
                     disableSelectionAnnotations={selectedLiveMessageIsWaitingDocument}
                     imageFeedbackTarget={selectedLiveImageFeedbackTarget}
                     globalCommentDraftKey={globalCommentDraftKey}
@@ -6050,7 +6134,7 @@ const App: React.FC = () => {
                                 : recentMessages.findIndex((message) => message.messageId === selectedMessageId) + 1,
                               total: liveWorkspaceMode ? selectedLivePaneMessages.length : recentMessages.length,
                               label: liveWorkspaceMode ? 'Response' : undefined,
-                              title: liveWorkspaceMode ? 'Pick a response from a live Pi panel' : undefined,
+                              title: liveWorkspaceMode ? 'Pick a response from a live agent pane' : undefined,
                               onOpen: () => sidebar.open('messages'),
                             }
                           : undefined
@@ -6270,9 +6354,9 @@ const App: React.FC = () => {
             setShowLivePaneCloseConfirm(false);
             void closeSelectedLivePane();
           }}
-          title="Close Pi Panel?"
-          message="This stops and closes the selected live Pi panel in Herdr. This browser viewer stays open."
-          confirmText="Close Panel"
+          title={`End this ${selectedLivePaneAgentLabel} pane?`}
+          message={`This stops and closes the selected live ${selectedLivePaneAgentLabel} pane in Herdr, ending that agent's session. This browser viewer stays open.`}
+          confirmText="End pane"
           cancelText="Cancel"
           variant="warning"
           showCancel

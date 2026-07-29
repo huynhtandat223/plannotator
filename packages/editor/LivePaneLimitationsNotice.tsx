@@ -36,7 +36,7 @@ export const LivePaneLimitationsNotice = ({
   const [expanded, setExpanded] = useState(false);
   if (limitations.length === 0 && !composerDeliveryCaveat) return null;
   return (
-    <div className="border-b border-warning/25 bg-warning/10 px-4 py-2 text-xs text-warning-foreground flex-shrink-0">
+    <div className="border-b border-warning/25 bg-warning/10 px-4 py-2 text-xs text-warning-strong flex-shrink-0">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span aria-hidden="true">⚠</span>
         <span className="font-medium">{agentLabel} panes are limited in Plannotator.</span>

@@ -97,8 +97,11 @@ export const HerdrProcessPanelLauncher: React.FC<HerdrProcessPanelLauncherProps>
       <button
         type="button"
         onClick={() => setOpen(true)}
-        aria-label="New Pi panel"
-        title="New Pi panel"
+        // The command below is a free-text field that merely DEFAULTS to `pi`,
+        // so this launcher was never Pi-specific and naming one agent kind here
+        // just misdescribed it.
+        aria-label="New agent pane"
+        title="New agent pane"
         className="flex h-8 w-8 items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
       >
         <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
@@ -107,8 +110,8 @@ export const HerdrProcessPanelLauncher: React.FC<HerdrProcessPanelLauncherProps>
       </button>
       <DialogContent className="max-w-md" hideClose={isSubmitting}>
         <DialogHeader>
-          <DialogTitle>New Pi panel</DialogTitle>
-          <DialogDescription>Starts a background Pi panel in the selected live Herdr workspace.</DialogDescription>
+          <DialogTitle>New agent pane</DialogTitle>
+          <DialogDescription>Starts a background pane running the command below in the selected live Herdr workspace.</DialogDescription>
         </DialogHeader>
         <form className="space-y-4 overflow-y-auto px-5 py-4" onSubmit={submit}>
           <label className="block space-y-1.5">
