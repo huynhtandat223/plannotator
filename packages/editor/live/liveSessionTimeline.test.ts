@@ -160,7 +160,7 @@ describe('live session timeline state', () => {
 });
 
 describe('live timeline message identity', () => {
-  test('keeps one chronological session projection stable across telemetry-only frames', () => {
+  test('keeps one newest-first session projection stable across telemetry-only frames', () => {
     const previousWire = [
       message('p1:r2', 'p1', 'pi-1', 'r2', { text: 'Newest', agentStatus: 'working' }),
       message('p1:r1', 'p1', 'pi-1', 'r1', { text: 'Oldest', agentStatus: 'working' }),
@@ -174,7 +174,8 @@ describe('live timeline message identity', () => {
     ];
     const second = stableLiveTimelineMessages(first, telemetryWire, 'pi:pi-1');
 
-    expect(first.map((item) => item.messageId)).toEqual(['p1:r1', 'p1:r2']);
+    // Newest-first: the wire order IS the transcript order, no reversal.
+    expect(first.map((item) => item.messageId)).toEqual(['p1:r2', 'p1:r1']);
     expect(second).toBe(first);
   });
 
@@ -193,7 +194,9 @@ describe('live timeline message identity', () => {
     ], 'pi:pi-1');
 
     expect(next).not.toBe(first);
-    expect(next.map((item) => item.messageId)).toEqual(['p1:r1', 'p1:r2']);
-    expect(next[0]).toBe(first[0]);
+    // The arriving response leads the transcript; the retained older row keeps
+    // its identity, so only the new turn re-renders.
+    expect(next.map((item) => item.messageId)).toEqual(['p1:r2', 'p1:r1']);
+    expect(next[1]).toBe(first[0]);
   });
 });

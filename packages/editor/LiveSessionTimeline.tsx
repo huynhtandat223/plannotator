@@ -9,7 +9,7 @@ import { type LiveSessionKey } from './live/liveSessionTimeline';
 export type LiveSessionTimelineProps = {
   /** Stable newest-first snapshot rows: owns switcher cards and telemetry identity. */
   messages: PickerMessage[];
-  /** Stable oldest-first rows for the active session only: owns transcript scroll. */
+  /** Stable newest-first rows for the active session only: owns transcript scroll. */
   activeTimelineMessages: PickerMessage[];
   activeSessionKey: LiveSessionKey | null;
   selectedMessageId: string | null;
@@ -303,8 +303,13 @@ const NewRepliesJump = ({ count, onJump }: { count: number; onJump: () => void }
  *
  * The panel is ONE pane at a time: the header names the pane you are on and is
  * itself the switcher, so the pane list is a toggle rather than a permanent
- * band. Closed — which is the default, and where a captain reading one agent
- * spends nearly all their time — the response history owns the whole panel.
+ * band. That toggle is anchored LEFT, leading with its disclosure chevron.
+ * Closed — which is the default, and where a captain reading one agent spends
+ * nearly all their time — the response history owns the whole panel.
+ *
+ * The transcript is NEWEST-FIRST in real DOM order, so the response the captain
+ * came for is the first thing they read and the first thing they tab to,
+ * instead of the last row of a chat log they have to scroll to the end of.
  */
 export const LiveSessionTimeline = React.memo(({
   messages,
@@ -370,7 +375,8 @@ export const LiveSessionTimeline = React.memo(({
 
   const selectedMessage = React.useMemo(
     () => activeTimelineMessages.find((message) => message.messageId === selectedMessageId)
-      ?? activeTimelineMessages.at(-1)
+      // Newest-first: the fallback default target is the head of the transcript.
+      ?? activeTimelineMessages[0]
       ?? null,
     [activeTimelineMessages, selectedMessageId],
   );
@@ -394,7 +400,8 @@ export const LiveSessionTimeline = React.memo(({
   // A single pane has nothing to switch to, so it gets no switcher at all.
   const canSwitch = sessions.length > 1;
   const switcherLabel = `Switch live pane — currently ${title}, ${sessions.length} panes`;
-  const openSwitcher = () => (isMobile ? setMobileSessionsOpen(true) : setSessionListOpen((open) => !open));
+  const openSwitcher = () => (isMobile ? setMobileSessionsOpen(true) : setSessionListOpen(!sessionListOpen));
+  const switcherExpanded = isMobile ? mobileSessionsOpen : sessionListOpen;
 
   return (
     <section
@@ -411,20 +418,25 @@ export const LiveSessionTimeline = React.memo(({
               onClick={openSwitcher}
               aria-label={switcherLabel}
               aria-haspopup={isMobile ? 'dialog' : 'listbox'}
-              aria-expanded={isMobile ? mobileSessionsOpen : sessionListOpen}
+              aria-expanded={switcherExpanded}
               aria-controls={isMobile ? undefined : sessionListId}
               title={switcherLabel}
-              className="-ml-1 flex w-full min-w-0 items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-sm hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              /* The toggle sits on the LEFT: its disclosure chevron LEADS at the
+                 panel's left edge and the control hugs its own content, instead
+                 of a full-width label bar with a stray arrow parked on the far
+                 right. `min-h-8` keeps it a real touch target on mobile, where
+                 the same control opens the sheet. */
+              className="-ml-1 flex min-h-8 w-fit max-w-full min-w-0 items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-sm hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring lg:min-h-0"
             >
-              <span className="min-w-0 flex-1 truncate">{activeIdentity}</span>
-              {unreadElsewhere > 0 && <UnreadBadge count={unreadElsewhere} scope=" in other panes" />}
               <svg
                 aria-hidden="true"
                 viewBox="0 0 12 12"
-                className={`h-3 w-3 shrink-0 text-muted-foreground transition-transform ${sessionListOpen && !isMobile ? 'rotate-180' : ''}`}
+                className={`h-3 w-3 shrink-0 text-muted-foreground transition-transform ${switcherExpanded ? '' : '-rotate-90'}`}
               >
                 <path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
+              <span className="min-w-0 truncate">{activeIdentity}</span>
+              {unreadElsewhere > 0 && <UnreadBadge count={unreadElsewhere} scope=" in other panes" />}
             </button>
           ) : (
             <p className="truncate text-sm" title={title}>{activeIdentity}</p>
@@ -467,7 +479,6 @@ export const LiveSessionTimeline = React.memo(({
               selectedMessageId={selectedMessage.messageId}
               onSelect={onSelectMessage}
               annotationCounts={annotationCounts}
-              chronological
               chatLayout
               listLabel="Selected response"
               emptyLabel="No assistant response in this session yet."
@@ -481,7 +492,7 @@ export const LiveSessionTimeline = React.memo(({
       ) : (
         <OverlayScrollArea
           id={historyRegionId}
-          aria-label="Response history"
+          aria-label="Response history — newest first"
           className="min-h-0 flex-1"
           data-live-timeline-scroll="true"
           tabIndex={0}
@@ -494,10 +505,9 @@ export const LiveSessionTimeline = React.memo(({
             onSelect={onSelectMessage}
             annotationCounts={annotationCounts}
             captainEchoes={captainEchoes}
-            chronological
             chatLayout
             autoLoadOnScroll
-            listLabel="Session responses"
+            listLabel="Session responses — newest first"
             emptyLabel="No assistant response in this session yet."
             jumpToLatestSignal={jumpToLatestSignal}
             showCountControl={false}
@@ -535,7 +545,7 @@ export const LiveSessionTimeline = React.memo(({
         >
           <OverlayScrollArea
             id={historyRegionId}
-            aria-label="Response history"
+            aria-label="Response history — newest first"
             className="min-h-0 flex-1"
             data-live-timeline-scroll="true"
             tabIndex={0}
@@ -548,10 +558,9 @@ export const LiveSessionTimeline = React.memo(({
               onSelect={onSelectMessage}
               annotationCounts={annotationCounts}
               captainEchoes={captainEchoes}
-              chronological
               chatLayout
               autoLoadOnScroll={false}
-              listLabel="Session responses"
+              listLabel="Session responses — newest first"
               emptyLabel="No assistant response in this session yet."
               jumpToLatestSignal={jumpToLatestSignal}
               rowBudgetOverride={activeTimelineMessages.length}

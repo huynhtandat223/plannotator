@@ -6,6 +6,8 @@ import {
   MessagesBrowser,
   MESSAGE_PAGE_STEP,
   anchoredScrollTop,
+  anchoredScrollTopForGrowth,
+  anchoredScrollTopForRowShift,
   isNearHistoryEdge,
   resolveRowBudget,
 } from './MessagesBrowser';
@@ -426,6 +428,39 @@ test('anchors the viewport so an incoming SSE frame never scrolls the reader', (
   expect(anchoredScrollTop({ scrollTop: 0, scrollHeight: 1000 }, 1400)).toBe(0);
   // Compensation can never scroll to a negative offset.
   expect(anchoredScrollTop({ scrollTop: 40, scrollHeight: 1000 }, 200)).toBe(0);
+});
+
+test('compensates only the growth that lands above the viewport', () => {
+  const parked = { scrollTop: 400, scrollHeight: 1000 };
+  // Oldest-first `+N more`: history is prepended ABOVE the reader, so they are
+  // pushed down by exactly that much — including from the very top, where they
+  // are sitting ON the history edge and would otherwise be thrown backwards.
+  expect(anchoredScrollTopForGrowth(parked, 1300, 'page-prepend')).toBe(700);
+  expect(anchoredScrollTopForGrowth({ scrollTop: 0, scrollHeight: 1000 }, 1300, 'page-prepend')).toBe(300);
+  // Newest-first `+N more`: history is appended BELOW the reader. Nothing above
+  // them moved, so any compensation would itself scroll them off their place.
+  expect(anchoredScrollTopForGrowth(parked, 1300, 'page-append')).toBe(400);
+  expect(anchoredScrollTopForGrowth(parked, 700, 'page-append')).toBe(400);
+  // A live frame keeps the existing SSE anchor, top-parked exemption included.
+  expect(anchoredScrollTopForGrowth(parked, 1120, 'live')).toBe(520);
+  expect(anchoredScrollTopForGrowth({ scrollTop: 0, scrollHeight: 1000 }, 1400, 'live')).toBe(0);
+});
+
+test('anchors on a real row, because a windowed list barely changes height', () => {
+  // The budget keeps a fixed row count, so a prepended live turn also evicts
+  // one off the far end: total height moves by ~0 while every visible row
+  // slides down a slot. Only measuring a surviving row catches that.
+  expect(anchoredScrollTopForRowShift({ scrollTop: 240 }, 82, 'live')).toBe(322);
+  expect(anchoredScrollTopForRowShift({ scrollTop: 240 }, -82, 'live')).toBe(158);
+  // Both growth-anchor exemptions survive: top-parked is following the latest,
+  // and appended history below the viewport never moves the reader.
+  expect(anchoredScrollTopForRowShift({ scrollTop: 0 }, 82, 'live')).toBe(0);
+  expect(anchoredScrollTopForRowShift({ scrollTop: 240 }, 82, 'page-append')).toBe(240);
+  // A prepended page DOES move a top-parked reader — they sit on the edge it
+  // was inserted at, so leaving them would throw them back into history.
+  expect(anchoredScrollTopForRowShift({ scrollTop: 0 }, 300, 'page-prepend')).toBe(300);
+  // Never past the top of the list.
+  expect(anchoredScrollTopForRowShift({ scrollTop: 40 }, -300, 'live')).toBe(0);
 });
 
 test('composes the row budget from the quota plus paged rows', () => {

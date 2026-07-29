@@ -9,6 +9,10 @@ import React from "react";
 import type { SidebarTab } from "../../hooks/useSidebar";
 import { MessagesIcon } from "../icons/MessagesIcon";
 import { ReviewAgentsIcon } from "../ReviewAgentsIcon";
+import {
+  AgentResponsePanelIcon,
+  agentResponseToggleLabel,
+} from "../agentResponsePanelToggle";
 
 interface SidebarTabsProps {
   activeTab: SidebarTab;
@@ -19,6 +23,20 @@ interface SidebarTabsProps {
   showChangesTab?: boolean;
   showMessagesTab?: boolean;
   messagesTabTitle?: string;
+  /**
+   * Whole-panel visibility flag for the live Agent Response panel.
+   *
+   * This rail is the app's existing left-edge control strip, and the thing a
+   * captain wants back is the vertical space: the panel's header, its session
+   * row and its response history are one block above (narrow) or beside (wide)
+   * the document. So the rail toggles the ENTIRE panel — not a control inside
+   * it — and the document reclaims the whole area while it is off.
+   */
+  showAgentResponseTab?: boolean;
+  isAgentResponseVisible?: boolean;
+  onToggleAgentResponse?: () => void;
+  /** Replies that arrived while the panel was hidden away. */
+  agentResponseUnreadCount?: number;
   /** A newer response finished in another pane while the reviewer stayed here. */
   hasPendingResponse?: boolean;
   showAgentTerminalTab?: boolean;
@@ -39,6 +57,10 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({
   showChangesTab,
   showMessagesTab,
   messagesTabTitle = "Pick a different message",
+  showAgentResponseTab,
+  isAgentResponseVisible = true,
+  onToggleAgentResponse,
+  agentResponseUnreadCount = 0,
   hasPendingResponse,
   showAgentTerminalTab,
   isAgentTerminalOpen,
@@ -67,6 +89,34 @@ export const SidebarTabs: React.FC<SidebarTabsProps> = ({
           <ReviewAgentsIcon className="w-3.5 h-3.5" />
           {isAgentTerminalRunning && (
             <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-primary" />
+          )}
+        </button>
+      )}
+
+      {/* Agent Response — shows/hides the whole panel, sharing this rail rather
+          than adding a left-edge control of its own. */}
+      {showAgentResponseTab && onToggleAgentResponse && (
+        <button
+          type="button"
+          data-agent-response-tab="true"
+          onClick={onToggleAgentResponse}
+          className={`sidebar-tab-flag group relative flex items-center justify-center w-7 h-9 rounded-r-md border border-l-0 border-border/50 bg-card/80 backdrop-blur-sm transition-colors ${
+            isAgentResponseVisible
+              ? "text-primary"
+              : "text-muted-foreground hover:text-foreground hover:bg-card"
+          }`}
+          title={agentResponseToggleLabel(isAgentResponseVisible)}
+          aria-label={agentResponseToggleLabel(isAgentResponseVisible)}
+          aria-pressed={isAgentResponseVisible}
+        >
+          <AgentResponsePanelIcon className="w-3.5 h-3.5" visible={isAgentResponseVisible} />
+          {/* Only meaningful while the panel is away: with it on screen the
+              unread lives on the panel's own rows. */}
+          {!isAgentResponseVisible && agentResponseUnreadCount > 0 && (
+            <span
+              aria-label={`${agentResponseUnreadCount} unread repl${agentResponseUnreadCount === 1 ? "y" : "ies"} while hidden`}
+              className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-primary"
+            />
           )}
         </button>
       )}

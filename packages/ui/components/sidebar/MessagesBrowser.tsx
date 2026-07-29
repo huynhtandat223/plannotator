@@ -267,6 +267,88 @@ export function anchoredScrollTop(
   return Math.max(0, previous.scrollTop + delta);
 }
 
+/**
+ * Which end of the list the rows that changed this frame entered at. Only
+ * growth ABOVE the viewport may be compensated, and the ordering decides which
+ * end that is — so flipping a transcript's order has to flip this with it.
+ *
+ *  - `live`: an incoming frame. It prepends above the viewport in a
+ *    newest-first list, so {@link anchoredScrollTop} holds the reader still —
+ *    while deliberately leaving a reader parked at scrollTop 0 alone, because
+ *    that is the "following the latest" position.
+ *  - `page-prepend`: `+N more` in an oldest-first transcript adds history above
+ *    the viewport, so the reader is pushed down by exactly that much — from
+ *    scrollTop 0 too, where they are sitting ON the history edge.
+ *  - `page-append`: `+N more` in a newest-first list adds history BELOW the
+ *    viewport. Nothing above it moved, so touching scrollTop would itself be
+ *    the bug: the reader would be thrown down the list they just paged into.
+ */
+export type ListGrowthEdge = "live" | "page-prepend" | "page-append";
+
+export function anchoredScrollTopForGrowth(
+  previous: { scrollTop: number; scrollHeight: number },
+  nextScrollHeight: number,
+  edge: ListGrowthEdge,
+): number {
+  if (edge === "page-append") return previous.scrollTop;
+  if (edge === "page-prepend") {
+    return Math.max(0, previous.scrollTop + nextScrollHeight - previous.scrollHeight);
+  }
+  return anchoredScrollTop(previous, nextScrollHeight);
+}
+
+/**
+ * Preferred anchor: how far a row the reader is actually looking at moved.
+ *
+ * Height arithmetic cannot describe a WINDOWED list. The row budget keeps a
+ * fixed number of rows, so a prepended live turn also evicts one off the far
+ * end: total height changes by nearly nothing while every visible row slides
+ * down a full slot. Measuring one surviving row instead is exact, and stays
+ * exact when rows differ in height.
+ *
+ * The two deliberate exemptions from the growth anchor survive unchanged: a
+ * `page-append` never moves the reader, and a `live` frame leaves a reader
+ * parked at the top alone, because that is the "following the latest" position
+ * and pinning the old top row there would push the new turn out of sight.
+ */
+export function anchoredScrollTopForRowShift(
+  current: { scrollTop: number },
+  rowShift: number,
+  edge: ListGrowthEdge,
+): number {
+  if (edge === "page-append") return current.scrollTop;
+  if (edge === "live" && current.scrollTop <= 0) return current.scrollTop;
+  return Math.max(0, current.scrollTop + rowShift);
+}
+
+/** The row the reader is looking at, and where it sits in the scroller. */
+type RowAnchor = { messageId: string; offsetTop: number };
+
+function messageRows(root: HTMLElement | null): HTMLElement[] {
+  return root ? Array.from(root.querySelectorAll<HTMLElement>("[data-message-row]")) : [];
+}
+
+/** First row still visible at the scroller's top edge — what the reader's eye
+ * is resting on, and therefore what must not move under them. */
+function captureRowAnchor(root: HTMLElement | null, scroller: HTMLElement): RowAnchor | null {
+  const top = scroller.getBoundingClientRect().top;
+  for (const row of messageRows(root)) {
+    const box = row.getBoundingClientRect();
+    const messageId = row.dataset.messageRow;
+    if (messageId && box.bottom > top) return { messageId, offsetTop: box.top - top };
+  }
+  return null;
+}
+
+/** How far the anchored row moved this frame, or null when it no longer exists
+ * (evicted by the budget), in which case the caller falls back to heights. */
+function rowAnchorShift(root: HTMLElement | null, scroller: HTMLElement, anchor: RowAnchor | null): number | null {
+  if (!anchor) return null;
+  const row = messageRows(root).find((candidate) => candidate.dataset.messageRow === anchor.messageId);
+  if (!row) return null;
+  return row.getBoundingClientRect().top - scroller.getBoundingClientRect().top - anchor.offsetTop;
+}
+
 /** Nearest scrollable ancestor, so anchoring works without owning the scroller. */
 function scrollableAncestor(node: HTMLElement | null): HTMLElement | null {
   let element = node?.parentElement ?? null;
@@ -339,13 +421,15 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   // ref so the scroll listener and the auto-fill effect can read it without
   // re-subscribing on every render. Written during render, below.
   const hiddenCountRef = React.useRef(0);
-  const historyPrependRef = React.useRef(false);
+  const pageEdgeRef = React.useRef<ListGrowthEdge | null>(null);
   const pagePendingRef = React.useRef(false);
 
   const pageOlder = React.useCallback(() => {
     if (pagePendingRef.current) return;
     pagePendingRef.current = true;
-    historyPrependRef.current = chronological;
+    // Older rows enter at the TOP of an oldest-first transcript and at the
+    // BOTTOM of a newest-first one — see `anchoredScrollTopForGrowth`.
+    pageEdgeRef.current = chronological ? "page-prepend" : "page-append";
     setPagedRows((prev) => prev + MESSAGE_PAGE_STEP);
   }, [chronological]);
 
@@ -357,6 +441,7 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
   const rootRef = React.useRef<HTMLDivElement | null>(null);
   const latestRowRef = React.useRef<HTMLButtonElement | null>(null);
   const scrollMetricsRef = React.useRef<{ scrollTop: number; scrollHeight: number } | null>(null);
+  const rowAnchorRef = React.useRef<RowAnchor | null>(null);
   const [isAwayFromLatest, setIsAwayFromLatest] = React.useState(false);
 
   // An arriving SSE frame must never move the viewport under the reader.
@@ -365,15 +450,18 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
     const scroller = scrollableAncestor(rootRef.current);
     if (!scroller) return;
     const previous = scrollMetricsRef.current;
+    const edge = pageEdgeRef.current ?? "live";
     if (previous) {
-      const next = historyPrependRef.current
-        ? Math.max(0, previous.scrollTop + scroller.scrollHeight - previous.scrollHeight)
-        : anchoredScrollTop(previous, scroller.scrollHeight);
+      const rowShift = rowAnchorShift(rootRef.current, scroller, rowAnchorRef.current);
+      const next = rowShift === null
+        ? anchoredScrollTopForGrowth(previous, scroller.scrollHeight, edge)
+        : anchoredScrollTopForRowShift(scroller, rowShift, edge);
       if (next !== scroller.scrollTop) scroller.scrollTop = next;
     }
-    historyPrependRef.current = false;
+    pageEdgeRef.current = null;
     pagePendingRef.current = false;
     scrollMetricsRef.current = { scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight };
+    rowAnchorRef.current = captureRowAnchor(rootRef.current, scroller);
   }, [messages, count, pagedRows]);
 
   // Fill a tall Messages panel until it has an actual scrollable history.
@@ -411,6 +499,9 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
     if (!scroller) return;
     const sync = () => {
       scrollMetricsRef.current = { scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight };
+      // Re-anchor as the reader moves, so the row held still by the next live
+      // frame is the one they are looking at now, not where they started.
+      rowAnchorRef.current = captureRowAnchor(rootRef.current, scroller);
       const row = latestRowRef.current;
       if (!row) {
         setIsAwayFromLatest(false);
@@ -510,6 +601,7 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
         <div key={msg.messageId} className="flex w-full justify-start">
           <button
             ref={idx === latestIndex ? latestRowRef : undefined}
+            data-message-row={msg.messageId}
             onClick={() => onSelect(msg.messageId)}
             aria-current={isSelected ? "true" : undefined}
             aria-pressed={isSelected}
@@ -544,6 +636,7 @@ export const MessagesBrowser: React.FC<MessagesBrowserProps> = ({
       <button
         key={msg.messageId}
         ref={idx === latestIndex ? latestRowRef : undefined}
+        data-message-row={msg.messageId}
         onClick={() => onSelect(msg.messageId)}
         aria-current={isSelected ? "true" : undefined}
         aria-pressed={isSelected}

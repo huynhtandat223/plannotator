@@ -11,6 +11,10 @@
 @source "./*.tsx";
 @source "./components/**/*.tsx";
 @source "./live/**/*.tsx";
+/* Plain `.ts` too: layout contracts that a component only composes (e.g.
+   `agentResponsePanelLayout.ts`) hold the class strings themselves, and an
+   unscanned one emits classes into the DOM that generate no CSS. */
+@source "./live/**/*.ts";
 
 @import "../ui/theme.css";
 
