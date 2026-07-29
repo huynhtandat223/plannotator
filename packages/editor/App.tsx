@@ -188,7 +188,7 @@ import {
   type LiveSessionTimelineState,
 } from './live/liveSessionTimeline';
 import { LivePaneLimitationsNotice } from './LivePaneLimitationsNotice';
-import { ReaderStalenessBanner } from './ReaderStalenessBanner';
+import { ReaderStalenessBanner, READER_TOOLS_OVERLAY_OFFSET_CLASS } from './ReaderStalenessBanner';
 import { readerStaleness } from './live/readerStaleness';
 import {
   livePaneAgentLabel,
@@ -5871,7 +5871,7 @@ const App: React.FC = () => {
                 {(canUseWideMode || canEditMarkdown) && !isPlanDiffActive && !archive.archiveMode && !isHtmlSurface && (
                   <div
                     data-print-hide
-                    className="absolute -top-5 left-0 right-0 mx-auto w-full flex justify-end pointer-events-none"
+                    className={`absolute ${READER_TOOLS_OVERLAY_OFFSET_CLASS} left-0 right-0 mx-auto w-full flex justify-end pointer-events-none`}
                     style={annotateReaderMaxWidth === null ? undefined : { maxWidth: annotateReaderMaxWidth ?? 832 }}
                   >
                     <div className={`pointer-events-auto flex items-center gap-1.5 text-[11px] tracking-wide ${taterMode ? 'mr-[60px]' : 'mr-[4px]'}`}>
