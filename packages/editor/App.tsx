@@ -174,7 +174,7 @@ import { deriveLiveActivityChip } from './liveActivityChip';
 import { LiveActivityChip } from './LiveActivityChipView';
 import { deriveLiveActivityTrail, formatLiveActivityTrail, formatTrailStep, type LiveActivityTrailStep } from './liveActivityTrail';
 import { LiveSessionTimeline } from './LiveSessionTimeline';
-import { agentResponsePanelWrapperClass } from './live/agentResponsePanelLayout';
+import { agentResponsePanelWrapperClass, agentResponseToggleHomes, sidebarRailMounted } from './live/agentResponsePanelLayout';
 import {
   activateLiveSession,
   createLiveSessionTimelineState,
@@ -5171,6 +5171,24 @@ const App: React.FC = () => {
   }, [uiPrefs.planWidth]);
   const annotateReaderMaxWidth = canUseWideMode && wideModeType === 'wide' ? null : planMaxWidth;
   const selectedAIProvider = aiProviders.find(provider => provider.id === aiConfig.providerId) ?? null;
+  // One source of truth for the collapsed left rail: it drives both the rail
+  // itself and the document's matching left gutter, so the two cannot drift.
+  // It deliberately outlives wide/focus mode during live review — see
+  // `sidebarRailMounted` for why the panel would otherwise be stranded on
+  // screen with no control at all above `lg`.
+  const agentResponseLayoutState = {
+    liveMessageReview,
+    planReview: !!planReview,
+    goalSetupMode,
+    sidebarOpen: sidebar.isOpen,
+    agentTerminalOpen: isAgentTerminalOpen,
+    wideMode: wideModeType !== null,
+  };
+  const railMounted = sidebarRailMounted(agentResponseLayoutState);
+  const agentResponseHomes = agentResponseToggleHomes(agentResponseLayoutState);
+  // Wide/focus mode still puts the panels away: the rail that survives it
+  // carries the Agent Response flag and nothing else.
+  const showFullRail = railMounted && wideModeType === null;
   const showAgentTerminalControls =
     annotateMode &&
     annotateSource !== 'message' &&
@@ -5259,6 +5277,7 @@ const App: React.FC = () => {
           isAgentResponseVisible={liveResponsePanelVisible}
           onToggleAgentResponse={toggleLiveResponsePanel}
           agentResponseUnreadCount={liveUnreadTotal}
+          agentResponseToggleIsOnlyHome={agentResponseHomes.headerAtLargeWidths}
           liveFeedbackCount={liveMessageReview ? selectedLiveMessageAnnotationCount : 0}
           callbackConfig={callbackConfig}
           taterMode={taterMode}
@@ -5484,21 +5503,22 @@ const App: React.FC = () => {
           )}
           {planReview && wideModeType === null && <PlanReviewSourcesBrowser snapshot={planReview.snapshot} onSelect={selectPlanReviewSource} width={`var(--toc-w, ${tocResize.width}px)`} mobileOpen={planReviewSourcesOpen} onMobileClose={() => setPlanReviewSourcesOpen(false)} />}
           {/* Left Sidebar: collapsed tab flags (when sidebar is closed) */}
-          {!planReview && wideModeType === null && !sidebar.isOpen && !goalSetupMode && !isAgentTerminalOpen && (
+          {railMounted && (
             <SidebarTabs
               activeTab={sidebar.activeTab}
               onToggleTab={toggleSidebarTab}
               hasDiff={planDiff.hasPreviousVersion}
-              showVersionsTab={!isHtmlSurface && versionInfo !== null && versionInfo.totalVersions > 1}
-              showFilesTab={showFilesTab && !archive.archiveMode}
-              showChangesTab={liveMessageReview && !!projectRoot && !archive.archiveMode}
-              showMessagesTab={!liveMessageReview && annotateSource === 'message' && recentMessages.length > 1}
+              showTocTab={showFullRail}
+              showVersionsTab={showFullRail && !isHtmlSurface && versionInfo !== null && versionInfo.totalVersions > 1}
+              showFilesTab={showFullRail && showFilesTab && !archive.archiveMode}
+              showChangesTab={showFullRail && liveMessageReview && !!projectRoot && !archive.archiveMode}
+              showMessagesTab={showFullRail && !liveMessageReview && annotateSource === 'message' && recentMessages.length > 1}
               messagesTabTitle={undefined}
               showAgentResponseTab={liveMessageReview}
               isAgentResponseVisible={liveResponsePanelVisible}
               onToggleAgentResponse={toggleLiveResponsePanel}
               agentResponseUnreadCount={liveUnreadTotal}
-              showAgentTerminalTab={showAgentTerminalControls}
+              showAgentTerminalTab={showFullRail && showAgentTerminalControls}
               isAgentTerminalOpen={isAgentTerminalOpen}
               isAgentTerminalRunning={isAgentTerminalRunning}
               onToggleAgentTerminal={toggleAgentTerminal}
@@ -5619,7 +5639,7 @@ const App: React.FC = () => {
 
           <OverlayScrollArea
             element="main"
-            className={`flex-1 min-w-0 ${isHtmlSurface ? 'bg-background' : `${gridEnabled ? "bg-grid " : "bg-card "}${!goalSetupMode && !sidebar.isOpen && !isAgentTerminalOpen && wideModeType === null ? 'lg:pl-[30px]' : ''}`}`}
+            className={`flex-1 min-w-0 ${isHtmlSurface ? 'bg-background' : `${gridEnabled ? "bg-grid " : "bg-card "}${!goalSetupMode && !sidebar.isOpen && !isAgentTerminalOpen && (wideModeType === null || railMounted) ? 'lg:pl-[30px]' : ''}`}`}
             data-print-region="document"
             onViewportReady={handleViewportReady}
           >
