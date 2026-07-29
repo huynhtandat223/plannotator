@@ -5696,8 +5696,12 @@ const App: React.FC = () => {
                     ? `flex flex-col lg:flex-row items-stretch lg:items-start justify-center gap-4 lg:gap-6${isEditingMarkdown ? ' flex-1 min-h-0' : ''}`
                     : `flex justify-center${isEditingMarkdown ? ' flex-1 min-h-0' : ''}`
               }`} style={{ display: goalSetupMode || (isPlanDiffActive && planDiff.diffBlocks) || (annotateSource === 'folder' && !markdown && !linkedDocHook.isActive) ? 'none' : undefined }}>
+                {/* The transcript — not the session switcher — is what this
+                    column is for, so the panel gets enough height that the
+                    response stays readable once the switcher is capped above
+                    it (see LiveSessionTimeline). */}
                 {liveMessageReview && (
-                  <div className="mb-4 w-full lg:h-[min(50dvh,34rem)] lg:min-h-[22rem] lg:w-[380px] lg:shrink-0 lg:max-w-none">
+                  <div className="mb-4 w-full lg:h-[min(62dvh,42rem)] lg:min-h-[26rem] lg:w-[380px] lg:shrink-0 lg:max-w-none">
                     <LiveSessionTimeline
                       messages={stableLiveSessions}
                       activeTimelineMessages={activeLiveTimelineMessages}
