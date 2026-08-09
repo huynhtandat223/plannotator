@@ -20,6 +20,8 @@
     "./live-message-window": "./live-message-window.ts",
     "./live-pane-agents": "./live-pane-agents.ts",
     "./open-in-apps": "./open-in-apps.ts",
+    "./pane-watch": "./pane-watch.ts",
+    "./ansi-screen": "./ansi-screen.ts",
     "./project": "./project.ts",
     "./source-save": "./source-save.ts",
     "./config-types": "./config-types.ts",

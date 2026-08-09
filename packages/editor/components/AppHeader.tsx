@@ -69,6 +69,11 @@ interface AppHeaderProps {
   onOpenLiveFolder?: () => void;
   onOpenLiveChanges?: () => void;
   liveFeedbackCount?: number;
+  /** Read-only terminal watch for the selected live pane. Every Herdr agent kind
+   *  qualifies: it observes the pane's screen, so it needs no transcript,
+   *  extension registration, or per-kind capability. */
+  showLiveWatch?: boolean;
+  onOpenLiveWatch?: () => void;
   liveCloseCurrentPane?: boolean;
   /** Agent kind of the selected live pane, e.g. "Claude Code". Live panes are
    *  multi-agent, so no user-facing string here may name one kind outright. */
@@ -196,6 +201,8 @@ export const AppHeader = React.memo<AppHeaderProps>(({
   onLiveProcessPanelCreated,
   showLiveFolder,
   showLiveChanges,
+  showLiveWatch,
+  onOpenLiveWatch,
   showAgentResponseToggle,
   isAgentResponseVisible,
   onToggleAgentResponse,
@@ -304,6 +311,20 @@ export const AppHeader = React.memo<AppHeaderProps>(({
             {showLiveChanges && <HeaderIconButton onClick={onOpenLiveChanges} title="Git Changes">
               <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
             </HeaderIconButton>}
+          </div>
+        )}
+
+        {/* Watch live — read-only terminal view of the SELECTED pane. Unlike the
+            navigation cluster above it is not `md:hidden`: the phone is the
+            primary case, but a captain at a desk must be able to reach it too,
+            and it is the only way back into a pane's actual screen. */}
+        {showLiveWatch && onOpenLiveWatch && (
+          <div className="flex items-center gap-0.5">
+            <HeaderIconButton onClick={onOpenLiveWatch} title="Watch live">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 5h18v11H3z" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M8 20h8M12 16v4" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6.5 8.5l2 2-2 2M11 12.5h4" />
+            </HeaderIconButton>
           </div>
         )}
 
