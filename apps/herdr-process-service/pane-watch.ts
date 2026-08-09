@@ -124,9 +124,6 @@ export async function startPaneWatchStream(
   let lastRevision: number | null = null;
   let lastAnsi: string | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
-  // Assigned below, but declared here because a liveness listener is allowed to
-  // fire synchronously from `subscribeLiveness` — which would otherwise reach
-  // `stop()` before the binding exists.
   let unsubscribe: (() => void) | null = null;
   const abort = new AbortController();
 
@@ -158,9 +155,20 @@ export async function startPaneWatchStream(
   // Herdr's authority, delivered by the publisher the rest of the service
   // already runs. A pane that has left the snapshot ends the watch at once,
   // which takes precedence over anything the next read might return.
-  unsubscribe = herdr.subscribeLiveness((livePaneIds) => {
+  //
+  // The subscription is captured LOCALLY first, because a publisher is allowed
+  // to deliver its current snapshot synchronously from `subscribeLiveness` —
+  // the service's `LiveSnapshotPublisher` does exactly that. If that first
+  // delivery already says the pane is gone, `stop()` runs before this call has
+  // returned anything to unsubscribe with, and assigning afterwards would leave
+  // a listener registered on a watch that is already closed, for the lifetime
+  // of the process. So: assign it only if we are still open, and otherwise
+  // release it immediately.
+  const releaseLiveness = herdr.subscribeLiveness((livePaneIds) => {
     if (!closed && !livePaneIds.has(paneId)) finish("pane-gone");
   });
+  if (closed) releaseLiveness();
+  else unsubscribe = releaseLiveness;
 
   response.on("drain", () => {
     draining = false;

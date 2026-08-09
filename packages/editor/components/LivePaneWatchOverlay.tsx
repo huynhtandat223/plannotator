@@ -164,14 +164,13 @@ export function LivePaneWatchOverlay({
       data-testid="live-pane-watch-overlay"
     >
       <div className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-border px-3 py-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-xs font-medium text-foreground" data-testid="live-pane-watch-label">
-            {paneLabel}
-          </span>
-          <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
-            Read-only
-          </span>
-        </div>
+        {/* Pane name and Close, and nothing else. Read-only needs no badge: it
+            is guaranteed by there being no write shape on the wire, no write
+            member on the host's Herdr access, and no control on this surface —
+            a label would only restate what the absence of controls shows. */}
+        <span className="truncate text-xs font-medium text-foreground" data-testid="live-pane-watch-label">
+          {paneLabel}
+        </span>
         <button
           type="button"
           onClick={onClose}

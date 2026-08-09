@@ -102,10 +102,12 @@ test.skipIf(!hasDom)('occupies the full dynamic viewport on a narrow portrait sc
   expect(overlay.className).toContain('inset-0');
 });
 
-test.skipIf(!hasDom)('shows pane identity and a Close action', async () => {
+test.skipIf(!hasDom)('header holds the pane name and Close, and nothing else', async () => {
   const closes: number[] = [];
   const stream = controllableStream();
   const el = await renderOverlay(stream, () => closes.push(1));
+  await watching(stream);
+  await stream.emit(frame('agent output'));
 
   expect(el.querySelector('[data-testid="live-pane-watch-label"]')?.textContent)
     .toBe('firstmate · t3H');
@@ -115,6 +117,14 @@ test.skipIf(!hasDom)('shows pane identity and a Close action', async () => {
   expect(close).toBeTruthy();
   await act(async () => close.click());
   expect(closes.length).toBe(1);
+
+  // Exactly two header items. Read-only is guaranteed by the absence of any
+  // control, so a badge saying so would be a third item the presentation
+  // contract does not allow — and the sort of thing that creeps back.
+  const header = el.querySelector('[data-testid="live-pane-watch-label"]')!.parentElement!;
+  const headerText = (header.textContent ?? '').trim();
+  expect(headerText).toBe('firstmate · t3HClose');
+  expect(headerText.toLowerCase()).not.toContain('read-only');
 });
 
 test.skipIf(!hasDom)('terminal text does not wrap and overflow stays reachable', async () => {
