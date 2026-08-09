@@ -50,16 +50,28 @@ function cssColor(color: AnsiColor | null): string | undefined {
 }
 
 /**
- * Font bounds for the fit-then-scroll rule. Below `MIN` a terminal stops being
- * readable, so narrow screens shrink to the floor and then scroll — the real
- * pane is never resized to make it fit.
+ * Font bounds for the fit-then-scroll rule.
+ *
+ * `MIN` is the smallest size at which a terminal is still *readable*, and that
+ * is the only thing it may be tuned against. It was 7px, which is what a real
+ * pane produces on a phone — a 215-column screen in a 390px viewport wants
+ * 390/(215*0.6) ≈ 3px, so the clamp bottoms out — and 7px on a phone is not
+ * legible. Worse, the screen still overflowed 2.3x, so shrinking past the
+ * readable range bought nothing: once the captain has to scroll anyway, an
+ * unreadable font is strictly the worse trade. Below-readable is not a smaller
+ * version of readable; it is a blank screen with ink on it.
  */
-const MIN_FONT_PX = 7;
+const MIN_FONT_PX = 11;
 const MAX_FONT_PX = 13;
 /** Advance width of a monospace glyph as a fraction of font size. */
 const CHAR_WIDTH_RATIO = 0.6;
 
-/** Fit `columns` into `availableWidth`, clamped to the readable range. */
+/**
+ * Fit `columns` into `availableWidth`, clamped to the readable range.
+ *
+ * Narrow content shrinks only as far as it must; anything wider than the
+ * viewport can hold at `MIN_FONT_PX` stays at `MIN_FONT_PX` and scrolls.
+ */
 export function watchFontSize(columns: number, availableWidth: number): number {
   if (columns <= 0 || availableWidth <= 0) return MAX_FONT_PX;
   const ideal = availableWidth / (columns * CHAR_WIDTH_RATIO);
