@@ -92,9 +92,52 @@ export async function startPaneWatchStream(
   paneId: string,
   herdr: PaneWatchHerdr,
 ): Promise<void> {
+  let closed = false;
+  let reading = false;
+  /** Set while the socket is backed up, so frames are dropped rather than queued. */
+  let draining = false;
+  let lastRevision: number | null = null;
+  let lastAnsi: string | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+  let unsubscribe: (() => void) | null = null;
+  /** True only between taking an `activeWatches` slot and giving it back. */
+  let counted = false;
+  const abort = new AbortController();
+
+  const stop = (): void => {
+    if (closed) return;
+    closed = true;
+    if (timer) clearTimeout(timer);
+    timer = null;
+    if (heartbeat) clearInterval(heartbeat);
+    heartbeat = null;
+    // Cancels the in-flight `herdr pane read` rather than letting it finish
+    // into a socket nobody is reading.
+    abort.abort();
+    unsubscribe?.();
+    unsubscribe = null;
+    if (counted) {
+      activeWatches--;
+      counted = false;
+    }
+  };
+
+  // Armed BEFORE the first await, and idempotent, because everything above it
+  // is optional. Node emits `close` once; a listener added afterwards is never
+  // called. Authorization spawns a snapshot subprocess and the first screen read
+  // has its own multi-second budget, so a browser closing a tab in that window
+  // is ordinary — and if cleanup were attached after it, that disconnect would
+  // leave the heartbeat, the liveness subscription, the capacity slot AND the
+  // poll timer alive. The poll one matters most: it would keep reading the pane
+  // every few hundred ms forever, against a socket nobody is reading, which is
+  // exactly the always-on capture loop this transport exists to avoid.
+  request.once("close", stop);
+
   if (activeWatches >= PANE_WATCH_MAX_CONCURRENT) {
     openStream(response);
     end(response, paneId, "capacity");
+    stop();
     return;
   }
 
@@ -103,47 +146,30 @@ export async function startPaneWatchStream(
     live = await herdr.livePaneIds();
   } catch {
     // A snapshot we cannot read is not permission to watch. Fail closed.
+    if (closed) return;
     openStream(response);
     end(response, paneId, "unauthorized");
+    stop();
     return;
   }
+  // The viewer may have vanished while we were authorizing; `stop` has already
+  // run, so there is nothing to start and nothing to write to.
+  if (closed) return;
   if (!live.has(paneId)) {
     openStream(response);
     end(response, paneId, "unauthorized");
+    stop();
     return;
   }
 
   activeWatches++;
+  counted = true;
   openStream(response);
   response.write(serialize({ type: "ready", paneId }));
 
-  let closed = false;
-  let reading = false;
-  /** Set while the socket is backed up, so frames are dropped rather than queued. */
-  let draining = false;
-  let lastRevision: number | null = null;
-  let lastAnsi: string | null = null;
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let unsubscribe: (() => void) | null = null;
-  const abort = new AbortController();
-
-  const heartbeat = setInterval(() => {
+  heartbeat = setInterval(() => {
     if (!closed) response.write(": keep-alive\n\n");
   }, PANE_WATCH_HEARTBEAT_MS);
-
-  const stop = (): void => {
-    if (closed) return;
-    closed = true;
-    if (timer) clearTimeout(timer);
-    timer = null;
-    clearInterval(heartbeat);
-    // Cancels the in-flight `herdr pane read` rather than letting it finish
-    // into a socket nobody is reading.
-    abort.abort();
-    unsubscribe?.();
-    unsubscribe = null;
-    activeWatches = Math.max(0, activeWatches - 1);
-  };
 
   const finish = (reason: PaneWatchEndReason): void => {
     if (closed) return;
@@ -227,13 +253,11 @@ export async function startPaneWatchStream(
   };
 
   // The first screen is read immediately, so the overlay never opens on an
-  // unexplained empty terminal.
+  // unexplained empty terminal. Cleanup is already armed, so a disconnect
+  // during this read tears the watch down instead of being scheduled onward.
   await tick();
+  if (closed) return;
   schedule();
-
-  request.once("close", () => {
-    stop();
-  });
 }
 
 function openStream(response: ServerResponse): void {
