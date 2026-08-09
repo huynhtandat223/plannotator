@@ -10,12 +10,15 @@
  *
  * ## Isolation
  *
- * It creates its OWN Herdr workspace and operates only inside it. It never
- * touches an existing workspace, tab, or pane, and it removes only the
- * workspace it created. A fleet tripwire records every pre-existing workspace,
- * tab and pane id (plus the focused pane) before the run and asserts they are
- * identical afterwards, so a regression that reaches outside the sandbox fails
- * the test rather than the captain's session.
+ * It creates its OWN Herdr workspace and operates only inside it, and that is
+ * ENFORCED rather than checked afterwards: `realHerdr` refuses to run any
+ * command naming a Herdr resource this test did not create, so a stray id fails
+ * the call instead of the captain's session. Cleanup is then asserted directly
+ * — nothing the test created is still in the snapshot at the end.
+ *
+ * A before/after fingerprint of the whole fleet was tried first and removed: in
+ * a live session other agents open and close panes continuously, so it failed
+ * for their activity rather than for anything this test did.
  *
  * ## How "no work without a viewer" is observed
  *
@@ -62,7 +65,30 @@ let createdPaneId: string | null = null;
 let server: ReturnType<typeof Bun.spawn> | null = null;
 let port = 0;
 
+/**
+ * Herdr resource ids this test created. `realHerdr` will not name anything else.
+ */
+const createdIds = new Set<string>();
+/**
+ * `w4B`, `w56`, `w4B:t29`, `w4M:p1` — a workspace, tab or pane id.
+ *
+ * The digit after `w` is load-bearing: without it this also matches the literal
+ * subcommand word `workspace`, and the guard rejects every `herdr workspace
+ * create` before it can run.
+ */
+const HERDR_RESOURCE_ID = /^w\d[0-9A-Za-z]*(?::[tp][0-9A-Za-z]+)?$/;
+
 async function realHerdr(args: string[]): Promise<string> {
+  // Isolation as a precondition, not an afterthought. The captain authorized a
+  // sandbox workspace inside their live session, so the guarantee that matters
+  // is that no command this test runs can name one of THEIR resources — and the
+  // place to guarantee that is before the process starts, not in an assertion
+  // afterwards.
+  for (const arg of args) {
+    if (HERDR_RESOURCE_ID.test(arg) && !createdIds.has(arg)) {
+      throw new Error(`refusing 'herdr ${args.join(" ")}': ${arg} is not a resource this test created`);
+    }
+  }
   const { stdout } = await execFileAsync(herdrBin, args, { timeout: 15_000, maxBuffer: 4 * 1024 * 1024 });
   return stdout;
 }
@@ -70,34 +96,6 @@ async function realHerdr(args: string[]): Promise<string> {
 async function snapshot(): Promise<HerdrSnapshotShape> {
   const stdout = await realHerdr(["api", "snapshot"]);
   return (JSON.parse(stdout) as { result?: { snapshot?: HerdrSnapshotShape } }).result?.snapshot ?? {};
-}
-
-/**
- * Every workspace/tab/pane id that existed before this test.
- *
- * Focus is deliberately NOT part of this fingerprint. Herdr moves focus by
- * itself when a workspace closes — measured on 0.7.3: closing a workspace that
- * was created with `--no-focus` and never focused still reassigns focus to
- * another workspace's pane. That is the sandbox's unavoidable teardown, not
- * anything Watch does, so asserting focus equality here would fail for a reason
- * this feature does not control. The real "Watch never changes focus or size"
- * property is proved where it belongs: no focus/resize verb ever appears in the
- * server's Herdr invocation log, and focus never lands on the sandbox pane.
- */
-async function fleetTripwire(): Promise<string> {
-  const snap = await snapshot();
-  const ids = (values: Array<Record<string, unknown>> | undefined, key: string): string[] =>
-    (values ?? []).map((entry) => String(entry[key] ?? "")).filter(Boolean).sort();
-  return JSON.stringify({
-    workspaces: ids(snap.workspaces as Array<Record<string, unknown>>, "workspace_id")
-      .filter((id) => id !== createdWorkspaceId),
-    tabs: ids(snap.tabs as Array<Record<string, unknown>>, "tab_id"),
-    panes: ids(snap.panes as Array<Record<string, unknown>>, "pane_id"),
-  });
-}
-
-async function focusedPaneId(): Promise<string> {
-  return (await snapshot()).panes?.find((pane) => pane.focused)?.pane_id ?? "";
 }
 
 function shimInvocations(): string[] {
@@ -172,8 +170,6 @@ test.skipIf(!enabled)("watches a real Herdr pane read-only, and stops when nobod
   herdrBin = (await execFileAsync("bash", ["-lc", "command -v herdr"])).stdout.trim();
   expect(herdrBin).toBeTruthy();
 
-  const before = await fleetTripwire();
-
   // --- isolated sandbox: our own workspace, tab and pane ------------------
   workDir = mkdtempSync(join(tmpdir(), "plannotator-watch-e2e-"));
   const workspaceOut = await realHerdr(["workspace", "create", "--cwd", workDir, "--label", LABEL, "--no-focus"]);
@@ -182,6 +178,7 @@ test.skipIf(!enabled)("watches a real Herdr pane read-only, and stops when nobod
       .result?.workspace?.workspace_id ?? "",
   );
   expect(createdWorkspaceId).toBeTruthy();
+  createdIds.add(createdWorkspaceId);
 
   const tabOut = await realHerdr([
     "tab", "create", "--workspace", createdWorkspaceId, "--cwd", workDir, "--label", LABEL, "--no-focus",
@@ -191,6 +188,9 @@ test.skipIf(!enabled)("watches a real Herdr pane read-only, and stops when nobod
   }).result;
   createdPaneId = String(tabResult?.root_pane?.pane_id ?? "");
   expect(createdPaneId).toBeTruthy();
+  createdIds.add(createdPaneId);
+  const createdTabId = String(tabResult?.tab?.tab_id ?? "");
+  if (createdTabId) createdIds.add(createdTabId);
 
   // Give the pane an agent identity Herdr has never seen. Discovery is
   // kind-agnostic, so Watch must work for it exactly as for a Pi pane.
@@ -266,9 +266,11 @@ test.skipIf(!enabled)("watches a real Herdr pane read-only, and stops when nobod
   await waitFor(() => frames(first.events).some((frame) => frame.includes(marker2)), 20_000,
     "a live frame carrying new pane output");
 
-  // Watching a pane must not pull focus to it — the captain keeps looking at
-  // whatever they were looking at.
-  expect(await focusedPaneId()).not.toBe(createdPaneId);
+  // NOTE: do not assert Herdr's focused pane here. This test drives output with
+  // `herdr pane run`, which focuses the pane it runs in, so such an assertion
+  // measures the harness rather than Watch — and it flaked exactly that way.
+  // "Watch never changes focus or size" is proved below and unambiguously: no
+  // focus or resize verb ever appears in the server's own Herdr log.
 
   // --- disconnect releases the observation work ---------------------------
   first.stop();
@@ -318,5 +320,14 @@ test.skipIf(!enabled)("watches a real Herdr pane read-only, and stops when nobod
     20_000,
     "the sandbox workspace to be removed",
   );
-  expect(await fleetTripwire()).toBe(before);
+  // Cleanup is complete: nothing this test created is still in Herdr. Combined
+  // with `realHerdr`'s refusal to name anything it did not create, that is the
+  // whole isolation claim — and neither half can be broken by another agent's
+  // unrelated activity during the run.
+  const finalSnapshot = await snapshot();
+  const surviving = [...createdIds].filter((id) =>
+    (finalSnapshot.workspaces ?? []).some((workspace) => workspace.workspace_id === id)
+    || (finalSnapshot.tabs ?? []).some((tab) => tab.tab_id === id)
+    || (finalSnapshot.panes ?? []).some((pane) => pane.pane_id === id));
+  expect(surviving).toEqual([]);
 }, 180_000);

@@ -134,12 +134,21 @@ export async function startPaneWatchStream(
   // exactly the always-on capture loop this transport exists to avoid.
   request.once("close", stop);
 
+  // Test and reserve in one step, with NO await between them. `activeWatches`
+  // is global mutable state, so a capacity check that yields before taking its
+  // slot bounds nothing: every concurrent open would read the counter before
+  // any of them had incremented it, all pass the gate, and the limit would only
+  // ever constrain opens that happened to arrive strictly one after another.
+  // Single-threaded execution makes these two statements atomic — keep them
+  // adjacent, and reserve before authorization rather than after it.
   if (activeWatches >= PANE_WATCH_MAX_CONCURRENT) {
     openStream(response);
     end(response, paneId, "capacity");
     stop();
     return;
   }
+  activeWatches++;
+  counted = true;
 
   let live: Set<string>;
   try {
@@ -162,8 +171,6 @@ export async function startPaneWatchStream(
     return;
   }
 
-  activeWatches++;
-  counted = true;
   openStream(response);
   response.write(serialize({ type: "ready", paneId }));
 
