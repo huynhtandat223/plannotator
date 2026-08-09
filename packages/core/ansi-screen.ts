@@ -172,9 +172,17 @@ export function parseAnsiScreen(input: string): AnsiLine[] {
       continue;
     }
     if (char === "\r") {
-      // A carriage return rewrites the line from its start. Herdr's visible
-      // read is already laid out, so this is a defensive path, but dropping
-      // the partial line is what the terminal itself would have displayed.
+      // CRLF: the `\r` is part of the line terminator and carries no meaning of
+      // its own — the `\n` on the next pass ends the line.
+      //
+      // This is NOT a defensive path, which is what it was originally written
+      // as. Herdr's visible read terminates EVERY line with `\r\n`, so treating
+      // a carriage return as "rewrite this line" discarded each line's content
+      // an instant before the newline emitted it. A 44-line screen rendered as
+      // one line — the last, which happened to lack a trailing `\r`.
+      if (input[i + 1] === "\n") continue;
+      // A bare `\r` really is a carriage return: the line is rewritten from its
+      // start, which is what the terminal itself would have displayed.
       pending = "";
       current = [];
       continue;
