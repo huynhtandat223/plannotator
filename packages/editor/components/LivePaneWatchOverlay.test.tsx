@@ -171,6 +171,41 @@ test.skipIf(!hasDom)('a wide pane renders at a legible size on a narrow portrait
   expect(fontPx).toBeGreaterThanOrEqual(LEGIBLE_MIN_PX);
 });
 
+test.skipIf(!hasDom)('renders every line of a CRLF screen, which is what Herdr sends', async () => {
+  // Herdr's visible read terminates EVERY line with `\r\n`. Treating the `\r`
+  // as a carriage return that rewrites the line discarded each line an instant
+  // before the newline emitted it, so a full agent screen arrived intact on the
+  // wire and rendered as a single line. Asserting the RENDERED screen is the
+  // point: the frame payload was always correct, so any check on the wire — or
+  // on a `\n`-only fixture, as the earlier tests used — passed regardless.
+  const stream = controllableStream();
+  const el = await renderOverlay(stream);
+  await watching(stream);
+  const lines = ['first line', 'second line', '', 'fourth line', 'fifth line'];
+  await stream.emit(frame(lines.join('\r\n')));
+
+  const rendered = el.querySelector<HTMLElement>('[data-testid="live-pane-watch-frame"]')!.innerText;
+  for (const line of lines.filter(Boolean)) {
+    expect(rendered).toContain(line);
+  }
+  expect(rendered.split('\n').filter((line) => line.trim()).length).toBe(4);
+});
+
+test.skipIf(!hasDom)('a bare carriage return still rewrites its line', async () => {
+  // The CRLF fix must not cost the real behaviour: a `\r` NOT followed by a
+  // newline is a genuine carriage return, and a terminal shows what was
+  // written after it.
+  const stream = controllableStream();
+  const el = await renderOverlay(stream);
+  await watching(stream);
+  await stream.emit(frame('overwritten\rvisible text\r\nsecond line'));
+
+  const rendered = el.querySelector<HTMLElement>('[data-testid="live-pane-watch-frame"]')!.innerText;
+  expect(rendered).toContain('visible text');
+  expect(rendered).toContain('second line');
+  expect(rendered).not.toContain('overwritten');
+});
+
 test.skipIf(!hasDom)('terminal text does not wrap and overflow stays reachable', async () => {
   const stream = controllableStream();
   const el = await renderOverlay(stream);
