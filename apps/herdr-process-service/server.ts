@@ -24,6 +24,14 @@ import {
   type LivePaneCapabilityId,
 } from "../../packages/core/live-pane-agents";
 import { readClaudeLiveSession } from "./claude-live-session";
+import { startPaneWatchStream, type PaneWatchHerdr, type PaneWatchScreen } from "./pane-watch";
+import {
+  PANE_WATCH_MAX_FRAME_BYTES,
+  PANE_WATCH_PATH,
+  PANE_WATCH_READ_FORMAT,
+  PANE_WATCH_READ_SOURCE,
+  PANE_WATCH_READ_TIMEOUT_MS,
+} from "../../packages/core/pane-watch";
 import { deliverViaHerdrComposer, type ComposerDeliveryOutcome } from "./herdr-composer-delivery";
 import { formatLiveFeedbackBatch } from "../ex-pi-extension/session";
 import {
@@ -2524,6 +2532,74 @@ async function cachedPanels(): Promise<HerdrPanel[]> {
   return (await liveSnapshotPublisher.snapshot()).value.panels;
 }
 
+/**
+ * Herdr access for the read-only **Watch live** transport.
+ *
+ * Every argument of the screen read is fixed here. The browser supplies a pane
+ * id and nothing else — no cwd, socket, command, source, line count, or format
+ * — and that id only reaches Herdr after `livePaneIds()` has matched it against
+ * a fresh snapshot. `execFile` (never a shell) keeps the argument vector exact.
+ *
+ * There is no write member on this object by design: the transport it serves
+ * cannot mutate a pane because nothing here can.
+ */
+const paneWatchHerdr: PaneWatchHerdr = {
+  async readScreen(paneId: string, signal: AbortSignal): Promise<PaneWatchScreen> {
+    const { stdout } = await execFileAsync(
+      "herdr",
+      ["pane", "read", paneId, "--source", PANE_WATCH_READ_SOURCE, "--format", PANE_WATCH_READ_FORMAT],
+      { timeout: PANE_WATCH_READ_TIMEOUT_MS, maxBuffer: PANE_WATCH_MAX_FRAME_BYTES, signal },
+    );
+    return parsePaneReadOutput(stdout);
+  },
+  async livePaneIds(): Promise<Set<string>> {
+    // Fresh, not cached: authorization is the one place where a snapshot that
+    // is a couple of seconds old could admit a pane that has already gone.
+    return new Set((await discoverPanels()).map((panel) => panel.id));
+  },
+  subscribeLiveness(listener: (livePaneIds: Set<string>) => void): () => void {
+    // Reuses the service's existing 2s publisher. Watch adds no poll loop of
+    // its own for liveness, and every watcher sees the same authority the rest
+    // of the UI does.
+    return liveSnapshotPublisher.subscribe(({ value }) => {
+      listener(new Set(value.panels.map((panel) => panel.id)));
+    });
+  },
+};
+
+/**
+ * Normalize `herdr pane read` output.
+ *
+ * The CLI may answer with the JSON `PaneReadResult` envelope (carrying `text`,
+ * `revision` and `truncated`) or with the screen bytes directly, depending on
+ * release. Both are accepted: a `revision` lets the transport suppress
+ * unchanged screens, and its absence just falls back to comparing content.
+ */
+export function parsePaneReadOutput(stdout: string): PaneWatchScreen {
+  const trimmed = stdout.trimStart();
+  if (trimmed.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(trimmed) as {
+        text?: unknown;
+        revision?: unknown;
+        truncated?: unknown;
+        result?: { text?: unknown; revision?: unknown; truncated?: unknown };
+      };
+      const payload = parsed.result && typeof parsed.result === "object" ? parsed.result : parsed;
+      if (typeof payload.text === "string") {
+        return {
+          ansi: payload.text,
+          revision: typeof payload.revision === "number" ? payload.revision : null,
+          truncated: payload.truncated === true,
+        };
+      }
+    } catch {
+      // Not the JSON envelope after all — fall through and treat it as a screen.
+    }
+  }
+  return { ansi: stdout, revision: null, truncated: false };
+}
+
 const FILE_BROWSER_EXTENSIONS = /\.(mdx?|txt|html?)$/i;
 const FILE_MENTION_EXTENSIONS = /(?:\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|c|cpp|h|hpp|cs|swift|kt|scala|sh|bash|zsh|sql|graphql|json|ya?ml|toml|ini|css|scss|less|xml|tf|lua|r|dart|ex|exs|vue|svelte|astro|zig|proto)|(?:^|\/)(?:Dockerfile|Makefile|Rakefile|Gemfile|Procfile|Vagrantfile|Brewfile|Justfile))$/i;
 const FILE_BROWSER_MAX_FILES = 5_000;
@@ -3527,6 +3603,23 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
     request.once("close", () => {
       closed = true;
       unsubscribe();
+    });
+    return;
+  }
+  if (request.method === "GET" && url.pathname === PANE_WATCH_PATH) {
+    // Read-only terminal observation for ONE explicitly selected pane. It is a
+    // dedicated per-viewer stream on purpose: terminal frames must never join
+    // the combined live-review snapshot or `/api/session/events`, which every
+    // connected browser receives. `paneId` is the only accepted parameter.
+    const paneId = text(url.searchParams.get("paneId"));
+    if (!paneId) {
+      writeJson(response, 400, { error: "A live pane id is required to watch a terminal." });
+      return;
+    }
+    void startPaneWatchStream(request, response, paneId, paneWatchHerdr).catch(() => {
+      // Never surface the underlying error: it can quote terminal content.
+      if (!response.headersSent) writeJson(response, 503, { error: "Live terminal watch unavailable" });
+      else response.end();
     });
     return;
   }

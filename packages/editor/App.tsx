@@ -188,6 +188,7 @@ import {
   type LiveSessionTimelineState,
 } from './live/liveSessionTimeline';
 import { LivePaneLimitationsNotice } from './LivePaneLimitationsNotice';
+import { LivePaneWatchOverlay } from './components/LivePaneWatchOverlay';
 import { ReaderStalenessBanner, READER_TOOLS_OVERLAY_OFFSET_CLASS } from './ReaderStalenessBanner';
 import { readerStaleness } from './live/readerStaleness';
 import {
@@ -1553,6 +1554,31 @@ const App: React.FC = () => {
   const selectedLiveImageFeedbackTarget = canAttachSelectedLiveImageFeedback && selectedLiveMessage
     ? `${selectedLiveMessage.paneLabel?.trim() || 'Pi'} · ${selectedLiveMessage.paneTab?.trim() || selectedLiveMessage.paneId} · selected response`
     : undefined;
+
+  /**
+   * Watch live target, captured at the moment the captain opens it.
+   *
+   * It is stored as its own state — rather than read from `selectedLiveMessage`
+   * on each render — precisely so it CANNOT follow anything. Herdr focus moving,
+   * a live snapshot arriving, or the captain picking another pane in the picker
+   * must never swap the terminal content underneath them; watching a different
+   * pane is a deliberate act (close, select, Watch live again).
+   */
+  const [watchTarget, setWatchTarget] = useState<{ paneId: string; label: string } | null>(null);
+  const canWatchSelectedLivePane = liveMessageReview && Boolean(selectedLiveMessage?.paneId);
+  const handleOpenLiveWatch = React.useCallback(() => {
+    const paneId = selectedLiveMessage?.paneId;
+    if (!paneId) return;
+    const workspace = selectedLiveMessage?.paneLabel?.trim();
+    const tab = selectedLiveMessage?.paneTab?.trim();
+    setWatchTarget({
+      paneId,
+      label: [workspace, tab].filter(Boolean).join(' · ') || paneId,
+    });
+  }, [selectedLiveMessage?.paneId, selectedLiveMessage?.paneLabel, selectedLiveMessage?.paneTab]);
+  // Closing must stop host-side capture immediately, which unmounting does by
+  // releasing the overlay's subscription.
+  const handleCloseLiveWatch = React.useCallback(() => setWatchTarget(null), []);
 
   const clearSelectedLiveFeedback = React.useCallback(() => {
     if (!selectedMessageId) return;
@@ -5357,6 +5383,8 @@ const App: React.FC = () => {
           onCallbackFeedback={handleCallbackFeedback}
           onCallbackApprove={handleCallbackApprove}
           onAnnotateExit={handleHeaderAnnotateExit}
+          showLiveWatch={canWatchSelectedLivePane}
+          onOpenLiveWatch={handleOpenLiveWatch}
           liveCloseCurrentPane={liveMessageReview && Boolean(selectedLiveMessage?.paneId)}
           livePaneAgentLabel={selectedLivePaneAgentLabel}
           onGoalSetupExit={handleGoalSetupExit}
@@ -5393,6 +5421,17 @@ const App: React.FC = () => {
           octarineConfigured={isOctarineConfigured()}
         />
         </div>
+
+        {/* Read-only terminal watch. Pinned to `watchTarget`, so nothing about
+            the live surface behind it can retarget what is on screen. */}
+        {watchTarget && (
+          <LivePaneWatchOverlay
+            key={watchTarget.paneId}
+            paneId={watchTarget.paneId}
+            paneLabel={watchTarget.label}
+            onClose={handleCloseLiveWatch}
+          />
+        )}
 
         {/* Linked document error banner */}
         {linkedDocHook.error && (
