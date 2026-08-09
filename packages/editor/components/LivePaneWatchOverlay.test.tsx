@@ -15,7 +15,7 @@ import { createRoot, type Root } from 'react-dom/client';
 
 import type { PaneWatchEvent, PaneWatchStatus } from '@plannotator/core/pane-watch';
 
-import { LivePaneWatchOverlay } from './LivePaneWatchOverlay';
+import { LivePaneWatchOverlay, watchFontSize } from './LivePaneWatchOverlay';
 import type { PaneWatchHandlers, PaneWatchSubscribe } from '../live/paneWatchStream';
 
 const hasDom = typeof document !== 'undefined';
@@ -125,6 +125,50 @@ test.skipIf(!hasDom)('header holds the pane name and Close, and nothing else', a
   const headerText = (header.textContent ?? '').trim();
   expect(headerText).toBe('firstmate · t3HClose');
   expect(headerText.toLowerCase()).not.toContain('read-only');
+});
+
+/**
+ * The smallest size at which a captain can actually read a terminal on a phone.
+ *
+ * This is a product floor, not an implementation detail: the deployed overlay
+ * rendered a real 215-column pane at 7px, which measured "fit rule working" and
+ * looked like an empty black screen. Anything asserting only that the mechanism
+ * ran would have passed then too.
+ */
+const LEGIBLE_MIN_PX = 11;
+
+test('a real desktop-width pane stays legible on a phone rather than shrinking away', () => {
+  // The exact shape observed on the deployed service: a 215-column pane in a
+  // 390px portrait viewport. The fit rule wants ~3px here, so this is precisely
+  // where a floor that is too low stops being a floor and starts being a bug.
+  expect(watchFontSize(215, NARROW_PORTRAIT_WIDTH)).toBeGreaterThanOrEqual(LEGIBLE_MIN_PX);
+
+  // Every plausible phone width against every plausible pane width: readability
+  // is never traded away, at any combination.
+  for (const width of [320, 360, 390, 414, 430]) {
+    for (const columns of [80, 120, 160, 215, 300]) {
+      expect(watchFontSize(columns, width)).toBeGreaterThanOrEqual(LEGIBLE_MIN_PX);
+    }
+  }
+});
+
+test('narrow content still shrinks only as far as it needs to', () => {
+  // The floor must not become a fixed size — content that genuinely fits should
+  // still be allowed to size down toward it rather than overflow.
+  expect(watchFontSize(40, 390)).toBeGreaterThan(watchFontSize(215, 390) - 1);
+  expect(watchFontSize(20, 390)).toBeLessThanOrEqual(13);
+});
+
+test.skipIf(!hasDom)('a wide pane renders at a legible size on a narrow portrait screen', async () => {
+  const stream = controllableStream();
+  const el = await renderOverlay(stream);
+  await watching(stream);
+  // 215 columns — the width of the real pane behind the captain's report.
+  await stream.emit(frame('x'.repeat(215)));
+
+  const pre = el.querySelector<HTMLElement>('[data-testid="live-pane-watch-frame"]')!;
+  const fontPx = Number.parseFloat(pre.style.fontSize);
+  expect(fontPx).toBeGreaterThanOrEqual(LEGIBLE_MIN_PX);
 });
 
 test.skipIf(!hasDom)('terminal text does not wrap and overflow stays reachable', async () => {
