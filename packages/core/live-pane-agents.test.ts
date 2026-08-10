@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  COMPOSER_BUSY_REASON,
+  COMPOSER_UNREADABLE_REASON,
   LIVE_PANE_CAPABILITIES,
   livePaneAgentLabel,
   livePaneAgentProfile,
@@ -7,6 +9,7 @@ import {
   livePaneComposerCaveat,
   livePaneFeedbackDelivery,
   livePaneLimitations,
+  livePaneSendCopy,
   supportsLivePaneCapability,
 } from "./live-pane-agents";
 
@@ -93,5 +96,49 @@ describe("livePaneAgentProfile", () => {
         expect(limitation.label.length).toBeGreaterThan(0);
       }
     }
+  });
+});
+
+describe("livePaneSendCopy", () => {
+  test("an extension kind is described as queued, and never as delivered", () => {
+    const copy = livePaneSendCopy("pi");
+    expect(copy.mechanism).toBe("pi-extension");
+    expect(copy.caveat).toBeNull();
+    expect(copy.unavailableReason).toBeNull();
+    // The host hands the text to a queue only the matching extension can claim,
+    // and that claim is never reported back to a browser. "Queued" is the
+    // strongest true word available.
+    expect(copy.note.toLowerCase()).toContain("queued");
+    expect(copy.note.toLowerCase()).not.toContain("received");
+  });
+
+  test("a composer kind names the mechanism and carries the registry's full caveat", () => {
+    for (const agent of ["claude", "codex", "opencode"]) {
+      const copy = livePaneSendCopy(agent);
+      expect(copy.mechanism).toBe("herdr-composer");
+      expect(copy.unavailableReason).toBeNull();
+      // "through Herdr" earns its place in the short line: it is the reason the
+      // guarantee is weaker than the extension path's.
+      expect(copy.note).toContain("composer");
+      expect(copy.note).toContain("Herdr");
+      expect(copy.caveat).toBe(livePaneComposerCaveat(agent));
+    }
+  });
+
+  test("a kind with no mechanism offers nothing and explains itself in the registry's words", () => {
+    const copy = livePaneSendCopy("some-future-agent");
+    expect(copy.mechanism).toBeNull();
+    expect(copy.caveat).toBeNull();
+    expect(copy.note).toBe("");
+    expect(copy.unavailableReason).toBe(livePaneCapabilityReason("some-future-agent", "feedback"));
+  });
+
+  test("the pre-typing refusal reasons are browser-safe and say what a captain should do", () => {
+    // Both are now rendered by a browser surface that refuses WITHOUT issuing a
+    // request, as well as returned by the host on a 409. One copy, so the two
+    // cannot drift into disagreeing about what happened.
+    expect(COMPOSER_BUSY_REASON).toContain("mid-turn");
+    expect(COMPOSER_BUSY_REASON).toContain("send it twice");
+    expect(COMPOSER_UNREADABLE_REASON).toContain("could not read this pane's agent state");
   });
 });

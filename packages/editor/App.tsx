@@ -195,6 +195,7 @@ import {
   livePaneAgentLabel,
   livePaneCapabilityReason,
   livePaneComposerCaveat,
+  livePaneFeedbackDelivery,
   livePaneLimitations,
   supportsLivePaneCapability,
   type LivePaneLimitation,
@@ -1564,21 +1565,117 @@ const App: React.FC = () => {
    * must never swap the terminal content underneath them; watching a different
    * pane is a deliberate act (close, select, Watch live again).
    */
-  const [watchTarget, setWatchTarget] = useState<{ paneId: string; label: string } | null>(null);
+  const [watchTarget, setWatchTarget] = useState<{
+    paneId: string;
+    label: string;
+    agent?: string;
+    /** The session identity that owned the pane at open — and that advertised `commands`. */
+    piSessionId?: string;
+    commands: Array<{ name: string; description?: string }>;
+  } | null>(null);
   const canWatchSelectedLivePane = liveMessageReview && Boolean(selectedLiveMessage?.paneId);
   const handleOpenLiveWatch = React.useCallback(() => {
     const paneId = selectedLiveMessage?.paneId;
     if (!paneId) return;
     const workspace = selectedLiveMessage?.paneLabel?.trim();
     const tab = selectedLiveMessage?.paneTab?.trim();
+    // Everything the write surface needs is captured HERE, in one object, from
+    // the message that was selected at this instant. Nothing below re-reads
+    // `selectedLiveMessage`, so a send addresses the pane the captain chose to
+    // watch even if the picker has moved on since.
     setWatchTarget({
       paneId,
       label: [workspace, tab].filter(Boolean).join(' · ') || paneId,
+      agent: selectedLiveMessage?.agent,
+      piSessionId: selectedLiveMessage?.piSessionId,
+      commands: (selectedLiveMessage?.commands ?? []).map(({ name, description }) => ({ name, description })),
     });
-  }, [selectedLiveMessage?.paneId, selectedLiveMessage?.paneLabel, selectedLiveMessage?.paneTab]);
+  }, [selectedLiveMessage]);
   // Closing must stop host-side capture immediately, which unmounting does by
   // releasing the overlay's subscription.
   const handleCloseLiveWatch = React.useCallback(() => setWatchTarget(null), []);
+
+  /**
+   * The pinned pane's CURRENT row, looked up by the captured pane id.
+   *
+   * This is a refresh of the same pane, never a retarget: the id is the pinned
+   * one and is never taken from the current selection. Two things must be
+   * current rather than frozen — the agent state, because the composer refuses
+   * to type into a busy pane, and the session identity, because a replaced
+   * session invalidates the captured session and everything it advertised.
+   */
+  const watchPaneNow = React.useMemo(
+    () => (watchTarget ? recentMessages.find((message) => message.paneId === watchTarget.paneId) ?? null : null),
+    [watchTarget, recentMessages],
+  );
+  const watchSessionReplaced = Boolean(
+    watchTarget?.piSessionId && watchPaneNow?.piSessionId && watchPaneNow.piSessionId !== watchTarget.piSessionId,
+  );
+
+  /**
+   * Send one ordinary message from the Watch composer.
+   *
+   * It carries ONLY the composer's own text. It deliberately does not touch
+   * `getNonGlobalFeedbackPayload` or any annotation state, so a message typed
+   * under a terminal can never turn into a review-feedback submission — the two
+   * remain separate actions with separate transports.
+   */
+  const handleWatchSendMessage = React.useCallback(async (text: string): Promise<LiveDeliveryReceipt> => {
+    const target = watchTarget;
+    if (!target) throw new Error('The live terminal watch is no longer open.');
+    const response = await fetch('/api/instruction', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        paneId: target.paneId,
+        text,
+        // Pinned session identity for extension delivery: the host rejects a
+        // replacement session rather than queueing to it. Composer kinds have
+        // no registration to match, so sending one would mean nothing.
+        ...(livePaneFeedbackDelivery(target.agent) === 'pi-extension' && target.piSessionId
+          ? { sessionId: target.piSessionId }
+          : {}),
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error || 'The message could not be delivered to this pane.');
+    }
+    const receipt = await response.json().catch(() => ({})) as LiveDeliveryReceipt;
+    // Browser-local echo, exactly as the viewer's message path records it, so a
+    // message sent from Watch does not vanish from the transcript behind it.
+    if (target.piSessionId) {
+      const scopeKey = captainEchoScopeKey(target.paneId, target.piSessionId);
+      updateCaptainEchoes((store) => appendCaptainEcho(store, scopeKey, {
+        id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        text,
+        timestamp: new Date().toISOString(),
+      }));
+    }
+    return receipt;
+  }, [watchTarget, updateCaptainEchoes]);
+
+  /** Run one advertised command, pinned to the session that advertised it. */
+  const handleWatchRunCommand = React.useCallback(async (command: string): Promise<void> => {
+    const target = watchTarget;
+    if (!target) throw new Error('The live terminal watch is no longer open.');
+    const unsupported = livePaneCapabilityReason(target.agent, 'commands');
+    if (unsupported) throw new Error(unsupported);
+    const response = await fetch('/api/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        paneId: target.paneId,
+        command,
+        args: '',
+        ...(target.piSessionId ? { sessionId: target.piSessionId } : {}),
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error || 'The command could not be run in this pane.');
+    }
+  }, [watchTarget]);
 
   const clearSelectedLiveFeedback = React.useCallback(() => {
     if (!selectedMessageId) return;
@@ -5422,13 +5519,23 @@ const App: React.FC = () => {
         />
         </div>
 
-        {/* Read-only terminal watch. Pinned to `watchTarget`, so nothing about
-            the live surface behind it can retarget what is on screen. */}
+        {/* Terminal watch: read-only screen, plus a message composer that is
+            not part of it. Pinned to `watchTarget`, so nothing about the live
+            surface behind it can retarget what is on screen OR where a message
+            goes. Only `agentStatus` is current, read back for the pinned pane
+            id — the composer's busy refusal has to be about now. */}
         {watchTarget && (
           <LivePaneWatchOverlay
             key={watchTarget.paneId}
             paneId={watchTarget.paneId}
             paneLabel={watchTarget.label}
+            agent={watchTarget.agent}
+            agentStatus={watchPaneNow?.agentStatus}
+            piSessionId={watchTarget.piSessionId}
+            sessionReplaced={watchSessionReplaced}
+            commands={watchTarget.commands}
+            onSendMessage={handleWatchSendMessage}
+            onRunCommand={handleWatchRunCommand}
             onClose={handleCloseLiveWatch}
           />
         )}

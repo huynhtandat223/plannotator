@@ -14,6 +14,7 @@ import {
   feedbackBatch,
   formatInstructionFileReferences,
   instructionDelivery,
+  instructionSessionRefusal,
   panelsFromSnapshot,
   diskTranscriptOutcomes,
   releasePanelSession,
@@ -671,6 +672,86 @@ describe("commandDelivery", () => {
     const replaced = new Map(registrations);
     replaced.set("w:p1", { paneId: "w:p1", sessionId: "session-2", messages: [], commands: [] });
     expect(commandDelivery({ paneId: "w:p1", command: "handoff-to-continue" }, [panel], replaced)).toBeNull();
+  });
+
+  test("a caller that pins the session it saw is refused when that session was replaced", () => {
+    // The Watch composer captures the session that ADVERTISED the command and
+    // sends it back. A replacement session may advertise the same name for a
+    // different thing, and the captain chose neither — so this refuses instead
+    // of running against whatever is registered now.
+    const replaced = new Map(registrations);
+    replaced.set("w:p1", {
+      paneId: "w:p1",
+      sessionId: "session-2",
+      messages: [],
+      commands: [{ name: "handoff-to-continue", description: "Write a handoff", source: "extension" }],
+    });
+    expect(commandDelivery(
+      { paneId: "w:p1", command: "handoff-to-continue", sessionId: "session-1" },
+      [panel],
+      replaced,
+    )).toBeNull();
+
+    // The same pinned session still runs while it IS the current one.
+    expect(commandDelivery(
+      { paneId: "w:p1", command: "handoff-to-continue", sessionId: "session-1" },
+      [panel],
+      registrations,
+    )).toEqual({ paneId: "w:p1", command: "handoff-to-continue", args: "" });
+  });
+
+  test("callers that resolve the current registration at click time are unaffected", () => {
+    // The command palette and the handoff button send no session and keep
+    // their existing behaviour: pinning is opt-in, per caller.
+    const replaced = new Map(registrations);
+    replaced.set("w:p1", {
+      paneId: "w:p1",
+      sessionId: "session-2",
+      messages: [],
+      commands: [{ name: "handoff-to-continue", description: "Write a handoff", source: "extension" }],
+    });
+    expect(commandDelivery({ paneId: "w:p1", command: "handoff-to-continue" }, [panel], replaced))
+      .toEqual({ paneId: "w:p1", command: "handoff-to-continue", args: "" });
+  });
+});
+
+describe("instructionSessionRefusal", () => {
+  test("a replacement extension session is refused, not queued to", () => {
+    // The captain wrote for the session they were watching. The queue entry is
+    // claimed at most once by whoever is registered, so queueing it to a
+    // replacement would deliver their message to a session they never chose.
+    expect(instructionSessionRefusal({
+      composerDelivered: false,
+      requestedSessionId: "session-1",
+      registeredSessionId: "session-2",
+    })).toBe("The selected Pi pane session is no longer current");
+  });
+
+  test("the pinned session is accepted while it is still the current one", () => {
+    expect(instructionSessionRefusal({
+      composerDelivered: false,
+      requestedSessionId: "session-1",
+      registeredSessionId: "session-1",
+    })).toBeNull();
+  });
+
+  test("an extension pane with no registration at all is refused", () => {
+    expect(instructionSessionRefusal({
+      composerDelivered: false,
+      requestedSessionId: null,
+      registeredSessionId: null,
+    })).toBe("The selected Pi pane session is no longer current");
+  });
+
+  test("composer kinds are never gated on a registration they cannot have", () => {
+    // Claude Code / Codex / OpenCode have no extension registering a session;
+    // their (weaker, stated) contract is pane liveness plus the delivery
+    // module's own idle gate.
+    expect(instructionSessionRefusal({
+      composerDelivered: true,
+      requestedSessionId: null,
+      registeredSessionId: null,
+    })).toBeNull();
   });
 });
 

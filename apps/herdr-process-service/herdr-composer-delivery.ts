@@ -37,6 +37,8 @@
  * hazards are already paid for.
  */
 
+import { COMPOSER_BUSY_REASON, COMPOSER_UNREADABLE_REASON } from "../../packages/core/live-pane-agents";
+
 export type HerdrCliRunner = (args: string[]) => Promise<{ stdout: string }>;
 
 export type ComposerDeliverySequencing = {
@@ -102,11 +104,13 @@ async function agentStatusRaw(run: HerdrCliRunner, paneId: string): Promise<stri
 const UNCONFIRMED_NOTE =
   "The message was typed into the pane's composer and Enter was pressed, but the agent was not seen starting a turn. Check the pane directly before sending again — the text may already be waiting there, and resending would deliver it twice.";
 
-export const COMPOSER_BUSY_REASON =
-  "This pane's agent is mid-turn. Typing now would queue the text in its composer where delivery cannot be confirmed, and a retry could send it twice. Wait for the pane to go idle, then send again.";
-
-export const COMPOSER_UNREADABLE_REASON =
-  "Herdr could not read this pane's agent state, so Plannotator cannot safely type into its composer.";
+/**
+ * The two pre-typing refusal reasons now live in the capability registry
+ * (`@plannotator/core/live-pane-agents`), because a browser send surface must
+ * refuse in the same words without issuing a request. Re-exported here so this
+ * module remains the place the host reads them from.
+ */
+export { COMPOSER_BUSY_REASON, COMPOSER_UNREADABLE_REASON };
 
 /**
  * Deliver `content` to `paneId`'s composer. Callers must pass the FULL final

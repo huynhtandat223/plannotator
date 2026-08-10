@@ -1429,8 +1429,41 @@ export function commandDelivery(
   if (!paneId || !command || !/^[-\w:.]+$/.test(command)) return null;
   const registration = enrichments.get(paneId);
   if (!registration || !panels.some((panel) => panel.id === paneId)) return null;
+  // A caller that captured the session which advertised this command may pin it.
+  // The command list is only meaningful for the session that published it, so a
+  // replacement registration must refuse rather than run a stale command against
+  // a session that never offered it. Optional: callers that resolve the current
+  // registration at click time (the command palette, the handoff button) omit it
+  // and keep their existing behaviour.
+  const requestedSessionId = text(body?.sessionId);
+  if (requestedSessionId && registration.sessionId !== requestedSessionId) return null;
   if (!registration.commands.some((capability) => capability.name === command)) return null;
   return { paneId, command, args };
+}
+
+/**
+ * Whether an extension-delivered instruction may be queued for this pane's
+ * CURRENT registration, or the reason it may not.
+ *
+ * A caller that captured the session it is addressing (the Watch composer pins
+ * one when the overlay opens) sends it back here, and a replacement session is
+ * refused rather than quietly queued — the captain's message was written for
+ * the session they were watching, and the queue entry is claimed at most once
+ * by whichever session is registered. Composer kinds have no registration to
+ * hold at all: pane liveness and the delivery module's own idle gate are the
+ * whole (weaker, stated) contract there.
+ */
+export function instructionSessionRefusal(input: {
+  composerDelivered: boolean;
+  requestedSessionId: string | null;
+  registeredSessionId: string | null;
+}): string | null {
+  if (input.composerDelivered) return null;
+  if (!input.registeredSessionId) return "The selected Pi pane session is no longer current";
+  if (input.requestedSessionId && input.requestedSessionId !== input.registeredSessionId) {
+    return "The selected Pi pane session is no longer current";
+  }
+  return null;
 }
 
 export async function formatInstructionFileReferences(content: string, root: string): Promise<{ content: string } | { error: string }> {
@@ -1486,12 +1519,14 @@ async function queueInstruction(request: IncomingMessage, response: ServerRespon
     return;
   }
   const composerDelivered = livePaneFeedbackDelivery(pane.agent) === "herdr-composer";
-  const requestedSessionId = text(body?.sessionId);
   const registration = panelSessions.get(prepared.paneId);
-  // Composer kinds have no extension registration to hold — pane liveness and
-  // the delivery module's own idle gate are the whole (weaker, stated) contract.
-  if (!composerDelivered && (!registration || (requestedSessionId && registration.sessionId !== requestedSessionId))) {
-    writeJson(response, 409, { error: "The selected Pi pane session is no longer current" });
+  const sessionRefusal = instructionSessionRefusal({
+    composerDelivered,
+    requestedSessionId: text(body?.sessionId),
+    registeredSessionId: registration?.sessionId ?? null,
+  });
+  if (sessionRefusal) {
+    writeJson(response, 409, { error: sessionRefusal });
     return;
   }
   let workspaceRoot: string;

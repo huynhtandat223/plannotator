@@ -286,6 +286,71 @@ export function livePaneAgentLabel(agent: string | undefined | null): string {
 }
 
 /**
+ * Why composer delivery refuses BEFORE typing anything.
+ *
+ * These live here rather than in the host's delivery module because both sides
+ * now say them: the host returns them on a 409, and a browser surface that
+ * offers sending must be able to refuse for the same reason in the same words
+ * without issuing a request. Two copies of this text would drift, and the
+ * drifted one would be the one a captain reads while deciding whether their
+ * message landed. `apps/herdr-process-service/herdr-composer-delivery.ts`
+ * re-exports both, so the host's own imports are unchanged.
+ */
+export const COMPOSER_BUSY_REASON =
+  "This pane's agent is mid-turn. Typing now would queue the text in its composer where delivery cannot be confirmed, and a retry could send it twice. Wait for the pane to go idle, then send again.";
+
+export const COMPOSER_UNREADABLE_REASON =
+  "Herdr could not read this pane's agent state, so Plannotator cannot safely type into its composer.";
+
+/**
+ * Everything a send surface needs to describe delivery for one agent kind,
+ * derived from this registry alone.
+ *
+ * It exists so a UI can render the mechanism, its note, its caveat and its
+ * refusal without ever asking "is this Pi?". A kind added to the table above
+ * gets correct copy here for free; a kind absent from it says exactly what it
+ * cannot do, in the registry's own words.
+ */
+export type LivePaneSendCopy = {
+  mechanism: LivePaneFeedbackDeliveryMechanism | null;
+  /** Short line shown next to the composer, before anything is sent. */
+  note: string;
+  /** The full honest caveat for composer delivery, or null when there is nothing to caveat. */
+  caveat: string | null;
+  /** Why sending is impossible for this kind, or null when it is possible. */
+  unavailableReason: string | null;
+};
+
+export function livePaneSendCopy(agent: string | undefined | null): LivePaneSendCopy {
+  const profile = livePaneAgentProfile(agent);
+  if (profile.feedbackDelivery === "pi-extension") {
+    return {
+      mechanism: "pi-extension",
+      // "Queued", never "delivered": the host hands the text to a queue that
+      // only the matching extension can claim, and nothing reports that claim
+      // back to the browser. Saying more than this would be inventing a receipt.
+      note: `Queued for the selected ${profile.label} session — its extension claims and delivers it.`,
+      caveat: null,
+      unavailableReason: null,
+    };
+  }
+  if (profile.feedbackDelivery === "herdr-composer") {
+    return {
+      mechanism: "herdr-composer",
+      note: `Typed into the ${profile.label} pane's composer through Herdr and submitted with Enter.`,
+      caveat: profile.composerDeliveryCaveat ?? null,
+      unavailableReason: null,
+    };
+  }
+  return {
+    mechanism: null,
+    note: "",
+    caveat: null,
+    unavailableReason: profile.unsupported.feedback ?? null,
+  };
+}
+
+/**
  * How sends reach this agent kind, or null when they cannot. The host selects
  * its delivery path from this — never from the kind's name — so a new kind
  * gains delivery by declaring it in its profile, with no discovery change.
