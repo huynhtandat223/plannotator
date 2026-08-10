@@ -500,109 +500,109 @@ export function LivePaneWatchOverlay({
           {/* A kind with no delivery mechanism stays read-only in the literal
               sense: it is told why, and given nothing to type into. A disabled
               textarea would still be an input on a surface that has none. */}
-          {sendCopy.mechanism === null ? null : (
-          <>
-          <textarea
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            // ⌘/Ctrl+Enter sends; plain Enter is left entirely alone so it
-            // inserts a newline. This is prose, and prose has paragraphs.
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-                event.preventDefault();
-                void submitMessage();
-              }
-            }}
-            rows={3}
-            placeholder={`Type a message for ${agentLabel}…`}
-            aria-label={`Message ${paneLabel}`}
-            // `resize-none`: the footer is fixed, and a draggable handle here
-            // would take the terminal's height on the screen where it is
-            // scarcest. Longer messages scroll inside the box instead.
-            className="w-full resize-none rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-            data-testid="live-pane-watch-input"
-          />
+          {sendCopy.mechanism !== null && (
+            <>
+              <textarea
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                // ⌘/Ctrl+Enter sends; plain Enter is left entirely alone so it
+                // inserts a newline. This is prose, and prose has paragraphs.
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault();
+                    void submitMessage();
+                  }
+                }}
+                rows={3}
+                placeholder={`Type a message for ${agentLabel}…`}
+                aria-label={`Message ${paneLabel}`}
+                // `resize-none`: the footer is fixed, and a draggable handle here
+                // would take the terminal's height on the screen where it is
+                // scarcest. Longer messages scroll inside the box instead.
+                className="w-full resize-none rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                data-testid="live-pane-watch-input"
+              />
 
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[11px] text-muted-foreground">
-              ⌘/Ctrl+Enter to send · Enter adds a line
-            </span>
-            <button
-              type="button"
-              onClick={() => void submitMessage()}
-              // Disabled for the duration of its own request: a second click
-              // during the round trip is a second message, and neither
-              // mechanism can take one back.
-              disabled={sending || Boolean(blockedReason)}
-              className="shrink-0 rounded border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted/40 disabled:opacity-50"
-              data-testid="live-pane-watch-send"
-            >
-              {sending ? "Sending…" : "Send message"}
-            </button>
-          </div>
-
-          {result && (
-            <p
-              role="status"
-              aria-live="polite"
-              className={`text-[11px] leading-snug ${RESULT_TONE_CLASS[result.tone]}`}
-              data-testid="live-pane-watch-result"
-            >
-              <span className="font-medium">{result.title}</span>
-              {` — ${result.detail}`}
-            </p>
-          )}
-
-          {/* Commands are secondary, advertised-only and explicit. They are a
-              separate control with a separate action and a separate boundary,
-              precisely so that nothing typed above — including text that starts
-              with `/` — can ever be interpreted as one. */}
-          {commandsOffered && (
-            <div className="flex flex-col gap-1 border-t border-border/60 pt-2" data-testid="live-pane-watch-commands">
-              <label className="text-[11px] text-muted-foreground" htmlFor={`watch-command-${paneId}`}>
-                Commands this pane advertises
-              </label>
-              <div className="flex items-center gap-2">
-                <select
-                  id={`watch-command-${paneId}`}
-                  value={command}
-                  onChange={(event) => setCommand(event.target.value)}
-                  className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-xs text-foreground"
-                  data-testid="live-pane-watch-command-select"
-                >
-                  <option value="">Choose a command…</option>
-                  {advertisedCommands.map((advertised) => (
-                    <option key={advertised.name} value={advertised.name}>
-                      {`/${advertised.name}`}
-                      {advertised.description ? ` — ${advertised.description}` : ""}
-                    </option>
-                  ))}
-                </select>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] text-muted-foreground">
+                  ⌘/Ctrl+Enter to send · Enter adds a line
+                </span>
                 <button
                   type="button"
-                  onClick={() => void runCommand()}
-                  // Choosing a command never runs it; only this does.
-                  disabled={!command || runningCommand || sessionReplaced}
+                  onClick={() => void submitMessage()}
+                  // Disabled for the duration of its own request: a second click
+                  // during the round trip is a second message, and neither
+                  // mechanism can take one back.
+                  disabled={sending || Boolean(blockedReason)}
                   className="shrink-0 rounded border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted/40 disabled:opacity-50"
-                  data-testid="live-pane-watch-run-command"
+                  data-testid="live-pane-watch-send"
                 >
-                  {runningCommand ? "Running…" : `Run /${command || "command"}`}
+                  {sending ? "Sending…" : "Send message"}
                 </button>
               </div>
-              {commandResult && (
+
+              {result && (
                 <p
                   role="status"
                   aria-live="polite"
-                  className={`text-[11px] leading-snug ${RESULT_TONE_CLASS[commandResult.tone]}`}
-                  data-testid="live-pane-watch-command-result"
+                  className={`text-[11px] leading-snug ${RESULT_TONE_CLASS[result.tone]}`}
+                  data-testid="live-pane-watch-result"
                 >
-                  <span className="font-medium">{commandResult.title}</span>
-                  {` — ${commandResult.detail}`}
+                  <span className="font-medium">{result.title}</span>
+                  {` — ${result.detail}`}
                 </p>
               )}
-            </div>
-          )}
-          </>
+
+              {/* Commands are secondary, advertised-only and explicit. They are a
+                  separate control with a separate action and a separate boundary,
+                  precisely so that nothing typed above — including text that starts
+                  with `/` — can ever be interpreted as one. */}
+              {commandsOffered && (
+                <div className="flex flex-col gap-1 border-t border-border/60 pt-2" data-testid="live-pane-watch-commands">
+                  <label className="text-[11px] text-muted-foreground" htmlFor={`watch-command-${paneId}`}>
+                    Commands this pane advertises
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <select
+                      id={`watch-command-${paneId}`}
+                      value={command}
+                      onChange={(event) => setCommand(event.target.value)}
+                      className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-xs text-foreground"
+                      data-testid="live-pane-watch-command-select"
+                    >
+                      <option value="">Choose a command…</option>
+                      {advertisedCommands.map((advertised) => (
+                        <option key={advertised.name} value={advertised.name}>
+                          {`/${advertised.name}`}
+                          {advertised.description ? ` — ${advertised.description}` : ""}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => void runCommand()}
+                      // Choosing a command never runs it; only this does.
+                      disabled={!command || runningCommand || sessionReplaced}
+                      className="shrink-0 rounded border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted/40 disabled:opacity-50"
+                      data-testid="live-pane-watch-run-command"
+                    >
+                      {runningCommand ? "Running…" : command ? `Run /${command}` : "Run command"}
+                    </button>
+                  </div>
+                  {commandResult && (
+                    <p
+                      role="status"
+                      aria-live="polite"
+                      className={`text-[11px] leading-snug ${RESULT_TONE_CLASS[commandResult.tone]}`}
+                      data-testid="live-pane-watch-command-result"
+                    >
+                      <span className="font-medium">{commandResult.title}</span>
+                      {` — ${commandResult.detail}`}
+                    </p>
+                  )}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}
