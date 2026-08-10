@@ -201,6 +201,31 @@ export function watchStatusLabel(status: LivePaneWatchOverlayProps["agentStatus"
  * idle. Every reason is one the host itself would answer with, so a refusal
  * shown here and a refusal returned by the server read identically.
  */
+const SESSION_REPLACED_REASON =
+  "This pane's agent session has been replaced since Watch opened. Close Watch and reopen it on the current session — Plannotator will not send to a session you did not choose.";
+
+/**
+ * Why an advertised command cannot be run right now, or null when it can.
+ *
+ * A command list is published by ONE session, and this surface pins the session
+ * it saw so the host can refuse a replacement. Without a captured session there
+ * is nothing to pin: the request would omit `sessionId`, which the host reads as
+ * "resolve the current registration" — the deliberate opt-out for callers that
+ * pick a command at click time. That is right for the command palette and wrong
+ * here, so the missing session disables the control instead of quietly becoming
+ * the unpinned path.
+ */
+export function watchCommandBlockedReason(input: {
+  piSessionId?: string;
+  sessionReplaced?: boolean;
+}): string | null {
+  if (!input.piSessionId) {
+    return "Plannotator did not capture the agent session that advertised these commands, so it cannot guarantee one runs against the session you are watching.";
+  }
+  if (input.sessionReplaced) return SESSION_REPLACED_REASON;
+  return null;
+}
+
 export function watchSendBlockedReason(input: {
   agent?: string;
   agentStatus?: LivePaneWatchOverlayProps["agentStatus"];
@@ -209,9 +234,7 @@ export function watchSendBlockedReason(input: {
 }): string | null {
   const copy = livePaneSendCopy(input.agent);
   if (copy.unavailableReason) return copy.unavailableReason;
-  if (input.sessionReplaced) {
-    return "This pane's agent session has been replaced since Watch opened. Close Watch and reopen it on the current session — Plannotator will not send to a session you did not choose.";
-  }
+  if (input.sessionReplaced) return SESSION_REPLACED_REASON;
   if (copy.mechanism === "pi-extension" && !input.piSessionId) {
     return "Plannotator did not capture an agent session for this pane when Watch opened, so it cannot guarantee the message reaches the session you are watching.";
   }
@@ -303,6 +326,7 @@ export function LivePaneWatchOverlay({
   const commandsOffered = Boolean(onRunCommand)
     && supportsLivePaneCapability(agent, "commands")
     && advertisedCommands.length > 0;
+  const commandBlockedReason = watchCommandBlockedReason({ piSessionId, sessionReplaced });
 
   const submitMessage = React.useCallback(async () => {
     // Guards the button's `disabled` also covers — repeated here because
@@ -342,12 +366,9 @@ export function LivePaneWatchOverlay({
 
   const runCommand = React.useCallback(async () => {
     if (!onRunCommand || runningCommand || !command) return;
-    if (sessionReplaced) {
-      setCommandResult({
-        tone: "error",
-        title: "Command not run",
-        detail: watchSendBlockedReason({ agent, agentStatus, piSessionId, sessionReplaced }) ?? "",
-      });
+    const blocked = watchCommandBlockedReason({ piSessionId, sessionReplaced });
+    if (blocked) {
+      setCommandResult({ tone: "error", title: "Command not run", detail: blocked });
       return;
     }
     setRunningCommand(true);
@@ -366,7 +387,7 @@ export function LivePaneWatchOverlay({
     } finally {
       setRunningCommand(false);
     }
-  }, [onRunCommand, runningCommand, command, sessionReplaced, agent, agentStatus, piSessionId, agentLabel]);
+  }, [onRunCommand, runningCommand, command, sessionReplaced, piSessionId, agentLabel]);
 
   return (
     <div
@@ -562,6 +583,11 @@ export function LivePaneWatchOverlay({
                   <label className="text-[11px] text-muted-foreground" htmlFor={`watch-command-${paneId}`}>
                     Commands this pane advertises
                   </label>
+                  {commandBlockedReason && (
+                    <p className="text-[11px] leading-snug text-destructive" data-testid="live-pane-watch-command-blocked">
+                      {commandBlockedReason}
+                    </p>
+                  )}
                   <div className="flex items-center gap-2">
                     <select
                       id={`watch-command-${paneId}`}
@@ -582,7 +608,7 @@ export function LivePaneWatchOverlay({
                       type="button"
                       onClick={() => void runCommand()}
                       // Choosing a command never runs it; only this does.
-                      disabled={!command || runningCommand || sessionReplaced}
+                      disabled={!command || runningCommand || Boolean(commandBlockedReason)}
                       className="shrink-0 rounded border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted/40 disabled:opacity-50"
                       data-testid="live-pane-watch-run-command"
                     >

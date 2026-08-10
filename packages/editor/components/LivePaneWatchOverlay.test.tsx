@@ -23,7 +23,12 @@ import { createRoot, type Root } from 'react-dom/client';
 import { COMPOSER_BUSY_REASON, COMPOSER_UNREADABLE_REASON, livePaneCapabilityReason } from '@plannotator/core/live-pane-agents';
 import type { PaneWatchEvent, PaneWatchStatus } from '@plannotator/core/pane-watch';
 
-import { LivePaneWatchOverlay, watchFontSize, watchSendBlockedReason } from './LivePaneWatchOverlay';
+import {
+  LivePaneWatchOverlay,
+  watchCommandBlockedReason,
+  watchFontSize,
+  watchSendBlockedReason,
+} from './LivePaneWatchOverlay';
 import type { LivePaneWatchOverlayProps } from './LivePaneWatchOverlay';
 import type { LiveDeliveryReceipt } from '../liveResponseFeedback';
 import type { PaneWatchHandlers, PaneWatchSubscribe } from '../live/paneWatchStream';
@@ -684,6 +689,45 @@ test.skipIf(!hasDom)('commands are advertised-only, explicit, and never triggere
   expect(commandResult).toContain('Command started');
   // …and running one sent no message.
   expect(recorder.sent).toEqual([]);
+});
+
+test.skipIf(!hasDom)('advertised commands without a captured session are visibly refused, not run unpinned', async () => {
+  // The host reads a command request WITHOUT a sessionId as "resolve the
+  // current registration" — the deliberate opt-out for callers that pick a
+  // command at click time. Watch is not one of those, so a missing captured
+  // session must disable the action rather than quietly become the unpinned
+  // path and run against whichever session happens to be registered.
+  const stream = controllableStream();
+  const ran: string[] = [];
+  const el = await renderOverlay(stream, () => {}, {
+    piSessionId: undefined,
+    commands: [{ name: 'handoff-to-continue' }],
+    onRunCommand: async (name) => { ran.push(name); },
+  });
+  await watching(stream);
+
+  expect(el.querySelector('[data-testid="live-pane-watch-command-blocked"]')?.textContent)
+    .toContain('did not capture the agent session that advertised these commands');
+
+  const select = el.querySelector<HTMLSelectElement>('[data-testid="live-pane-watch-command-select"]')!;
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
+    setter?.call(select, 'handoff-to-continue');
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+
+  const run = el.querySelector<HTMLButtonElement>('[data-testid="live-pane-watch-run-command"]')!;
+  expect(run.disabled).toBe(true);
+  await act(async () => run.click());
+  expect(ran).toEqual([]);
+});
+
+test('the command gate requires a captured session, then rejects a replaced one', () => {
+  expect(watchCommandBlockedReason({ piSessionId: undefined }))
+    .toContain('did not capture the agent session');
+  expect(watchCommandBlockedReason({ piSessionId: 'session-1', sessionReplaced: true }))
+    .toContain('replaced since Watch opened');
+  expect(watchCommandBlockedReason({ piSessionId: 'session-1' })).toBeNull();
 });
 
 test.skipIf(!hasDom)('a kind that advertises no commands gets no command control at all', async () => {
