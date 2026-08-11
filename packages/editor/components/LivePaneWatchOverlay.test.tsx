@@ -168,21 +168,65 @@ async function pressSubmitChord(el: HTMLElement, modifier: 'metaKey' | 'ctrlKey'
   await pressEnter(el, modifier);
 }
 
+/**
+ * Every utility in a class list that sets `height` on the element itself.
+ *
+ * Deliberately a scan rather than a check for one known-bad name: the defect is
+ * not `h-screen` specifically, it is having MORE THAN ONE of these at once —
+ * at which point Tailwind's emission order, not this component, picks the
+ * height the captain gets.
+ */
+function heightUtilities(className: string): string[] {
+  return className
+    .split(/\s+/)
+    .filter((utility) => /^h-(screen|full|dvh|svh|lvh|\[.+\])$/.test(utility));
+}
+
 test.skipIf(!hasDom)('occupies the full dynamic viewport on a narrow portrait screen', async () => {
   const stream = controllableStream();
   const el = await renderOverlay(stream);
   const overlay = el.querySelector<HTMLElement>('[data-testid="live-pane-watch-overlay"]')!;
   expect(overlay).toBeTruthy();
-  // `100dvh`, not `100vh`: mobile browser chrome makes `100vh` overshoot the
-  // area the captain can actually see. Asserted as a class rather than an
-  // inline style deliberately — happy-dom's CSS parser silently DROPS the
-  // `dvh` unit from inline styles, so an inline assertion here would be
-  // untestable, and the app's root element already uses this same idiom.
-  expect(overlay.className).toContain('h-[100dvh]');
-  expect(overlay.className).toContain('h-screen');
+
+  // EXACTLY ONE height utility, and it is the dynamic-viewport one.
+  //
+  // This assertion replaces one that required BOTH `h-[100dvh]` and `h-screen`
+  // and so ratified the bug it was written to prevent: the two are the same
+  // property at the same specificity in the same layer, Tailwind emits
+  // `.h-screen{height:100vh}` last, and `100vh` therefore won. On Android
+  // Chrome that made this `fixed` overlay ~56px taller than the visible
+  // viewport, putting the bottom of the write surface off the device edge with
+  // nothing able to scroll it back.
+  //
+  // Asserted as classes rather than computed layout because happy-dom has no
+  // layout engine, and as a class rather than an inline style because its CSS
+  // parser silently DROPS the `dvh` unit from inline styles.
+  expect(heightUtilities(overlay.className)).toEqual(['h-[100dvh]']);
   expect(overlay.className).toContain('w-screen');
   expect(overlay.className).toContain('fixed');
   expect(overlay.className).toContain('inset-0');
+});
+
+test.skipIf(!hasDom)('the write surface is bounded and scrolls itself, so no control can fall off the edge', async () => {
+  const stream = controllableStream();
+  const el = await renderOverlay(stream);
+  const composer = el.querySelector<HTMLElement>('[data-testid="live-pane-watch-composer"]')!;
+  expect(composer).toBeTruthy();
+
+  // The overlay is `fixed`, so it has no scroll of last resort: a composer
+  // taller than the space left over does not overflow into somewhere the
+  // captain can scroll to, it overflows off the screen. Measured before this
+  // was added, the "Type into the pane" row and its keys left the viewport
+  // below ~381px of height while `document.scrollingElement` stayed
+  // unscrollable. A cap without `overflow-y-auto` would merely clip them
+  // instead, so both halves are the contract.
+  const capped = composer.className.split(/\s+/).some((utility) => utility.startsWith('max-h-'));
+  expect(capped).toBe(true);
+  expect(composer.className).toContain('overflow-y-auto');
+
+  // Still unshrinkable: the terminal is the region that gives up space, not the
+  // one surface the captain writes from.
+  expect(composer.className).toContain('flex-shrink-0');
 });
 
 test.skipIf(!hasDom)('header holds the pane name and Close, and nothing else', async () => {

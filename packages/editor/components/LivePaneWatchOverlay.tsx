@@ -500,11 +500,28 @@ export function LivePaneWatchOverlay({
       role="dialog"
       aria-modal="true"
       aria-label={`Live terminal — ${paneLabel}`}
-      // `h-screen h-[100dvh]` is the app's existing dynamic-viewport idiom (see
-      // the root element in App.tsx): `h-screen` is the fallback, `100dvh` wins
-      // where supported. It matters most here — mobile browser chrome makes
-      // `100vh` overshoot exactly the area the captain can actually see.
-      className="fixed inset-0 z-50 flex h-screen h-[100dvh] w-screen flex-col bg-background"
+      // ONE height declaration, and it must stay one.
+      //
+      // This was `h-screen h-[100dvh]`, on the belief that `h-screen` is a
+      // fallback and `100dvh` wins where supported. It does not: both utilities
+      // are `height` at equal specificity in the same `@layer utilities`, so the
+      // winner is whichever Tailwind happens to emit LAST — and it emits
+      // `.h-screen{height:100vh}` after `.h-\[100dvh\]{height:100dvh}`. The
+      // overlay was therefore `100vh` — the LARGE viewport, measured with the
+      // mobile URL bar retracted — while the captain was looking at the small
+      // one. Because this box is `fixed`, the ~56px difference was not "below
+      // the fold": nothing scrolls a fixed element, so the bottom of the write
+      // surface was rendered off the device edge and could not be reached at
+      // all. Measured on a 393px-wide Android portrait viewport: on a Claude
+      // Code pane the entire "Type into the pane" row and all six keys, and on a
+      // Pi pane the whole advertised-commands control.
+      //
+      // `inset-0` is the fallback now: `top:0; bottom:0` on a fixed box already
+      // stretches it to the viewport, so a browser too old for `dvh` drops the
+      // height declaration and lands exactly where `100vh` used to put it. Never
+      // pair this with a second height utility — the cascade, not this file,
+      // would decide which one the captain gets.
+      className="fixed inset-0 z-50 flex h-[100dvh] w-screen flex-col bg-background"
       data-testid="live-pane-watch-overlay"
     >
       <div className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-border px-3 py-2">
@@ -601,7 +618,22 @@ export function LivePaneWatchOverlay({
           cannot happen. */}
       {(onSendMessage || onPaneInput) && !ended && (
         <div
-          className="flex flex-shrink-0 flex-col gap-2 border-t border-border px-3 py-2"
+          // Bounded AND scrollable, because this box sits at the bottom of a
+          // `fixed` overlay with no scroll of last resort: anything that does
+          // not fit is not below a fold the captain can reach, it is off the
+          // device edge and gone. `flex-shrink-0` alone protected the write
+          // surface from being squeezed, but nothing capped it — measured, the
+          // controls started falling off the bottom below ~381px of viewport
+          // height (a phone in landscape), with `document.scrollingElement` not
+          // scrollable.
+          //
+          // The cap is deliberately loose: real phone portraits measure
+          // 306–368px of composer against 640–848px of viewport, so 60% never
+          // binds there and both the phone and the desktop keep today's exact
+          // layout. It binds only when the viewport is genuinely short, and then
+          // the overflow becomes this box's own scroll — which also leaves the
+          // terminal a ~40% floor instead of collapsing it to nothing.
+          className="flex max-h-[60%] flex-shrink-0 flex-col gap-2 overflow-y-auto overscroll-contain border-t border-border px-3 py-2"
           data-testid="live-pane-watch-composer"
         >
           {/* Pane, agent kind, live state and delivery mechanism, in visible
