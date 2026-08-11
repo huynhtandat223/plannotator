@@ -33,6 +33,8 @@ import {
   PANE_WATCH_READ_TIMEOUT_MS,
 } from "../../packages/core/pane-watch";
 import { deliverViaHerdrComposer, type ComposerDeliveryOutcome } from "./herdr-composer-delivery";
+import { paneInputArgs, paneInputDelivery, paneInputQueue } from "./pane-input";
+import { PANE_INPUT_PATH } from "../../packages/core/pane-input";
 import { formatLiveFeedbackBatch } from "../ex-pi-extension/session";
 import {
   filterWorkspaceStatusForDirectory,
@@ -75,6 +77,9 @@ const host = process.env.PLANNOTATOR_HERDR_HOST ?? "0.0.0.0";
 // loopback and Tailscale peers; Pi enrichment and feedback claiming remain
 // loopback-only because they carry the local Pi session identity.
 const browserWriteToken = process.env.PLANNOTATOR_HERDR_WRITE_TOKEN?.trim() || null;
+
+/** Per-pane serial executor for `/api/pane-input`. See `pane-input.ts`. */
+const paneInput = paneInputQueue();
 const MAX_ACTION_REQUEST_BODY_BYTES = 16_384;
 /** Up to `LIVE_MESSAGE_RETENTION` finalized assistant responses, delivered only from a local Pi pane. */
 export const MAX_PANEL_SESSION_BODY_BYTES = 1_000_000;
@@ -1574,6 +1579,45 @@ async function queueCommand(request: IncomingMessage, response: ServerResponse):
   // `sendUserMessage` text even when it starts with `/`.
   const command = `/${prepared.command}${prepared.args ? ` ${prepared.args}` : ""}`;
   await execFileAsync("herdr", ["pane", "run", prepared.paneId, command], { timeout: 10_000 });
+  writeJson(response, 202, { ok: true });
+}
+
+/**
+ * Type one text chunk or one key into a watched pane.
+ *
+ * Deliberately the weakest write this service offers, and labelled as such at
+ * every layer: no busy gate, no confirmation, no retry. The captain is watching
+ * the pane's screen, so the screen is the acknowledgement — which is exactly
+ * what makes it the only mechanism that can drive an agent's native completion
+ * popup. `/api/instruction` remains the path for anything that needs a receipt.
+ *
+ * The pane is authorised against a FRESH snapshot on every call rather than a
+ * cached one: this is a keystroke, and a keystroke aimed at a pane that has
+ * since been replaced belongs to nobody.
+ */
+async function queuePaneInput(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (!canWriteFeedback(request)) {
+    writeJson(response, 403, { error: "Typing into a pane requires a loopback browser or PLANNOTATOR_HERDR_WRITE_TOKEN." });
+    return;
+  }
+  const body = await requestJson(request);
+  const { panels } = await reviewSnapshot();
+  const prepared = paneInputDelivery(body, panels.map((panel) => panel.id));
+  if ("error" in prepared) {
+    writeJson(response, 400, prepared);
+    return;
+  }
+  const args = paneInputArgs(prepared);
+  try {
+    // Serialised per pane: "type /mod, then Tab" is the whole interaction, and
+    // two overlapping execFile calls have no defined arrival order.
+    await paneInput.run(prepared.paneId, () => execFileAsync("herdr", args, { timeout: 10_000 }));
+  } catch {
+    // The pane's own contents never appear in an error: this endpoint reads
+    // nothing back, and should not start now.
+    writeJson(response, 502, { error: "Herdr could not deliver that input. The pane may have closed." });
+    return;
+  }
   writeJson(response, 202, { ok: true });
 }
 
@@ -3699,6 +3743,10 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
   }
   if (request.method === "POST" && url.pathname === "/api/command") {
     void queueCommand(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === PANE_INPUT_PATH) {
+    void queuePaneInput(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
     return;
   }
   if (request.method === "POST" && url.pathname === "/api/process-panels") {

@@ -124,7 +124,7 @@ async function renderOverlay(
   );
 }
 
-const input = (el: HTMLElement): HTMLTextAreaElement =>
+const inputBox = (el: HTMLElement): HTMLTextAreaElement =>
   el.querySelector<HTMLTextAreaElement>('[data-testid="live-pane-watch-input"]')!;
 const sendButton = (el: HTMLElement): HTMLButtonElement =>
   el.querySelector<HTMLButtonElement>('[data-testid="live-pane-watch-send"]')!;
@@ -133,7 +133,7 @@ const resultText = (el: HTMLElement): string =>
 
 /** Type into the composer the way a captain does, through the real change event. */
 async function type(el: HTMLElement, text: string): Promise<void> {
-  const textarea = input(el);
+  const textarea = inputBox(el);
   await act(async () => {
     const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
     setter?.call(textarea, text);
@@ -160,7 +160,7 @@ async function pressEnter(
     cancelable: true,
     ...(modifier ? { [modifier]: true } : {}),
   });
-  await act(async () => { input(el).dispatchEvent(event); });
+  await act(async () => { inputBox(el).dispatchEvent(event); });
   return { claimed: event.defaultPrevented };
 }
 
@@ -384,7 +384,7 @@ test.skipIf(!hasDom)('the terminal region stays free of controls; the footer is 
   const composer = el.querySelector<HTMLElement>('[data-testid="live-pane-watch-composer"]')!;
   expect(composer).toBeTruthy();
   expect(el.querySelectorAll('textarea').length).toBe(1);
-  expect(composer.contains(input(el))).toBe(true);
+  expect(composer.contains(inputBox(el))).toBe(true);
 
   // The pane-level affordances a remote terminal would have are still absent —
   // this is a message box, not terminal control.
@@ -408,7 +408,7 @@ test.skipIf(!hasDom)('the footer names the pane, agent, status and delivery mech
 
   // The composer's accessible name identifies the pane too — the visible text
   // is not the only place this is available.
-  expect(input(el).getAttribute('aria-label')).toContain('firstmate · t3H');
+  expect(inputBox(el).getAttribute('aria-label')).toContain('firstmate · t3H');
 
   // The registry's full composer caveat is shown before anything is sent,
   // verbatim, so the weaker guarantee is visible at decision time.
@@ -447,7 +447,7 @@ test.skipIf(!hasDom)('sends arbitrary multiline prose: plain Enter adds a line, 
   const plain = await pressEnter(el);
   expect(plain.claimed).toBe(false);
   expect(recorder.sent).toEqual([]);
-  expect(input(el).value).toBe(prose);
+  expect(inputBox(el).value).toBe(prose);
 
   // The chord is claimed — otherwise it would send AND insert a newline.
   const chord = await pressEnter(el, 'metaKey');
@@ -512,11 +512,13 @@ test.skipIf(!hasDom)('on composer delivery, text starting with / is refused as i
   // this text at all, and must say so before a message is written around it.
   const stream = controllableStream();
   const recorder = recordingSend();
+  const input = recordingPaneInput();
   const el = await renderOverlay(stream, () => {}, {
     agent: 'claude',
     agentStatus: 'idle',
     piSessionId: undefined,
     onSendMessage: recorder.send,
+    onPaneInput: input.send,
   });
   await watching(stream);
 
@@ -531,11 +533,128 @@ test.skipIf(!hasDom)('on composer delivery, text starting with / is refused as i
   await pressSubmitChord(el, 'metaKey');
   expect(recorder.sent).toEqual([]);
   // A refusal never costs the captain their text.
-  expect(input(el).value).toBe('/model');
+  expect(inputBox(el).value).toBe('/model');
 
   // Clicking anyway reports the same reason rather than failing silently.
   await act(async () => sendButton(el).click());
   expect(recorder.sent).toEqual([]);
+
+  // The refusal names a route, so the route must be on screen. Taking it types
+  // the very same text — the difference is that nothing presses Enter.
+  expect(el.querySelector('[data-testid="live-pane-watch-typing"]')).toBeTruthy();
+  await act(async () => typeButton(el).click());
+  expect(input.events).toEqual(['text:/model']);
+  expect(recorder.sent).toEqual([]);
+});
+
+/** Records raw pane input in arrival order — the property that matters most. */
+function recordingPaneInput() {
+  const events: string[] = [];
+  return {
+    events,
+    send: async (event: { kind: 'text'; text: string } | { kind: 'key'; key: string }) => {
+      events.push(event.kind === 'text' ? `text:${event.text}` : `key:${event.key}`);
+    },
+  };
+}
+
+const typeButton = (el: HTMLElement): HTMLButtonElement =>
+  el.querySelector<HTMLButtonElement>('[data-testid="live-pane-watch-type"]')!;
+const keyButton = (el: HTMLElement, key: string): HTMLButtonElement =>
+  el.querySelector<HTMLButtonElement>(`[data-testid="live-pane-watch-key-${key}"]`)!;
+
+test.skipIf(!hasDom)('typing into the pane presses nothing, and the keys are separate deliberate presses', async () => {
+  // The `/model` interaction end to end: the characters land in the agent's own
+  // composer, its native popup opens (visible in the screen above, not modelled
+  // here), and the captain drives it. Nothing is pressed on their behalf —
+  // which is exactly what the Send message path cannot promise.
+  const stream = controllableStream();
+  const input = recordingPaneInput();
+  const el = await renderOverlay(stream, () => {}, {
+    agent: 'claude',
+    agentStatus: 'idle',
+    piSessionId: undefined,
+    onPaneInput: input.send,
+  });
+  await watching(stream);
+
+  await type(el, '/mod');
+  await act(async () => typeButton(el).click());
+  // Typed, and NOT submitted: no key event accompanies the text.
+  expect(input.events).toEqual(['text:/mod']);
+  // The pane's composer now holds it, so this box hands over authority.
+  expect(inputBox(el).value).toBe('');
+  expect(el.querySelector('[data-testid="live-pane-watch-type-result"]')?.textContent)
+    .toContain('Nothing was submitted');
+
+  await act(async () => keyButton(el, 'tab').click());
+  await act(async () => keyButton(el, 'enter').click());
+  // One press per click, in order, and never coalesced or repeated.
+  expect(input.events).toEqual(['text:/mod', 'key:tab', 'key:enter']);
+});
+
+test.skipIf(!hasDom)('a key press is never retried, and never doubled by a second click in flight', async () => {
+  // A key that may already have landed must not be pressed again on
+  // Plannotator's initiative — including by the captain's own double tap.
+  const stream = controllableStream();
+  const events: string[] = [];
+  let release: (() => void) | null = null;
+  const el = await renderOverlay(stream, () => {}, {
+    agent: 'claude',
+    agentStatus: 'idle',
+    piSessionId: undefined,
+    onPaneInput: async (event) => {
+      events.push(event.kind === 'key' ? event.key : 'text');
+      await new Promise<void>((resolve) => { release = resolve; });
+    },
+  });
+  await watching(stream);
+
+  await act(async () => keyButton(el, 'enter').click());
+  expect(keyButton(el, 'enter').disabled).toBe(true);
+  await act(async () => keyButton(el, 'enter').click());
+  expect(events).toEqual(['enter']);
+
+  await act(async () => { release?.(); });
+  expect(keyButton(el, 'enter').disabled).toBe(false);
+});
+
+test.skipIf(!hasDom)('a failed key reports the failure and offers no retry affordance', async () => {
+  const stream = controllableStream();
+  const el = await renderOverlay(stream, () => {}, {
+    agent: 'claude',
+    agentStatus: 'idle',
+    piSessionId: undefined,
+    onPaneInput: async () => { throw new Error('That pane is no longer live.'); },
+  });
+  await watching(stream);
+
+  await act(async () => keyButton(el, 'tab').click());
+  const result = el.querySelector<HTMLElement>('[data-testid="live-pane-watch-type-result"]')!;
+  expect(result.textContent).toContain('That pane is no longer live.');
+  // No "try again" button appears: re-pressing is the captain's call, made by
+  // pressing the key again after looking at the screen.
+  expect(result.querySelector('button')).toBeNull();
+});
+
+test.skipIf(!hasDom)('raw typing is pane-scoped: an agent kind with no delivery mechanism still gets it', async () => {
+  // Herdr can type into any pane it manages. Gating this on Plannotator's
+  // feedback capability would make the newest agent kind the least usable one.
+  const stream = controllableStream();
+  const input = recordingPaneInput();
+  const el = await renderOverlay(stream, () => {}, {
+    agent: 'some-future-agent',
+    piSessionId: undefined,
+    onPaneInput: input.send,
+  });
+  await watching(stream);
+
+  // No assured-send affordance — that one really is unavailable for this kind.
+  expect(el.querySelector('[data-testid="live-pane-watch-send"]')).toBeNull();
+  // But there is a box, and it reaches the pane.
+  await type(el, '/help');
+  await act(async () => typeButton(el).click());
+  expect(input.events).toEqual(['text:/help']);
 });
 
 test.skipIf(!hasDom)('composer delivery still sends prose that merely contains a slash', async () => {
@@ -573,12 +692,12 @@ test.skipIf(!hasDom)('a successful send clears the draft; a refusal keeps it', a
   await type(el, 'the api key is in the vault');
   await act(async () => sendButton(el).click());
   // A refusal must never cost the captain their message.
-  expect(input(el).value).toBe('the api key is in the vault');
+  expect(inputBox(el).value).toBe('the api key is in the vault');
   expect(resultText(el)).toContain('no longer current');
 
   answer = { ok: true, deliveryId: 'd1' } as LiveDeliveryReceipt;
   await act(async () => sendButton(el).click());
-  expect(input(el).value).toBe('');
+  expect(inputBox(el).value).toBe('');
 });
 
 test.skipIf(!hasDom)('Send is disabled in flight, so one message cannot become two', async () => {
@@ -677,7 +796,7 @@ test.skipIf(!hasDom)('a busy or unreadable composer pane is refused before any r
     await pressSubmitChord(el);
     // Nothing was typed into the pane, so nothing needs checking there.
     expect(recorder.sent).toEqual([]);
-    expect(input(el).value).toBe('check the migration');
+    expect(inputBox(el).value).toBe('check the migration');
 
     await act(async () => root?.unmount());
     host?.remove();
@@ -701,7 +820,7 @@ test.skipIf(!hasDom)('a replaced session refuses both writing and running, and k
   await type(el, 'the deploy key rotated');
   await pressSubmitChord(el);
   expect(recorder.sent).toEqual([]);
-  expect(input(el).value).toBe('the deploy key rotated');
+  expect(inputBox(el).value).toBe('the deploy key rotated');
   expect(el.querySelector('[data-testid="live-pane-watch-blocked"]')?.textContent)
     .toContain('replaced since Watch opened');
 

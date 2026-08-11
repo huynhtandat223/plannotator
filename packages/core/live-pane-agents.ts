@@ -337,7 +337,7 @@ export function composerOpensCompletionPopup(content: string): boolean {
  * Enter is the only Enter, and the popup is theirs to operate.
  */
 export const COMPOSER_COMMAND_TEXT_REASON =
-  "Text starting with / or $ opens this agent's own completion popup, and composer delivery submits by pressing Enter — which can select a suggestion and confirm a dialog you never saw. Nothing was typed. Use the advertised commands control, or type it in the pane itself.";
+  "Text starting with / or $ opens this agent's own completion popup, and composer delivery submits by pressing Enter — which can select a suggestion and confirm a dialog you never saw. Nothing was typed. Use the advertised commands control, or type it into the pane's own composer and press Enter yourself.";
 
 /**
  * The reason this exact text cannot be sent to this agent kind, or null.

@@ -25,6 +25,21 @@ const watchHandlers = source.slice(
   source.indexOf('const clearSelectedLiveFeedback'),
 );
 
+test('raw pane input is addressed by pinned pane id, and carries no session or command', () => {
+  // Typing is not a message: there is no session to pin it to and no receipt to
+  // wait for, so the body is deliberately just the pane and the event. It must
+  // still read the PINNED target, for the same reason the other two do.
+  const handler = source.slice(
+    source.indexOf('const handleWatchPaneInput'),
+    source.indexOf('const clearSelectedLiveFeedback'),
+  );
+  expect(handler).toContain('const target = watchTarget;');
+  expect(handler).toContain('paneId: target.paneId');
+  expect(handler).toContain('PANE_INPUT_PATH');
+  expect(handler).not.toContain('selectedLiveMessage');
+  expect(handler).not.toContain('sessionId');
+});
+
 test('opening Watch captures the whole target — pane, agent, session, and advertised commands', () => {
   const openHandler = source.slice(
     source.indexOf('const handleOpenLiveWatch'),

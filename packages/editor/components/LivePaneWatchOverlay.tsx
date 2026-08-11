@@ -49,6 +49,7 @@ import {
   livePaneSendCopy,
   supportsLivePaneCapability,
 } from "@plannotator/core/live-pane-agents";
+import { paneInputTextRefusal, type PaneInputKey } from "@plannotator/core/pane-input";
 import type { PaneWatchEndReason, PaneWatchStatus } from "@plannotator/core/pane-watch";
 
 import { describeLiveSendReceipt, type LiveDeliveryReceipt } from "../liveResponseFeedback";
@@ -166,6 +167,15 @@ export interface LivePaneWatchOverlayProps {
   onSendMessage?: (text: string) => Promise<LiveDeliveryReceipt>;
   /** Run one advertised command. Separate action, separate boundary, separate receipt. */
   onRunCommand?: (command: string) => Promise<void>;
+  /**
+   * Type raw input into the pane's own composer: one text chunk, or one key.
+   *
+   * The weakest write here, and the only one that can drive the agent's NATIVE
+   * completion popup — because it presses nothing on the captain's behalf. It
+   * resolves when Herdr accepted the call, which is not a delivery receipt; the
+   * watched screen above is the acknowledgement. Absent → no typing row.
+   */
+  onPaneInput?: (event: { kind: "text"; text: string } | { kind: "key"; key: PaneInputKey }) => Promise<void>;
   onClose: () => void;
   /** Injectable so the overlay can be exercised against its public contract. */
   subscribe?: PaneWatchSubscribe;
@@ -173,6 +183,24 @@ export interface LivePaneWatchOverlayProps {
 
 type WatchResultTone = "ok" | "warn" | "error";
 type WatchResult = { tone: WatchResultTone; title: string; detail: string };
+
+/**
+ * Key row labels. Glyph plus word: a lone ⏎ on a phone is a guess, and this row
+ * drives a real agent.
+ */
+const PANE_KEY_LABELS: Record<PaneInputKey, string> = {
+  tab: "Tab",
+  enter: "Enter ⏎",
+  escape: "Esc",
+  backspace: "⌫",
+  "arrow-up": "↑",
+  "arrow-down": "↓",
+  "arrow-left": "←",
+  "arrow-right": "→",
+};
+
+/** Order shown in the row: completion first, then the editor line. */
+const PANE_KEY_ROW: PaneInputKey[] = ["tab", "enter", "escape", "arrow-up", "arrow-down", "backspace"];
 
 const RESULT_TONE_CLASS: Record<WatchResultTone, string> = {
   ok: "text-muted-foreground",
@@ -256,6 +284,7 @@ export function LivePaneWatchOverlay({
   commands,
   onSendMessage,
   onRunCommand,
+  onPaneInput,
   onClose,
   subscribe = subscribePaneWatch,
 }: LivePaneWatchOverlayProps): React.ReactElement {
@@ -316,6 +345,8 @@ export function LivePaneWatchOverlay({
   const [draft, setDraft] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const [result, setResult] = React.useState<WatchResult | null>(null);
+  const [typing, setTyping] = React.useState(false);
+  const [typeResult, setTypeResult] = React.useState<WatchResult | null>(null);
   const [command, setCommand] = React.useState("");
   const [runningCommand, setRunningCommand] = React.useState(false);
   const [commandResult, setCommandResult] = React.useState<WatchResult | null>(null);
@@ -332,6 +363,11 @@ export function LivePaneWatchOverlay({
     && supportsLivePaneCapability(agent, "commands")
     && advertisedCommands.length > 0;
   const commandBlockedReason = watchCommandBlockedReason({ piSessionId, sessionReplaced });
+  // The assured path (one message, a receipt) and the raw path (characters and
+  // keys, no receipt) are independent: a host may offer either, both, or
+  // neither. `inputOffered` is just "is there anywhere for the box to go".
+  const composerOffered = Boolean(onSendMessage) && sendCopy.mechanism !== null;
+  const inputOffered = composerOffered || Boolean(onPaneInput);
 
   const submitMessage = React.useCallback(async () => {
     // Guards the button's `disabled` also covers — repeated here because
@@ -373,6 +409,66 @@ export function LivePaneWatchOverlay({
       setSending(false);
     }
   }, [onSendMessage, sending, draft, blockedReason, draftBlockedReason, agentLabel, sendCopy.mechanism]);
+
+  /**
+   * Type the draft into the pane's composer and press NOTHING.
+   *
+   * This is what makes `/model` workable: the characters land, the agent's own
+   * completion popup opens, and the captain sees it in the screen above and
+   * operates it with the key row below. The draft is cleared on success because
+   * the pane's composer now holds it — the screen, not this box, is the
+   * authoritative editor state from here on.
+   */
+  const typeIntoPane = React.useCallback(async () => {
+    if (!onPaneInput || typing) return;
+    const refusal = paneInputTextRefusal(draft);
+    if (refusal) {
+      setTypeResult({ tone: "error", title: "Not typed", detail: refusal });
+      return;
+    }
+    setTyping(true);
+    setTypeResult(null);
+    try {
+      await onPaneInput({ kind: "text", text: draft });
+      setDraft("");
+      setTypeResult({
+        tone: "ok",
+        title: "Typed into the pane",
+        // Never "sent": nothing was submitted, and saying so would invite the
+        // captain to walk away from a composer holding an unsent command.
+        detail: "Nothing was submitted. Watch the screen above, then use the keys below.",
+      });
+    } catch (error) {
+      setTypeResult({
+        tone: "error",
+        title: "Not typed",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setTyping(false);
+    }
+  }, [onPaneInput, typing, draft]);
+
+  /** Send exactly one key press. No coalescing, no repeat, no retry. */
+  const pressKey = React.useCallback(async (key: PaneInputKey) => {
+    if (!onPaneInput || typing) return;
+    setTyping(true);
+    setTypeResult(null);
+    try {
+      await onPaneInput({ kind: "key", key });
+      setTypeResult({ tone: "ok", title: `Pressed ${PANE_KEY_LABELS[key]}`, detail: "Check the screen above for what it did." });
+    } catch (error) {
+      setTypeResult({
+        tone: "error",
+        title: `${PANE_KEY_LABELS[key]} not sent`,
+        // No retry offered anywhere on this path: a key that may already have
+        // landed must not be pressed again on Plannotator's initiative.
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setTyping(false);
+    }
+  }, [onPaneInput, typing]);
 
   const runCommand = React.useCallback(async () => {
     if (!onRunCommand || runningCommand || !command) return;
@@ -497,13 +593,13 @@ export function LivePaneWatchOverlay({
         )}
       </div>
 
-      {/* The one write surface. Visually and structurally outside the screen
-          region above, which is what keeps "observe" and "tell" separate: this
-          sends a whole message through the host's message boundary, and can
-          never emit a keystroke into the terminal. Absent once the watch has
-          ended — a composer under a dead pane offers something that cannot
-          happen. */}
-      {onSendMessage && !ended && (
+      {/* The write surfaces. Visually and structurally outside the screen
+          region above, which is what keeps "observe" and "control" separate:
+          nothing inside the terminal region is focusable or clickable, and
+          every write below is an explicit, labelled action. Absent once the
+          watch has ended — controls under a dead pane offer something that
+          cannot happen. */}
+      {(onSendMessage || onPaneInput) && !ended && (
         <div
           className="flex flex-shrink-0 flex-col gap-2 border-t border-border px-3 py-2"
           data-testid="live-pane-watch-composer"
@@ -528,10 +624,13 @@ export function LivePaneWatchOverlay({
             </p>
           ) : null}
 
-          {/* A kind with no delivery mechanism stays read-only in the literal
-              sense: it is told why, and given nothing to type into. A disabled
-              textarea would still be an input on a surface that has none. */}
-          {sendCopy.mechanism !== null && (
+          {/* One box, two destinations, and the box itself belongs to neither.
+              A kind with no delivery mechanism gets a textarea only if raw
+              typing is offered — otherwise it stays read-only in the literal
+              sense: told why, and given nothing to type into. Raw typing is
+              pane-scoped, not agent-kind-scoped, so an agent kind Plannotator
+              has never heard of can still be typed into. */}
+          {inputOffered && (
             <>
               <textarea
                 value={draft}
@@ -556,8 +655,9 @@ export function LivePaneWatchOverlay({
 
               {/* Appears the moment a `/` or `$` is typed, not after a failed
                   send: the captain should learn this before writing a message
-                  they cannot send, and the refusal names where to go instead. */}
-              {!blockedReason && draftBlockedReason && (
+                  they cannot send, and the refusal names where to go instead —
+                  which, on this surface, is the typing row directly below. */}
+              {composerOffered && !blockedReason && draftBlockedReason && (
                 <p
                   role="status"
                   aria-live="polite"
@@ -568,6 +668,7 @@ export function LivePaneWatchOverlay({
                 </p>
               )}
 
+              {composerOffered && (
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[11px] text-muted-foreground">
                   ⌘/Ctrl+Enter to send · Enter adds a line
@@ -585,6 +686,7 @@ export function LivePaneWatchOverlay({
                   {sending ? "Sending…" : "Send message"}
                 </button>
               </div>
+              )}
 
               {result && (
                 <p
@@ -596,6 +698,57 @@ export function LivePaneWatchOverlay({
                   <span className="font-medium">{result.title}</span>
                   {` — ${result.detail}`}
                 </p>
+              )}
+
+              {/* The raw-typing half. It is the OPPOSITE trade to Send message:
+                  no receipt, no busy gate, nothing pressed on the captain's
+                  behalf — which is precisely why it is the one path that can
+                  drive the agent's own completion popup. Both are offered
+                  because neither can do the other's job. */}
+              {onPaneInput && (
+                <div className="flex flex-col gap-1 border-t border-border/60 pt-2" data-testid="live-pane-watch-typing">
+                  <p className="text-[11px] leading-snug text-muted-foreground">
+                    <span className="font-medium text-foreground">Type into the pane</span>
+                    {" — puts the text in the agent's own composer and presses nothing. Its suggestions appear on the screen above; drive them with the keys below."}
+                  </p>
+                  <div className="flex flex-wrap items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => void typeIntoPane()}
+                      disabled={typing || !draft}
+                      className="rounded border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted/40 disabled:opacity-50"
+                      data-testid="live-pane-watch-type"
+                    >
+                      {typing ? "Typing…" : "Type into pane"}
+                    </button>
+                    {PANE_KEY_ROW.map((key) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => void pressKey(key)}
+                        // One press per click. Disabled in flight so a second
+                        // tap during the round trip cannot become a second key.
+                        disabled={typing}
+                        aria-label={`Press ${PANE_KEY_LABELS[key]} in ${paneLabel}`}
+                        className="rounded border border-border px-2 py-1 font-mono text-xs text-foreground hover:bg-muted/40 disabled:opacity-50"
+                        data-testid={`live-pane-watch-key-${key}`}
+                      >
+                        {PANE_KEY_LABELS[key]}
+                      </button>
+                    ))}
+                  </div>
+                  {typeResult && (
+                    <p
+                      role="status"
+                      aria-live="polite"
+                      className={`text-[11px] leading-snug ${RESULT_TONE_CLASS[typeResult.tone]}`}
+                      data-testid="live-pane-watch-type-result"
+                    >
+                      <span className="font-medium">{typeResult.title}</span>
+                      {` — ${typeResult.detail}`}
+                    </p>
+                  )}
+                </div>
               )}
 
               {/* Commands are secondary, advertised-only and explicit. They are a

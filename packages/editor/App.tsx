@@ -200,6 +200,7 @@ import {
   supportsLivePaneCapability,
   type LivePaneLimitation,
 } from '@plannotator/core/live-pane-agents';
+import { PANE_INPUT_PATH, type PaneInputKey } from '@plannotator/core/pane-input';
 import { repoInfoForDocument } from './documentRepoInfo';
 import { describeLiveDelivery, submitLiveResponseFeedback, type LiveDeliveryReceipt } from './liveResponseFeedback';
 
@@ -1674,6 +1675,29 @@ const App: React.FC = () => {
     if (!response.ok) {
       const body = await response.json().catch(() => ({})) as { error?: string };
       throw new Error(body.error || 'The command could not be run in this pane.');
+    }
+  }, [watchTarget]);
+
+  /**
+   * Raw input for the pinned Watch pane: one text chunk, or one key.
+   *
+   * Addressed by pane id alone — this is a keystroke, not a message, so there
+   * is no session to pin it to and no receipt to wait for. Like the two
+   * handlers above it reads only `watchTarget`, never the current selection.
+   */
+  const handleWatchPaneInput = React.useCallback(async (
+    event: { kind: 'text'; text: string } | { kind: 'key'; key: PaneInputKey },
+  ): Promise<void> => {
+    const target = watchTarget;
+    if (!target) throw new Error('The live terminal watch is no longer open.');
+    const response = await fetch(PANE_INPUT_PATH, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paneId: target.paneId, ...event }),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error || 'Herdr could not deliver that input to this pane.');
     }
   }, [watchTarget]);
 
@@ -5536,6 +5560,7 @@ const App: React.FC = () => {
             commands={watchTarget.commands}
             onSendMessage={handleWatchSendMessage}
             onRunCommand={handleWatchRunCommand}
+            onPaneInput={handleWatchPaneInput}
             onClose={handleCloseLiveWatch}
           />
         )}
