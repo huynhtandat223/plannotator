@@ -23,7 +23,7 @@ import {
   supportsLivePaneCapability,
   type LivePaneCapabilityId,
 } from "../../packages/core/live-pane-agents";
-import { readClaudeLiveSession } from "./claude-live-session";
+import { readClaudeLiveSessionForCwds } from "./claude-live-session";
 import { startPaneWatchStream, type PaneWatchHerdr, type PaneWatchScreen } from "./pane-watch";
 import {
   PANE_WATCH_MAX_FRAME_BYTES,
@@ -310,7 +310,23 @@ export type HerdrPanel = {
   workspace: string;
   tab: string;
   panel: string;
+  /**
+   * Where this pane is working, preferring Herdr's `foreground_cwd` — normally
+   * the most specific answer (the worktree an agent is actually in, rather than
+   * the directory its shell started in).
+   */
   cwd: string;
+  /**
+   * The agent's own `cwd`, when it differs from {@link cwd}.
+   *
+   * `foreground_cwd` follows the FOREGROUND PROCESS, which for an agent running
+   * a language server is that server's directory — one observed pane reported
+   * `~/.local/lib/node_modules/pyright/dist`. Anything that resolves a pane to
+   * something cwd-keyed (the Claude Code session log above all) must be able to
+   * fall back to this, or a pane silently loses its transcript whenever its
+   * agent happens to have a child process running.
+   */
+  agentCwd?: string;
   status: "working" | "idle" | "blocked" | "unknown";
   focused: boolean;
   gitBranch?: string;
@@ -888,32 +904,43 @@ export async function diskTranscriptOutcomes(
   panels: ReadonlyArray<HerdrPanel>,
   registered: ReadonlyMap<string, PanelSessionEnrichment>,
   limit: number,
-  readTranscript: (cwd: string, limit: number) => Promise<{ sessionId: string; messages: PanelSessionEnrichment["messages"] } | null> = readClaudeLiveSession,
+  readTranscript: (
+    cwds: readonly string[],
+    limit: number,
+  ) => Promise<{ cwd: string; sessionId: string; messages: PanelSessionEnrichment["messages"] } | null> = readClaudeLiveSessionForCwds,
 ): Promise<DiskTranscriptOutcome[]> {
   const candidates = panels.filter(
     (panel) =>
       !registered.has(panel.id) &&
       livePaneAgentProfile(panel.agent).transcriptSource === "claude-session-log",
   );
+  // Resolution happens BEFORE the ambiguity check, not after, because a pane
+  // can fall back off its foreground cwd onto a shared one: two worktree panes
+  // whose agents both report the parent checkout would otherwise each be told
+  // they were unique and then both claim the same log.
+  const resolved = await Promise.all(candidates.map(async (panel) => ({
+    panel,
+    session: await readTranscript([panel.cwd, ...(panel.agentCwd ? [panel.agentCwd] : [])], limit),
+  })));
   const panesPerCwd = new Map<string, number>();
-  for (const panel of candidates) {
-    const key = resolve(panel.cwd);
+  for (const { session } of resolved) {
+    if (!session) continue;
+    const key = resolve(session.cwd);
     panesPerCwd.set(key, (panesPerCwd.get(key) ?? 0) + 1);
   }
-  return (await Promise.all(candidates.map(async (panel): Promise<DiskTranscriptOutcome | null> => {
-    if ((panesPerCwd.get(resolve(panel.cwd)) ?? 0) > 1) {
-      return {
+  return resolved.flatMap(({ panel, session }): DiskTranscriptOutcome[] => {
+    if (!session) return [];
+    if ((panesPerCwd.get(resolve(session.cwd)) ?? 0) > 1) {
+      return [{
         paneId: panel.id,
         note: `Two or more live panes share this working directory, so Plannotator cannot tell which ${livePaneAgentProfile(panel.agent).label} session log belongs to this one.`,
-      };
+      }];
     }
-    const session = await readTranscript(panel.cwd, limit);
-    if (!session) return null;
-    return {
+    return [{
       paneId: panel.id,
       enrichment: { paneId: panel.id, sessionId: session.sessionId, messages: session.messages, commands: [] },
-    };
-  }))).flatMap((outcome) => (outcome ? [outcome] : []));
+    }];
+  });
 }
 
 function normalizeActivity(value: unknown): HerdrActivity | null {
@@ -1089,7 +1116,8 @@ export function panelsFromSnapshot(snapshot: HerdrSnapshot): HerdrPanel[] {
     const agent = entry as HerdrAgent;
     const agentKind = text(agent.agent)?.toLowerCase();
     const paneId = text(agent.pane_id);
-    const cwd = text(agent.foreground_cwd) ?? text(agent.cwd);
+    const declaredCwd = text(agent.cwd);
+    const cwd = text(agent.foreground_cwd) ?? declaredCwd;
     if (!agentKind || !paneId || !cwd) return [];
     const workspaceId = text(agent.workspace_id);
     const tabId = text(agent.tab_id);
@@ -1102,6 +1130,7 @@ export function panelsFromSnapshot(snapshot: HerdrSnapshot): HerdrPanel[] {
       tab: tabId ? tabLabels.get(tabId) ?? tabId : "",
       panel: text(agent.name) ?? `Pane ${paneId.split(":").at(-1) ?? paneId}`,
       cwd,
+      ...(declaredCwd && declaredCwd !== cwd ? { agentCwd: declaredCwd } : {}),
       status: status(agent.agent_status),
       focused: agent.focused === true,
     }];
