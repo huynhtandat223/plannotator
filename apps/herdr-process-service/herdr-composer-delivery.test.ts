@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   classifySubmitAgentStatus,
   COMPOSER_BUSY_REASON,
+  COMPOSER_COMMAND_TEXT_REASON,
   COMPOSER_UNREADABLE_REASON,
   DEFAULT_COMPOSER_SEQUENCING,
   deliverViaHerdrComposer,
@@ -79,24 +80,46 @@ describe("deliverViaHerdrComposer", () => {
     expect(sendTextIndex).toBeLessThan(enterIndex);
   });
 
-  test("a slash-prefixed message gets the longer popup settle before the first Enter", async () => {
+  // These three previously asserted that popup-opening text was SENT, with a
+  // longer settle before the first Enter. That is the behaviour that pressed
+  // Enter three times through a `/model` picker on a real pane, so the
+  // assertions are inverted rather than kept: the property worth pinning now is
+  // that such text reaches Herdr in no form at all.
+  test("a slash-prefixed message is refused before any Herdr call", async () => {
     const herdr = fakeHerdr(["idle", "working"]);
-    await deliverViaHerdrComposer("w:p1", "/compact keep going", { run: herdr.run, sleep: herdr.sleep });
-    expect(herdr.sleeps[0]).toBe(DEFAULT_COMPOSER_SEQUENCING.popupSettleMs);
+    const outcome = await deliverViaHerdrComposer("w:p1", "/compact keep going", { run: herdr.run, sleep: herdr.sleep });
+    expect(outcome).toEqual({ delivered: false, reason: COMPOSER_COMMAND_TEXT_REASON });
+    // Not merely "not typed": the agent-state baseline read is not made either,
+    // so a refusal costs the watched pane nothing.
+    expect(herdr.calls).toHaveLength(0);
+    expect(herdr.sleeps).toHaveLength(0);
   });
 
-  test("a dollar-prefixed message also gets the popup settle", async () => {
+  test("a dollar-prefixed message is refused the same way", async () => {
     const herdr = fakeHerdr(["idle", "working"]);
-    await deliverViaHerdrComposer("w:p1", "$skill run", { run: herdr.run, sleep: herdr.sleep });
-    expect(herdr.sleeps[0]).toBe(DEFAULT_COMPOSER_SEQUENCING.popupSettleMs);
+    const outcome = await deliverViaHerdrComposer("w:p1", "$skill run", { run: herdr.run, sleep: herdr.sleep });
+    expect(outcome).toEqual({ delivered: false, reason: COMPOSER_COMMAND_TEXT_REASON });
+    expect(herdr.calls).toHaveLength(0);
+  });
+
+  test("the refusal keys on the leading character, not on the word after it", async () => {
+    // A message that merely mentions a command is prose and must still send.
+    const herdr = fakeHerdr(["idle", "working"]);
+    const outcome = await deliverViaHerdrComposer("w:p1", "run /model when you get a chance", {
+      run: herdr.run,
+      sleep: herdr.sleep,
+    });
+    expect(outcome).toEqual({ delivered: true, confirmed: true });
+    expect(sendTextCalls(herdr.calls)).toEqual([["pane", "send-text", "w:p1", "run /model when you get a chance"]]);
   });
 
   test("a swallowed first Enter is retried with Enter only — the text is never retyped", async () => {
-    // Baseline idle; the whole first confirmation window stays idle (popup ate
-    // Enter), then the second Enter's first poll observes working.
+    // Baseline idle; the whole first confirmation window stays idle, then the
+    // second Enter's first poll observes working. (Ordinary prose: an agent can
+    // still take two Enters without a completion popup being involved.)
     const firstWindowIdle = Array.from({ length: DEFAULT_COMPOSER_SEQUENCING.confirmPolls }, () => "idle");
     const herdr = fakeHerdr(["idle", ...firstWindowIdle, "working"]);
-    const outcome = await deliverViaHerdrComposer("w:p1", "/review this", { run: herdr.run, sleep: herdr.sleep });
+    const outcome = await deliverViaHerdrComposer("w:p1", "please review this", { run: herdr.run, sleep: herdr.sleep });
     expect(outcome).toEqual({ delivered: true, confirmed: true });
     expect(sendTextCalls(herdr.calls)).toHaveLength(1);
     expect(enterCalls(herdr.calls)).toHaveLength(2);

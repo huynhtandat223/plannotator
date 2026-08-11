@@ -303,6 +303,55 @@ export const COMPOSER_UNREADABLE_REASON =
   "Herdr could not read this pane's agent state, so Plannotator cannot safely type into its composer.";
 
 /**
+ * Whether `content` will open the agent TUI's own completion popup when typed
+ * into its composer.
+ *
+ * Stated once, here, because two consumers must agree exactly: the host delays
+ * its first Enter for popup text, and a browser send surface refuses that text
+ * outright (below). A drifted second copy would let the browser offer a send
+ * the host then handles under different assumptions.
+ */
+export function composerOpensCompletionPopup(content: string): boolean {
+  return content.startsWith("/") || content.startsWith("$");
+}
+
+/**
+ * Why composer delivery refuses popup-opening text.
+ *
+ * Composer delivery types the text, then presses Enter up to three times,
+ * because a first Enter swallowed by a completion popup starts no turn and the
+ * next one submits. That is sound for ordinary prose. It is NOT sound for a
+ * slash command, and the failure was observed rather than theorised: sending
+ * `/model` to a Claude Code pane typed it, Enter #1 accepted the popup entry,
+ * Enter #2 submitted the command — which opened an interactive picker instead
+ * of starting a turn, leaving the agent `idle` — and Enter #3 confirmed that
+ * picker. Three blind Enters walked through a dialog the captain never saw.
+ *
+ * There is no safe number of Enters here: the whole mechanism cannot tell a
+ * consumed keystroke from an ignored one, so any retry can land inside a modal.
+ * Sending one Enter and stopping is no better — it leaves the command typed and
+ * armed in a composer the captain has no way to clear from Watch. So nothing is
+ * typed at all, and the two paths that CAN run a command safely are named.
+ *
+ * Keystroke forwarding (issue #57) is the real answer: there the captain's own
+ * Enter is the only Enter, and the popup is theirs to operate.
+ */
+export const COMPOSER_COMMAND_TEXT_REASON =
+  "Text starting with / or $ opens this agent's own completion popup, and composer delivery submits by pressing Enter — which can select a suggestion and confirm a dialog you never saw. Nothing was typed. Use the advertised commands control, or type it in the pane itself.";
+
+/**
+ * The reason this exact text cannot be sent to this agent kind, or null.
+ *
+ * Only composer delivery is affected. Extension delivery hands the text to a
+ * queue as a message and presses no keys, so a leading `/` there is the
+ * receiving agent's business, not a delivery hazard.
+ */
+export function composerCommandTextRefusal(agent: string | undefined | null, content: string): string | null {
+  if (livePaneAgentProfile(agent).feedbackDelivery !== "herdr-composer") return null;
+  return composerOpensCompletionPopup(content) ? COMPOSER_COMMAND_TEXT_REASON : null;
+}
+
+/**
  * Everything a send surface needs to describe delivery for one agent kind,
  * derived from this registry alone.
  *

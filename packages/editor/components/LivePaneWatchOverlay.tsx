@@ -44,6 +44,7 @@ import { parseAnsiScreen, type AnsiColor, type AnsiLine } from "@plannotator/cor
 import {
   COMPOSER_BUSY_REASON,
   COMPOSER_UNREADABLE_REASON,
+  composerCommandTextRefusal,
   livePaneAgentLabel,
   livePaneSendCopy,
   supportsLivePaneCapability,
@@ -322,6 +323,10 @@ export function LivePaneWatchOverlay({
   const sendCopy = livePaneSendCopy(agent);
   const agentLabel = livePaneAgentLabel(agent);
   const blockedReason = watchSendBlockedReason({ agent, agentStatus, piSessionId, sessionReplaced });
+  // Refusal that depends on what is TYPED rather than on the pane, so it has to
+  // be recomputed per keystroke and cannot live in `watchSendBlockedReason`.
+  // Shown as the captain types, before they commit to sending.
+  const draftBlockedReason = composerCommandTextRefusal(agent, draft);
   const advertisedCommands = commands ?? [];
   const commandsOffered = Boolean(onRunCommand)
     && supportsLivePaneCapability(agent, "commands")
@@ -345,6 +350,11 @@ export function LivePaneWatchOverlay({
       setResult({ tone: "error", title: "Message not sent", detail: blockedReason });
       return;
     }
+    // Re-checked here and not only on the button: ⌘/Ctrl+Enter never touches it.
+    if (draftBlockedReason) {
+      setResult({ tone: "error", title: "Message not sent", detail: draftBlockedReason });
+      return;
+    }
     setSending(true);
     setResult(null);
     try {
@@ -362,7 +372,7 @@ export function LivePaneWatchOverlay({
     } finally {
       setSending(false);
     }
-  }, [onSendMessage, sending, draft, blockedReason, agentLabel, sendCopy.mechanism]);
+  }, [onSendMessage, sending, draft, blockedReason, draftBlockedReason, agentLabel, sendCopy.mechanism]);
 
   const runCommand = React.useCallback(async () => {
     if (!onRunCommand || runningCommand || !command) return;
@@ -544,6 +554,20 @@ export function LivePaneWatchOverlay({
                 data-testid="live-pane-watch-input"
               />
 
+              {/* Appears the moment a `/` or `$` is typed, not after a failed
+                  send: the captain should learn this before writing a message
+                  they cannot send, and the refusal names where to go instead. */}
+              {!blockedReason && draftBlockedReason && (
+                <p
+                  role="status"
+                  aria-live="polite"
+                  className="text-[11px] leading-snug text-destructive"
+                  data-testid="live-pane-watch-draft-blocked"
+                >
+                  {draftBlockedReason}
+                </p>
+              )}
+
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[11px] text-muted-foreground">
                   ⌘/Ctrl+Enter to send · Enter adds a line
@@ -554,7 +578,7 @@ export function LivePaneWatchOverlay({
                   // Disabled for the duration of its own request: a second click
                   // during the round trip is a second message, and neither
                   // mechanism can take one back.
-                  disabled={sending || Boolean(blockedReason)}
+                  disabled={sending || Boolean(blockedReason) || Boolean(draftBlockedReason)}
                   className="shrink-0 rounded border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted/40 disabled:opacity-50"
                   data-testid="live-pane-watch-send"
                 >

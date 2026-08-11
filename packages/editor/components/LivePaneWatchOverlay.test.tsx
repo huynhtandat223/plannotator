@@ -486,7 +486,7 @@ test.skipIf(!hasDom)('Ctrl+Enter sends too, for the captains not on a Mac', asyn
   expect(recorder.sent).toEqual(['run the migration']);
 });
 
-test.skipIf(!hasDom)('a message beginning with / is sent as literal text, never as a command', async () => {
+test.skipIf(!hasDom)('on extension delivery, a message beginning with / is literal text, never a command', async () => {
   const stream = controllableStream();
   const recorder = recordingSend();
   const ran: string[] = [];
@@ -503,6 +503,60 @@ test.skipIf(!hasDom)('a message beginning with / is sent as literal text, never 
   expect(recorder.sent).toEqual(['/compact is not what I mean — please compact the migration files instead']);
   // The advertised command of the same name was never invoked.
   expect(ran).toEqual([]);
+});
+
+test.skipIf(!hasDom)('on composer delivery, text starting with / is refused as it is typed', async () => {
+  // Observed on a real Claude Code pane: `/model` was typed in, Enter #1 took
+  // the completion popup, Enter #2 submitted, and because the picker it opened
+  // starts no turn, Enter #3 confirmed the picker. The composer cannot offer
+  // this text at all, and must say so before a message is written around it.
+  const stream = controllableStream();
+  const recorder = recordingSend();
+  const el = await renderOverlay(stream, () => {}, {
+    agent: 'claude',
+    agentStatus: 'idle',
+    piSessionId: undefined,
+    onSendMessage: recorder.send,
+  });
+  await watching(stream);
+
+  await type(el, '/model');
+
+  const reason = el.querySelector<HTMLElement>('[data-testid="live-pane-watch-draft-blocked"]')?.textContent ?? '';
+  expect(reason).toContain('Nothing was typed');
+  expect(reason).toContain('commands control');
+  expect(sendButton(el).disabled).toBe(true);
+
+  // The chord bypasses the button entirely, so it is re-checked in the handler.
+  await pressSubmitChord(el, 'metaKey');
+  expect(recorder.sent).toEqual([]);
+  // A refusal never costs the captain their text.
+  expect(input(el).value).toBe('/model');
+
+  // Clicking anyway reports the same reason rather than failing silently.
+  await act(async () => sendButton(el).click());
+  expect(recorder.sent).toEqual([]);
+});
+
+test.skipIf(!hasDom)('composer delivery still sends prose that merely contains a slash', async () => {
+  // The hazard is the agent's completion popup, which opens only on the first
+  // character. Refusing more than that would censor paths, dates and URLs.
+  const stream = controllableStream();
+  const recorder = recordingSend();
+  const el = await renderOverlay(stream, () => {}, {
+    agent: 'claude',
+    agentStatus: 'idle',
+    piSessionId: undefined,
+    onSendMessage: recorder.send,
+  });
+  await watching(stream);
+
+  const prose = 'check src/app.ts — /model is worth a look, and 1/2 the diff is noise';
+  await type(el, prose);
+  expect(el.querySelector('[data-testid="live-pane-watch-draft-blocked"]')).toBeNull();
+  expect(sendButton(el).disabled).toBe(false);
+  await act(async () => sendButton(el).click());
+  expect(recorder.sent).toEqual([prose]);
 });
 
 test.skipIf(!hasDom)('a successful send clears the draft; a refusal keeps it', async () => {

@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   COMPOSER_BUSY_REASON,
+  COMPOSER_COMMAND_TEXT_REASON,
   COMPOSER_UNREADABLE_REASON,
   LIVE_PANE_CAPABILITIES,
+  composerCommandTextRefusal,
+  composerOpensCompletionPopup,
   livePaneAgentLabel,
   livePaneAgentProfile,
   livePaneCapabilityReason,
@@ -140,5 +143,50 @@ describe("livePaneSendCopy", () => {
     expect(COMPOSER_BUSY_REASON).toContain("mid-turn");
     expect(COMPOSER_BUSY_REASON).toContain("send it twice");
     expect(COMPOSER_UNREADABLE_REASON).toContain("could not read this pane's agent state");
+  });
+});
+
+describe("composerCommandTextRefusal", () => {
+  // Composer delivery types the text and then presses Enter up to three times.
+  // On a real Claude Code pane that walked `/model` through popup -> submit ->
+  // picker confirm, so this text never reaches the pane at all.
+  test("refuses / and $ prefixes for composer-delivery kinds", () => {
+    // Herdr's kind for Claude Code is `claude`; the registry keys are Herdr's
+    // names, not Plannotator's origin ids.
+    for (const agent of ["claude", "codex", "opencode"]) {
+      expect(livePaneFeedbackDelivery(agent)).toBe("herdr-composer");
+      expect(composerCommandTextRefusal(agent, "/model")).toBe(COMPOSER_COMMAND_TEXT_REASON);
+      expect(composerCommandTextRefusal(agent, "$skill")).toBe(COMPOSER_COMMAND_TEXT_REASON);
+    }
+  });
+
+  test("allows prose that merely contains a slash", () => {
+    // The hazard is the agent's completion popup, which only opens on the first
+    // character. Refusing more than that would censor ordinary messages —
+    // paths, dates and URLs all carry slashes.
+    expect(composerCommandTextRefusal("claude", "run /model when you can")).toBeNull();
+    expect(composerCommandTextRefusal("claude", "see src/app.ts and 1/2 of the diff")).toBeNull();
+    expect(composerCommandTextRefusal("claude", "https://example.com")).toBeNull();
+  });
+
+  test("does not touch extension delivery, which presses no keys", () => {
+    // Pi's queue carries the text as a message. What the receiving agent makes
+    // of a leading slash is its own business, not a delivery hazard.
+    expect(livePaneFeedbackDelivery("pi")).toBe("pi-extension");
+    expect(composerCommandTextRefusal("pi", "/model")).toBeNull();
+  });
+
+  test("does not manufacture a refusal for a kind that cannot be sent to at all", () => {
+    // An unknown kind already has `unavailableReason`; adding a second, more
+    // specific-sounding reason on top would misdescribe why it is read-only.
+    expect(composerCommandTextRefusal("some-future-agent", "/model")).toBeNull();
+  });
+
+  test("the reason names both safe routes and says nothing was typed", () => {
+    expect(COMPOSER_COMMAND_TEXT_REASON).toContain("Nothing was typed");
+    expect(COMPOSER_COMMAND_TEXT_REASON).toContain("commands control");
+    expect(composerOpensCompletionPopup("/x")).toBe(true);
+    expect(composerOpensCompletionPopup("$x")).toBe(true);
+    expect(composerOpensCompletionPopup(" /x")).toBe(false);
   });
 });
