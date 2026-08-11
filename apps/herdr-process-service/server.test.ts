@@ -14,6 +14,7 @@ import {
   feedbackBatch,
   formatInstructionFileReferences,
   instructionDelivery,
+  instructionSessionRefusal,
   panelsFromSnapshot,
   diskTranscriptOutcomes,
   releasePanelSession,
@@ -671,6 +672,86 @@ describe("commandDelivery", () => {
     const replaced = new Map(registrations);
     replaced.set("w:p1", { paneId: "w:p1", sessionId: "session-2", messages: [], commands: [] });
     expect(commandDelivery({ paneId: "w:p1", command: "handoff-to-continue" }, [panel], replaced)).toBeNull();
+  });
+
+  test("a caller that pins the session it saw is refused when that session was replaced", () => {
+    // The Watch composer captures the session that ADVERTISED the command and
+    // sends it back. A replacement session may advertise the same name for a
+    // different thing, and the captain chose neither — so this refuses instead
+    // of running against whatever is registered now.
+    const replaced = new Map(registrations);
+    replaced.set("w:p1", {
+      paneId: "w:p1",
+      sessionId: "session-2",
+      messages: [],
+      commands: [{ name: "handoff-to-continue", description: "Write a handoff", source: "extension" }],
+    });
+    expect(commandDelivery(
+      { paneId: "w:p1", command: "handoff-to-continue", sessionId: "session-1" },
+      [panel],
+      replaced,
+    )).toBeNull();
+
+    // The same pinned session still runs while it IS the current one.
+    expect(commandDelivery(
+      { paneId: "w:p1", command: "handoff-to-continue", sessionId: "session-1" },
+      [panel],
+      registrations,
+    )).toEqual({ paneId: "w:p1", command: "handoff-to-continue", args: "" });
+  });
+
+  test("callers that resolve the current registration at click time are unaffected", () => {
+    // The command palette and the handoff button send no session and keep
+    // their existing behaviour: pinning is opt-in, per caller.
+    const replaced = new Map(registrations);
+    replaced.set("w:p1", {
+      paneId: "w:p1",
+      sessionId: "session-2",
+      messages: [],
+      commands: [{ name: "handoff-to-continue", description: "Write a handoff", source: "extension" }],
+    });
+    expect(commandDelivery({ paneId: "w:p1", command: "handoff-to-continue" }, [panel], replaced))
+      .toEqual({ paneId: "w:p1", command: "handoff-to-continue", args: "" });
+  });
+});
+
+describe("instructionSessionRefusal", () => {
+  test("a replacement extension session is refused, not queued to", () => {
+    // The captain wrote for the session they were watching. The queue entry is
+    // claimed at most once by whoever is registered, so queueing it to a
+    // replacement would deliver their message to a session they never chose.
+    expect(instructionSessionRefusal({
+      composerDelivered: false,
+      requestedSessionId: "session-1",
+      registeredSessionId: "session-2",
+    })).toBe("The selected Pi pane session is no longer current");
+  });
+
+  test("the pinned session is accepted while it is still the current one", () => {
+    expect(instructionSessionRefusal({
+      composerDelivered: false,
+      requestedSessionId: "session-1",
+      registeredSessionId: "session-1",
+    })).toBeNull();
+  });
+
+  test("an extension pane with no registration at all is refused", () => {
+    expect(instructionSessionRefusal({
+      composerDelivered: false,
+      requestedSessionId: null,
+      registeredSessionId: null,
+    })).toBe("The selected Pi pane session is no longer current");
+  });
+
+  test("composer kinds are never gated on a registration they cannot have", () => {
+    // Claude Code / Codex / OpenCode have no extension registering a session;
+    // their (weaker, stated) contract is pane liveness plus the delivery
+    // module's own idle gate.
+    expect(instructionSessionRefusal({
+      composerDelivered: true,
+      requestedSessionId: null,
+      registeredSessionId: null,
+    })).toBeNull();
   });
 });
 
@@ -1430,7 +1511,18 @@ describe("diskTranscriptOutcomes", () => {
   const panel = (id: string, agent: string, cwd: string): HerdrPanel => ({
     id, agent, workspace: "w", tab: "", panel: id, cwd, status: "idle", focused: false,
   });
-  const transcript = async (cwd: string) => ({ sessionId: `session-for${cwd.replace(/\//g, "-")}`, messages: [{ messageId: "msg_1", text: `hello from ${cwd}` }] });
+  /**
+   * Stands in for the real reader: answers for the FIRST candidate directory
+   * that `has` accepts, and reports which one answered — the same contract
+   * `readClaudeLiveSessionForCwds` has, because the caller dedupes on it.
+   */
+  const transcriptFor = (has: (cwd: string) => boolean) => async (cwds: readonly string[]) => {
+    const cwd = cwds.find(has);
+    return cwd
+      ? { cwd, sessionId: `session-for${cwd.replace(/\//g, "-")}`, messages: [{ messageId: "msg_1", text: `hello from ${cwd}` }] }
+      : null;
+  };
+  const transcript = transcriptFor(() => true);
 
   test("sources a transcript only for kinds whose registry entry says it can", async () => {
     const outcomes = await diskTranscriptOutcomes(
@@ -1470,5 +1562,47 @@ describe("diskTranscriptOutcomes", () => {
 
   test("stays silent when a pane simply has no session log yet", async () => {
     expect(await diskTranscriptOutcomes([panel("w:p2", "claude", "/b")], new Map(), 20, async () => null)).toEqual([]);
+  });
+
+  test("falls back to the agent's own cwd when the foreground one has no log", async () => {
+    // Observed live: a Claude pane in `.../projects/dms-workspaces` reported
+    // `foreground_cwd` of `~/.local/lib/node_modules/pyright/dist`, because
+    // `foreground_cwd` follows the FOREGROUND PROCESS and a language server was
+    // running. Keyed on that, the pane lost its entire transcript while Watch
+    // showed it plainly alive.
+    const withFallback: HerdrPanel = { ...panel("w:p2", "claude", "/lsp/dist"), agentCwd: "/repos/app" };
+    const outcomes = await diskTranscriptOutcomes([withFallback], new Map(), 20, transcriptFor((cwd) => cwd === "/repos/app"));
+    expect(outcomes).toEqual([{
+      paneId: "w:p2",
+      enrichment: {
+        paneId: "w:p2",
+        sessionId: "session-for-repos-app",
+        messages: [{ messageId: "msg_1", text: "hello from /repos/app" }],
+        commands: [],
+      },
+    }]);
+  });
+
+  test("prefers the foreground cwd — the fallback must not hijack a worktree pane", async () => {
+    // The common case is the opposite of the bug: an agent inside a git
+    // worktree reports the worktree as `foreground_cwd` and the parent checkout
+    // as its own cwd. Both have session logs. Preferring the fallback would
+    // show the wrong session's words under this pane's name.
+    const worktree: HerdrPanel = { ...panel("w:p2", "claude", "/repos/app/.worktrees/7"), agentCwd: "/repos/app" };
+    const outcomes = await diskTranscriptOutcomes([worktree], new Map(), 20, transcriptFor(() => true));
+    expect(outcomes[0]).toMatchObject({ enrichment: { sessionId: "session-for-repos-app-.worktrees-7" } });
+  });
+
+  test("two panes that FALL BACK onto the same directory are still refused", async () => {
+    // This is why the ambiguity check runs after resolution, not before: on
+    // their own cwds these two look unique, and only the resolved directory
+    // reveals that one log would be claimed twice.
+    const a: HerdrPanel = { ...panel("w:p2", "claude", "/lsp/dist"), agentCwd: "/repos/app" };
+    const b: HerdrPanel = { ...panel("w:p3", "claude", "/other/tool"), agentCwd: "/repos/app" };
+    const outcomes = await diskTranscriptOutcomes([a, b], new Map(), 20, transcriptFor((cwd) => cwd === "/repos/app"));
+    expect(outcomes.map((outcome) => outcome.paneId).sort()).toEqual(["w:p2", "w:p3"]);
+    for (const outcome of outcomes) {
+      expect("note" in outcome && outcome.note).toContain("share this working directory");
+    }
   });
 });

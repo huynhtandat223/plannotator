@@ -45,6 +45,44 @@ export function describeLiveDelivery(
   };
 }
 
+/**
+ * The receipt for a send whose delivery mechanism the caller already knows from
+ * the capability registry — used by surfaces that must show a result inline
+ * rather than only as a toast.
+ *
+ * Composer kinds reuse {@link describeLiveDelivery} verbatim, so there is one
+ * confirmed/unconfirmed vocabulary rather than two. What this adds is the
+ * extension case, which `describeLiveDelivery` deliberately leaves to its
+ * callers: the host answers a Pi send with `{ ok, deliveryId }` and nothing
+ * more, so the only honest word is **queued**. "Sent", "received" or
+ * "delivered" would each claim an acknowledgement that does not exist — the
+ * extension claims the item out-of-band and never reports back to the browser.
+ */
+export function describeLiveSendReceipt(
+  receipt: LiveDeliveryReceipt,
+  agentLabel: string,
+  mechanism: 'pi-extension' | 'herdr-composer' | null,
+  sentWhat: 'message' | 'feedback' = 'message',
+): { title: string; description: string; warning: boolean } {
+  const composer = describeLiveDelivery(receipt, agentLabel, sentWhat);
+  if (composer) return composer;
+  if (mechanism === 'pi-extension') {
+    return {
+      title: sentWhat === 'message' ? `Message queued for ${agentLabel}` : `Feedback queued for ${agentLabel}`,
+      description: `Queued for the selected ${agentLabel} session. Plannotator cannot see the session claim it, so this is not a delivery confirmation.`,
+      warning: false,
+    };
+  }
+  // A mechanism-less receipt from a composer-capable pane means the host
+  // answered in a shape this build does not recognise. Say that, rather than
+  // upgrading silence into success.
+  return {
+    title: sentWhat === 'message' ? 'Message sent, but the result is unclear' : 'Feedback sent, but the result is unclear',
+    description: 'The host accepted the request but did not say how it was delivered. Check the pane before sending again.',
+    warning: true,
+  };
+}
+
 /** Submit one structured assistant response's retryable feedback batch. */
 export async function submitLiveResponseFeedback(
   payload: LiveResponseFeedbackPayload,

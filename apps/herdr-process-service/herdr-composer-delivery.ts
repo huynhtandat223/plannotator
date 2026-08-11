@@ -21,11 +21,15 @@
  * 1. Send the text literally ONCE (`pane send-text`), then submit with a named
  *    Enter key (`pane send-keys <pane> enter`). On failure, retry Enter ONLY —
  *    NEVER retype the text; retyping duplicates the message.
- * 2. A message starting with `/` or `$` opens a completion popup within ~0.1s,
- *    so a settle delay before the first Enter is mandatory. A popup selection
- *    or placeholder-fill on the first Enter never starts a turn, so the
- *    agent-state confirmation simply fails and the retry Enter submits — no
- *    popup-specific logic needed.
+ * 2. Text starting with `/` or `$` is REFUSED before anything is typed. It was
+ *    previously sent with a longer settle, on the theory that a popup would eat
+ *    the first Enter and the retry would submit. That theory held; its
+ *    consequence did not. Sending `/model` to a Claude Code pane typed it,
+ *    Enter #1 took the popup entry, Enter #2 submitted, `/model` opened an
+ *    interactive picker (which starts no turn, so the agent stayed `idle`), and
+ *    Enter #3 confirmed the picker. The retry loop cannot distinguish a
+ *    consumed keystroke from an ignored one, so it will walk through any modal
+ *    the command opens. See `COMPOSER_COMMAND_TEXT_REASON`.
  * 3. Confirmation comes from Herdr's native agent state (`agent get`) observing
  *    a submit-active status (`working` or `blocked`) after Enter, sampled
  *    several times across a budget (real agents observed first-working at
@@ -37,13 +41,18 @@
  * hazards are already paid for.
  */
 
+import {
+  COMPOSER_BUSY_REASON,
+  COMPOSER_COMMAND_TEXT_REASON,
+  COMPOSER_UNREADABLE_REASON,
+  composerOpensCompletionPopup,
+} from "../../packages/core/live-pane-agents";
+
 export type HerdrCliRunner = (args: string[]) => Promise<{ stdout: string }>;
 
 export type ComposerDeliverySequencing = {
-  /** Pre-first-Enter settle for ordinary text. */
+  /** Pre-first-Enter settle. Popup-opening text never reaches it — it is refused. */
   settleMs: number;
-  /** Pre-first-Enter settle when the text opens a completion popup (`/` or `$`). */
-  popupSettleMs: number;
   /** Enter attempts per delivery. The text itself is typed exactly once. */
   enterAttempts: number;
   /** Confirmation window after each Enter. */
@@ -54,12 +63,12 @@ export type ComposerDeliverySequencing = {
 
 /**
  * Defaults mirror firstmate's verified values (`fm-send.sh`): settle 0.3s for
- * plain text and 1.2s for popup-opening prefixes, 3 Enter attempts, and a 0.6s
- * per-attempt confirmation budget sampled 6 times.
+ * plain text, 3 Enter attempts, and a 0.6s per-attempt confirmation budget
+ * sampled 6 times. firstmate's 1.2s popup settle has no counterpart here
+ * because this module refuses popup-opening text instead of timing around it.
  */
 export const DEFAULT_COMPOSER_SEQUENCING: ComposerDeliverySequencing = {
   settleMs: 300,
-  popupSettleMs: 1_200,
   enterAttempts: 3,
   confirmBudgetMs: 600,
   confirmPolls: 6,
@@ -102,11 +111,13 @@ async function agentStatusRaw(run: HerdrCliRunner, paneId: string): Promise<stri
 const UNCONFIRMED_NOTE =
   "The message was typed into the pane's composer and Enter was pressed, but the agent was not seen starting a turn. Check the pane directly before sending again — the text may already be waiting there, and resending would deliver it twice.";
 
-export const COMPOSER_BUSY_REASON =
-  "This pane's agent is mid-turn. Typing now would queue the text in its composer where delivery cannot be confirmed, and a retry could send it twice. Wait for the pane to go idle, then send again.";
-
-export const COMPOSER_UNREADABLE_REASON =
-  "Herdr could not read this pane's agent state, so Plannotator cannot safely type into its composer.";
+/**
+ * The two pre-typing refusal reasons now live in the capability registry
+ * (`@plannotator/core/live-pane-agents`), because a browser send surface must
+ * refuse in the same words without issuing a request. Re-exported here so this
+ * module remains the place the host reads them from.
+ */
+export { COMPOSER_BUSY_REASON, COMPOSER_COMMAND_TEXT_REASON, COMPOSER_UNREADABLE_REASON };
 
 /**
  * Deliver `content` to `paneId`'s composer. Callers must pass the FULL final
@@ -125,6 +136,15 @@ export async function deliverViaHerdrComposer(
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const sequencing = options.sequencing ?? DEFAULT_COMPOSER_SEQUENCING;
 
+  // Popup-opening text is refused before ANY Herdr call, because the Enter
+  // retries below cannot tell a swallowed keystroke from an ignored one: an
+  // observed `/model` send walked popup -> submit -> interactive picker confirm
+  // on three blind Enters. Refusing here rather than at each call site means no
+  // caller can opt into that path by accident. See the constant's own comment.
+  if (composerOpensCompletionPopup(content)) {
+    return { delivered: false, reason: COMPOSER_COMMAND_TEXT_REASON };
+  }
+
   // Baseline gate: only an observably idle agent gets keystrokes. firstmate's
   // verified hazard: a busy agent queues the text and reports failure
   // spuriously, so the send would be retried and delivered twice.
@@ -142,12 +162,10 @@ export async function deliverViaHerdrComposer(
     };
   }
 
-  // Mandatory settle before the first Enter; `/` and `$` prefixes open a
-  // completion popup within ~0.1s. `$` is settled unconditionally (unlike
-  // firstmate's codex-only scoping) because these sends are not
-  // latency-sensitive and the longer settle is harmless for other kinds.
-  const opensPopup = content.startsWith("/") || content.startsWith("$");
-  await sleep(opensPopup ? sequencing.popupSettleMs : sequencing.settleMs);
+  // Mandatory settle before the first Enter. There is no longer a longer
+  // popup-settle variant: popup-opening text is refused above, so the only text
+  // that reaches here opens no completion popup at all.
+  await sleep(sequencing.settleMs);
 
   const pollInterval = sequencing.confirmBudgetMs / Math.max(1, sequencing.confirmPolls - 1);
   for (let attempt = 0; attempt < sequencing.enterAttempts; attempt++) {

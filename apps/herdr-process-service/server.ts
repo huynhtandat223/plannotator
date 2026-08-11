@@ -23,7 +23,7 @@ import {
   supportsLivePaneCapability,
   type LivePaneCapabilityId,
 } from "../../packages/core/live-pane-agents";
-import { readClaudeLiveSession } from "./claude-live-session";
+import { readClaudeLiveSessionForCwds } from "./claude-live-session";
 import { startPaneWatchStream, type PaneWatchHerdr, type PaneWatchScreen } from "./pane-watch";
 import {
   PANE_WATCH_MAX_FRAME_BYTES,
@@ -33,6 +33,8 @@ import {
   PANE_WATCH_READ_TIMEOUT_MS,
 } from "../../packages/core/pane-watch";
 import { deliverViaHerdrComposer, type ComposerDeliveryOutcome } from "./herdr-composer-delivery";
+import { paneInputArgs, paneInputDelivery, paneInputQueue } from "./pane-input";
+import { PANE_INPUT_PATH } from "../../packages/core/pane-input";
 import { formatLiveFeedbackBatch } from "../ex-pi-extension/session";
 import {
   filterWorkspaceStatusForDirectory,
@@ -75,6 +77,9 @@ const host = process.env.PLANNOTATOR_HERDR_HOST ?? "0.0.0.0";
 // loopback and Tailscale peers; Pi enrichment and feedback claiming remain
 // loopback-only because they carry the local Pi session identity.
 const browserWriteToken = process.env.PLANNOTATOR_HERDR_WRITE_TOKEN?.trim() || null;
+
+/** Per-pane serial executor for `/api/pane-input`. See `pane-input.ts`. */
+const paneInput = paneInputQueue();
 const MAX_ACTION_REQUEST_BODY_BYTES = 16_384;
 /** Up to `LIVE_MESSAGE_RETENTION` finalized assistant responses, delivered only from a local Pi pane. */
 export const MAX_PANEL_SESSION_BODY_BYTES = 1_000_000;
@@ -305,7 +310,23 @@ export type HerdrPanel = {
   workspace: string;
   tab: string;
   panel: string;
+  /**
+   * Where this pane is working, preferring Herdr's `foreground_cwd` — normally
+   * the most specific answer (the worktree an agent is actually in, rather than
+   * the directory its shell started in).
+   */
   cwd: string;
+  /**
+   * The agent's own `cwd`, when it differs from {@link cwd}.
+   *
+   * `foreground_cwd` follows the FOREGROUND PROCESS, which for an agent running
+   * a language server is that server's directory — one observed pane reported
+   * `~/.local/lib/node_modules/pyright/dist`. Anything that resolves a pane to
+   * something cwd-keyed (the Claude Code session log above all) must be able to
+   * fall back to this, or a pane silently loses its transcript whenever its
+   * agent happens to have a child process running.
+   */
+  agentCwd?: string;
   status: "working" | "idle" | "blocked" | "unknown";
   focused: boolean;
   gitBranch?: string;
@@ -883,32 +904,43 @@ export async function diskTranscriptOutcomes(
   panels: ReadonlyArray<HerdrPanel>,
   registered: ReadonlyMap<string, PanelSessionEnrichment>,
   limit: number,
-  readTranscript: (cwd: string, limit: number) => Promise<{ sessionId: string; messages: PanelSessionEnrichment["messages"] } | null> = readClaudeLiveSession,
+  readTranscript: (
+    cwds: readonly string[],
+    limit: number,
+  ) => Promise<{ cwd: string; sessionId: string; messages: PanelSessionEnrichment["messages"] } | null> = readClaudeLiveSessionForCwds,
 ): Promise<DiskTranscriptOutcome[]> {
   const candidates = panels.filter(
     (panel) =>
       !registered.has(panel.id) &&
       livePaneAgentProfile(panel.agent).transcriptSource === "claude-session-log",
   );
+  // Resolution happens BEFORE the ambiguity check, not after, because a pane
+  // can fall back off its foreground cwd onto a shared one: two worktree panes
+  // whose agents both report the parent checkout would otherwise each be told
+  // they were unique and then both claim the same log.
+  const resolved = await Promise.all(candidates.map(async (panel) => ({
+    panel,
+    session: await readTranscript([panel.cwd, ...(panel.agentCwd ? [panel.agentCwd] : [])], limit),
+  })));
   const panesPerCwd = new Map<string, number>();
-  for (const panel of candidates) {
-    const key = resolve(panel.cwd);
+  for (const { session } of resolved) {
+    if (!session) continue;
+    const key = resolve(session.cwd);
     panesPerCwd.set(key, (panesPerCwd.get(key) ?? 0) + 1);
   }
-  return (await Promise.all(candidates.map(async (panel): Promise<DiskTranscriptOutcome | null> => {
-    if ((panesPerCwd.get(resolve(panel.cwd)) ?? 0) > 1) {
-      return {
+  return resolved.flatMap(({ panel, session }): DiskTranscriptOutcome[] => {
+    if (!session) return [];
+    if ((panesPerCwd.get(resolve(session.cwd)) ?? 0) > 1) {
+      return [{
         paneId: panel.id,
         note: `Two or more live panes share this working directory, so Plannotator cannot tell which ${livePaneAgentProfile(panel.agent).label} session log belongs to this one.`,
-      };
+      }];
     }
-    const session = await readTranscript(panel.cwd, limit);
-    if (!session) return null;
-    return {
+    return [{
       paneId: panel.id,
       enrichment: { paneId: panel.id, sessionId: session.sessionId, messages: session.messages, commands: [] },
-    };
-  }))).flatMap((outcome) => (outcome ? [outcome] : []));
+    }];
+  });
 }
 
 function normalizeActivity(value: unknown): HerdrActivity | null {
@@ -1084,7 +1116,8 @@ export function panelsFromSnapshot(snapshot: HerdrSnapshot): HerdrPanel[] {
     const agent = entry as HerdrAgent;
     const agentKind = text(agent.agent)?.toLowerCase();
     const paneId = text(agent.pane_id);
-    const cwd = text(agent.foreground_cwd) ?? text(agent.cwd);
+    const declaredCwd = text(agent.cwd);
+    const cwd = text(agent.foreground_cwd) ?? declaredCwd;
     if (!agentKind || !paneId || !cwd) return [];
     const workspaceId = text(agent.workspace_id);
     const tabId = text(agent.tab_id);
@@ -1097,6 +1130,7 @@ export function panelsFromSnapshot(snapshot: HerdrSnapshot): HerdrPanel[] {
       tab: tabId ? tabLabels.get(tabId) ?? tabId : "",
       panel: text(agent.name) ?? `Pane ${paneId.split(":").at(-1) ?? paneId}`,
       cwd,
+      ...(declaredCwd && declaredCwd !== cwd ? { agentCwd: declaredCwd } : {}),
       status: status(agent.agent_status),
       focused: agent.focused === true,
     }];
@@ -1429,8 +1463,41 @@ export function commandDelivery(
   if (!paneId || !command || !/^[-\w:.]+$/.test(command)) return null;
   const registration = enrichments.get(paneId);
   if (!registration || !panels.some((panel) => panel.id === paneId)) return null;
+  // A caller that captured the session which advertised this command may pin it.
+  // The command list is only meaningful for the session that published it, so a
+  // replacement registration must refuse rather than run a stale command against
+  // a session that never offered it. Optional: callers that resolve the current
+  // registration at click time (the command palette, the handoff button) omit it
+  // and keep their existing behaviour.
+  const requestedSessionId = text(body?.sessionId);
+  if (requestedSessionId && registration.sessionId !== requestedSessionId) return null;
   if (!registration.commands.some((capability) => capability.name === command)) return null;
   return { paneId, command, args };
+}
+
+/**
+ * Whether an extension-delivered instruction may be queued for this pane's
+ * CURRENT registration, or the reason it may not.
+ *
+ * A caller that captured the session it is addressing (the Watch composer pins
+ * one when the overlay opens) sends it back here, and a replacement session is
+ * refused rather than quietly queued — the captain's message was written for
+ * the session they were watching, and the queue entry is claimed at most once
+ * by whichever session is registered. Composer kinds have no registration to
+ * hold at all: pane liveness and the delivery module's own idle gate are the
+ * whole (weaker, stated) contract there.
+ */
+export function instructionSessionRefusal(input: {
+  composerDelivered: boolean;
+  requestedSessionId: string | null;
+  registeredSessionId: string | null;
+}): string | null {
+  if (input.composerDelivered) return null;
+  if (!input.registeredSessionId) return "The selected Pi pane session is no longer current";
+  if (input.requestedSessionId && input.requestedSessionId !== input.registeredSessionId) {
+    return "The selected Pi pane session is no longer current";
+  }
+  return null;
 }
 
 export async function formatInstructionFileReferences(content: string, root: string): Promise<{ content: string } | { error: string }> {
@@ -1486,12 +1553,14 @@ async function queueInstruction(request: IncomingMessage, response: ServerRespon
     return;
   }
   const composerDelivered = livePaneFeedbackDelivery(pane.agent) === "herdr-composer";
-  const requestedSessionId = text(body?.sessionId);
   const registration = panelSessions.get(prepared.paneId);
-  // Composer kinds have no extension registration to hold — pane liveness and
-  // the delivery module's own idle gate are the whole (weaker, stated) contract.
-  if (!composerDelivered && (!registration || (requestedSessionId && registration.sessionId !== requestedSessionId))) {
-    writeJson(response, 409, { error: "The selected Pi pane session is no longer current" });
+  const sessionRefusal = instructionSessionRefusal({
+    composerDelivered,
+    requestedSessionId: text(body?.sessionId),
+    registeredSessionId: registration?.sessionId ?? null,
+  });
+  if (sessionRefusal) {
+    writeJson(response, 409, { error: sessionRefusal });
     return;
   }
   let workspaceRoot: string;
@@ -1539,6 +1608,45 @@ async function queueCommand(request: IncomingMessage, response: ServerResponse):
   // `sendUserMessage` text even when it starts with `/`.
   const command = `/${prepared.command}${prepared.args ? ` ${prepared.args}` : ""}`;
   await execFileAsync("herdr", ["pane", "run", prepared.paneId, command], { timeout: 10_000 });
+  writeJson(response, 202, { ok: true });
+}
+
+/**
+ * Type one text chunk or one key into a watched pane.
+ *
+ * Deliberately the weakest write this service offers, and labelled as such at
+ * every layer: no busy gate, no confirmation, no retry. The captain is watching
+ * the pane's screen, so the screen is the acknowledgement — which is exactly
+ * what makes it the only mechanism that can drive an agent's native completion
+ * popup. `/api/instruction` remains the path for anything that needs a receipt.
+ *
+ * The pane is authorised against a FRESH snapshot on every call rather than a
+ * cached one: this is a keystroke, and a keystroke aimed at a pane that has
+ * since been replaced belongs to nobody.
+ */
+async function queuePaneInput(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (!canWriteFeedback(request)) {
+    writeJson(response, 403, { error: "Typing into a pane requires a loopback browser or PLANNOTATOR_HERDR_WRITE_TOKEN." });
+    return;
+  }
+  const body = await requestJson(request);
+  const { panels } = await reviewSnapshot();
+  const prepared = paneInputDelivery(body, panels.map((panel) => panel.id));
+  if ("error" in prepared) {
+    writeJson(response, 400, prepared);
+    return;
+  }
+  const args = paneInputArgs(prepared);
+  try {
+    // Serialised per pane: "type /mod, then Tab" is the whole interaction, and
+    // two overlapping execFile calls have no defined arrival order.
+    await paneInput.run(prepared.paneId, () => execFileAsync("herdr", args, { timeout: 10_000 }));
+  } catch {
+    // The pane's own contents never appear in an error: this endpoint reads
+    // nothing back, and should not start now.
+    writeJson(response, 502, { error: "Herdr could not deliver that input. The pane may have closed." });
+    return;
+  }
   writeJson(response, 202, { ok: true });
 }
 
@@ -3664,6 +3772,10 @@ function serve(request: IncomingMessage, response: ServerResponse): void {
   }
   if (request.method === "POST" && url.pathname === "/api/command") {
     void queueCommand(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
+    return;
+  }
+  if (request.method === "POST" && url.pathname === PANE_INPUT_PATH) {
+    void queuePaneInput(request, response).catch(() => writeJson(response, 503, { error: "Herdr snapshot unavailable" }));
     return;
   }
   if (request.method === "POST" && url.pathname === "/api/process-panels") {

@@ -1,27 +1,58 @@
 /**
- * Full-screen, read-only **Watch live** terminal overlay for ONE Herdr pane.
+ * Full-screen **Watch live** overlay for ONE Herdr pane: an observation stream,
+ * plus one message composer that is deliberately not part of it.
  *
  * Mobile portrait is the primary layout: the captain reaches this over a
- * Tailscale URL on a phone, so the terminal gets the whole dynamic viewport and
- * the chrome is exactly two things — which pane this is, and Close.
+ * Tailscale URL on a phone, so the terminal gets the dynamic viewport and the
+ * chrome above it is exactly two things — which pane this is, and Close.
  *
- * What is deliberately absent is as much of the design as what is present.
- * There is no input, paste, Enter, resize, focus, zoom, font, settings, copy,
- * download, or export affordance anywhere in this component, and no element
- * that can receive terminal keystrokes. The only interactive element is Close.
- * That is what makes this an observation surface rather than a remote terminal.
+ * **The terminal half is still an observation surface, and that is enforced by
+ * shape rather than by discipline.** The screen region contains no control, no
+ * focusable element and nothing that can receive a keystroke; the transport it
+ * reads from (`../live/paneWatchStream`) has no send method to call. Nothing
+ * typed below is forwarded as keys, and there is still no paste, resize, focus,
+ * zoom, font, settings, copy, download or export affordance anywhere.
  *
- * The three display states are a truthfulness contract, not decoration:
- * a frame replaces the previous frame outright; `Reconnecting…` REMOVES the
- * screen (an old terminal presented as live is worse than none); and a pane
- * Herdr no longer reports is terminal — `Session ended`, Close, nothing else.
+ * **The footer is the only write surface, and it writes MESSAGES, not
+ * keystrokes.** One complete ordinary-text message goes through the host's
+ * normal message boundary — the same boundary the document viewer's composer
+ * uses — so a terminal that cannot be typed into gains a way to be *told*
+ * something. Plain Enter inserts a newline; ⌘/Ctrl+Enter sends. Text that
+ * happens to begin with `/` stays literal text: advertised commands are a
+ * separate control with their own explicit Run action, so nothing the captain
+ * types can execute by itself.
+ *
+ * What the footer says about delivery comes from the capability registry
+ * (`@plannotator/core/live-pane-agents`) and never from an agent's name, so
+ * every kind — including one this build has never seen — gets copy that matches
+ * what its mechanism actually guarantees. The two mechanisms are not equal and
+ * the receipts never pretend otherwise: an extension send is **queued** (the
+ * claim happens out of band and is never reported back), a composer send is
+ * typed and either turn-confirmed or explicitly unconfirmed. An unconfirmed
+ * send offers no retry — retyping is how a message gets delivered twice.
+ *
+ * The display states are a truthfulness contract, not decoration: a frame
+ * replaces the previous frame outright; `Reconnecting…` REMOVES the screen (an
+ * old terminal presented as live is worse than none); and a pane Herdr no
+ * longer reports is terminal — `Session ended`, Close, and no composer, because
+ * there is no longer anything to send to.
  */
 
 import React from "react";
 
 import { parseAnsiScreen, type AnsiColor, type AnsiLine } from "@plannotator/core/ansi-screen";
+import {
+  COMPOSER_BUSY_REASON,
+  COMPOSER_UNREADABLE_REASON,
+  composerCommandTextRefusal,
+  livePaneAgentLabel,
+  livePaneSendCopy,
+  supportsLivePaneCapability,
+} from "@plannotator/core/live-pane-agents";
+import { paneInputTextRefusal, type PaneInputKey } from "@plannotator/core/pane-input";
 import type { PaneWatchEndReason, PaneWatchStatus } from "@plannotator/core/pane-watch";
 
+import { describeLiveSendReceipt, type LiveDeliveryReceipt } from "../liveResponseFeedback";
 import { subscribePaneWatch, type PaneWatchSubscribe } from "../live/paneWatchStream";
 
 /** Standard xterm palette. Terminal colours are the pane's, not the app theme's. */
@@ -97,19 +128,163 @@ export function watchEndedMessage(reason: PaneWatchEndReason): string {
   }
 }
 
+/** One advertised command, exactly as the pane's own session published it. */
+export interface LivePaneWatchCommand {
+  name: string;
+  description?: string;
+}
+
 export interface LivePaneWatchOverlayProps {
   /** The pane chosen when Watch opened. Pinned: focus changes never retarget it. */
   paneId: string;
   /** Human identity for the header, e.g. `firstmate · t3H`. */
   paneLabel: string;
+  /** Herdr's agent kind for the pinned pane, captured at open. Resolves all delivery copy. */
+  agent?: string;
+  /**
+   * The pinned pane's CURRENT agent state. Refreshed for the pinned pane id —
+   * never re-read from whatever is selected behind the overlay — because the
+   * composer refuses to type into a busy pane and a frozen status would make
+   * that refusal lie in both directions.
+   */
+  agentStatus?: "working" | "idle" | "blocked" | "unknown";
+  /** The extension session identity captured at open. Sends are pinned to it. */
+  piSessionId?: string;
+  /**
+   * True when the pinned pane's session has been replaced since Watch opened.
+   * The captured session and everything it advertised (its command list above
+   * all) belong to a session that no longer exists, so both write actions
+   * refuse visibly instead of silently addressing its replacement.
+   */
+  sessionReplaced?: boolean;
+  /** Commands this pane's captured session advertised. Never a free-text command line. */
+  commands?: LivePaneWatchCommand[];
+  /**
+   * Send one complete ordinary message. Resolves with the host's receipt;
+   * rejects with the refusal reason, which leaves the draft untouched.
+   * Absent → no composer, for hosts that do not offer sending at all.
+   */
+  onSendMessage?: (text: string) => Promise<LiveDeliveryReceipt>;
+  /** Run one advertised command. Separate action, separate boundary, separate receipt. */
+  onRunCommand?: (command: string) => Promise<void>;
+  /**
+   * Type raw input into the pane's own composer: one text chunk, or one key.
+   *
+   * The weakest write here, and the only one that can drive the agent's NATIVE
+   * completion popup — because it presses nothing on the captain's behalf. It
+   * resolves when Herdr accepted the call, which is not a delivery receipt; the
+   * watched screen above is the acknowledgement. Absent → no typing row.
+   */
+  onPaneInput?: (event: { kind: "text"; text: string } | { kind: "key"; key: PaneInputKey }) => Promise<void>;
   onClose: () => void;
   /** Injectable so the overlay can be exercised against its public contract. */
   subscribe?: PaneWatchSubscribe;
 }
 
+type WatchResultTone = "ok" | "warn" | "error";
+type WatchResult = { tone: WatchResultTone; title: string; detail: string };
+
+/**
+ * Key row labels. Glyph plus word: a lone ⏎ on a phone is a guess, and this row
+ * drives a real agent.
+ */
+const PANE_KEY_LABELS: Record<PaneInputKey, string> = {
+  tab: "Tab",
+  enter: "Enter ⏎",
+  escape: "Esc",
+  backspace: "⌫",
+  "arrow-up": "↑",
+  "arrow-down": "↓",
+  "arrow-left": "←",
+  "arrow-right": "→",
+};
+
+/** Order shown in the row: completion first, then the editor line. */
+const PANE_KEY_ROW: PaneInputKey[] = ["tab", "enter", "escape", "arrow-up", "arrow-down", "backspace"];
+
+const RESULT_TONE_CLASS: Record<WatchResultTone, string> = {
+  ok: "text-muted-foreground",
+  warn: "text-yellow-600 dark:text-yellow-500",
+  error: "text-destructive",
+};
+
+/** Human label for the pinned pane's agent state, for the visible target line. */
+export function watchStatusLabel(status: LivePaneWatchOverlayProps["agentStatus"]): string {
+  switch (status) {
+    case "working":
+      return "Working";
+    case "blocked":
+      return "Blocked";
+    case "idle":
+      return "Idle";
+    default:
+      return "Status unknown";
+  }
+}
+
+/**
+ * Why this pane cannot be messaged right now, or null when it can.
+ *
+ * Ordered most permanent first, because that is the order a reader needs: a
+ * kind that can never be messaged should never be told to wait for it to go
+ * idle. Every reason is one the host itself would answer with, so a refusal
+ * shown here and a refusal returned by the server read identically.
+ */
+const SESSION_REPLACED_REASON =
+  "This pane's agent session has been replaced since Watch opened. Close Watch and reopen it on the current session — Plannotator will not send to a session you did not choose.";
+
+/**
+ * Why an advertised command cannot be run right now, or null when it can.
+ *
+ * A command list is published by ONE session, and this surface pins the session
+ * it saw so the host can refuse a replacement. Without a captured session there
+ * is nothing to pin: the request would omit `sessionId`, which the host reads as
+ * "resolve the current registration" — the deliberate opt-out for callers that
+ * pick a command at click time. That is right for the command palette and wrong
+ * here, so the missing session disables the control instead of quietly becoming
+ * the unpinned path.
+ */
+export function watchCommandBlockedReason(input: {
+  piSessionId?: string;
+  sessionReplaced?: boolean;
+}): string | null {
+  if (!input.piSessionId) {
+    return "Plannotator did not capture the agent session that advertised these commands, so it cannot guarantee one runs against the session you are watching.";
+  }
+  if (input.sessionReplaced) return SESSION_REPLACED_REASON;
+  return null;
+}
+
+export function watchSendBlockedReason(input: {
+  agent?: string;
+  agentStatus?: LivePaneWatchOverlayProps["agentStatus"];
+  piSessionId?: string;
+  sessionReplaced?: boolean;
+}): string | null {
+  const copy = livePaneSendCopy(input.agent);
+  if (copy.unavailableReason) return copy.unavailableReason;
+  if (input.sessionReplaced) return SESSION_REPLACED_REASON;
+  if (copy.mechanism === "pi-extension" && !input.piSessionId) {
+    return "Plannotator did not capture an agent session for this pane when Watch opened, so it cannot guarantee the message reaches the session you are watching.";
+  }
+  if (copy.mechanism === "herdr-composer") {
+    if (input.agentStatus === "working" || input.agentStatus === "blocked") return COMPOSER_BUSY_REASON;
+    if (input.agentStatus !== "idle") return COMPOSER_UNREADABLE_REASON;
+  }
+  return null;
+}
+
 export function LivePaneWatchOverlay({
   paneId,
   paneLabel,
+  agent,
+  agentStatus,
+  piSessionId,
+  sessionReplaced = false,
+  commands,
+  onSendMessage,
+  onRunCommand,
+  onPaneInput,
   onClose,
   subscribe = subscribePaneWatch,
 }: LivePaneWatchOverlayProps): React.ReactElement {
@@ -162,6 +337,163 @@ export function LivePaneWatchOverlay({
 
   const ended = status === "ended";
   const reconnecting = status === "reconnecting" || status === "connecting";
+
+  // ---- Composer ---------------------------------------------------------
+  // Draft, in-flight and result live here and nowhere else. They are entirely
+  // independent of the frame stream above: a screen update must never disturb
+  // half-typed text, and a send must never depend on a frame having arrived.
+  const [draft, setDraft] = React.useState("");
+  const [sending, setSending] = React.useState(false);
+  const [result, setResult] = React.useState<WatchResult | null>(null);
+  const [typing, setTyping] = React.useState(false);
+  const [typeResult, setTypeResult] = React.useState<WatchResult | null>(null);
+  const [command, setCommand] = React.useState("");
+  const [runningCommand, setRunningCommand] = React.useState(false);
+  const [commandResult, setCommandResult] = React.useState<WatchResult | null>(null);
+
+  const sendCopy = livePaneSendCopy(agent);
+  const agentLabel = livePaneAgentLabel(agent);
+  const blockedReason = watchSendBlockedReason({ agent, agentStatus, piSessionId, sessionReplaced });
+  // Refusal that depends on what is TYPED rather than on the pane, so it has to
+  // be recomputed per keystroke and cannot live in `watchSendBlockedReason`.
+  // Shown as the captain types, before they commit to sending.
+  const draftBlockedReason = composerCommandTextRefusal(agent, draft);
+  const advertisedCommands = commands ?? [];
+  const commandsOffered = Boolean(onRunCommand)
+    && supportsLivePaneCapability(agent, "commands")
+    && advertisedCommands.length > 0;
+  const commandBlockedReason = watchCommandBlockedReason({ piSessionId, sessionReplaced });
+  // The assured path (one message, a receipt) and the raw path (characters and
+  // keys, no receipt) are independent: a host may offer either, both, or
+  // neither. `inputOffered` is just "is there anywhere for the box to go".
+  const composerOffered = Boolean(onSendMessage) && sendCopy.mechanism !== null;
+  const inputOffered = composerOffered || Boolean(onPaneInput);
+
+  const submitMessage = React.useCallback(async () => {
+    // Guards the button's `disabled` also covers — repeated here because
+    // ⌘/Ctrl+Enter reaches this without touching the button at all, and a
+    // second in-flight send is exactly how one message becomes two.
+    if (!onSendMessage || sending) return;
+    // Trim decides only whether there is anything to send. What gets sent is the
+    // captain's exact text: leading indentation in a pasted snippet, a trailing
+    // blank line before a signature, and every space between are content, and
+    // this surface has no business editing prose on its way out.
+    if (!draft.trim()) {
+      setResult({ tone: "error", title: "Nothing to send", detail: "Type a message first." });
+      return;
+    }
+    if (blockedReason) {
+      setResult({ tone: "error", title: "Message not sent", detail: blockedReason });
+      return;
+    }
+    // Re-checked here and not only on the button: ⌘/Ctrl+Enter never touches it.
+    if (draftBlockedReason) {
+      setResult({ tone: "error", title: "Message not sent", detail: draftBlockedReason });
+      return;
+    }
+    setSending(true);
+    setResult(null);
+    try {
+      const described = describeLiveSendReceipt(await onSendMessage(draft), agentLabel, sendCopy.mechanism);
+      setResult({ tone: described.warning ? "warn" : "ok", title: described.title, detail: described.description });
+      // Only a send the host accepted clears the draft. Every other path below
+      // keeps it, so a refusal never costs the captain their message.
+      setDraft("");
+    } catch (error) {
+      setResult({
+        tone: "error",
+        title: "Message not sent",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setSending(false);
+    }
+  }, [onSendMessage, sending, draft, blockedReason, draftBlockedReason, agentLabel, sendCopy.mechanism]);
+
+  /**
+   * Type the draft into the pane's composer and press NOTHING.
+   *
+   * This is what makes `/model` workable: the characters land, the agent's own
+   * completion popup opens, and the captain sees it in the screen above and
+   * operates it with the key row below. The draft is cleared on success because
+   * the pane's composer now holds it — the screen, not this box, is the
+   * authoritative editor state from here on.
+   */
+  const typeIntoPane = React.useCallback(async () => {
+    if (!onPaneInput || typing) return;
+    const refusal = paneInputTextRefusal(draft);
+    if (refusal) {
+      setTypeResult({ tone: "error", title: "Not typed", detail: refusal });
+      return;
+    }
+    setTyping(true);
+    setTypeResult(null);
+    try {
+      await onPaneInput({ kind: "text", text: draft });
+      setDraft("");
+      setTypeResult({
+        tone: "ok",
+        title: "Typed into the pane",
+        // Never "sent": nothing was submitted, and saying so would invite the
+        // captain to walk away from a composer holding an unsent command.
+        detail: "Nothing was submitted. Watch the screen above, then use the keys below.",
+      });
+    } catch (error) {
+      setTypeResult({
+        tone: "error",
+        title: "Not typed",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setTyping(false);
+    }
+  }, [onPaneInput, typing, draft]);
+
+  /** Send exactly one key press. No coalescing, no repeat, no retry. */
+  const pressKey = React.useCallback(async (key: PaneInputKey) => {
+    if (!onPaneInput || typing) return;
+    setTyping(true);
+    setTypeResult(null);
+    try {
+      await onPaneInput({ kind: "key", key });
+      setTypeResult({ tone: "ok", title: `Pressed ${PANE_KEY_LABELS[key]}`, detail: "Check the screen above for what it did." });
+    } catch (error) {
+      setTypeResult({
+        tone: "error",
+        title: `${PANE_KEY_LABELS[key]} not sent`,
+        // No retry offered anywhere on this path: a key that may already have
+        // landed must not be pressed again on Plannotator's initiative.
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setTyping(false);
+    }
+  }, [onPaneInput, typing]);
+
+  const runCommand = React.useCallback(async () => {
+    if (!onRunCommand || runningCommand || !command) return;
+    const blocked = watchCommandBlockedReason({ piSessionId, sessionReplaced });
+    if (blocked) {
+      setCommandResult({ tone: "error", title: "Command not run", detail: blocked });
+      return;
+    }
+    setRunningCommand(true);
+    setCommandResult(null);
+    try {
+      await onRunCommand(command);
+      // A command receipt is deliberately not phrased as message delivery: the
+      // host only started it in the pane.
+      setCommandResult({ tone: "ok", title: `Command started — /${command}`, detail: `${agentLabel} is handling it in this pane.` });
+    } catch (error) {
+      setCommandResult({
+        tone: "error",
+        title: "Command could not be run",
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setRunningCommand(false);
+    }
+  }, [onRunCommand, runningCommand, command, sessionReplaced, piSessionId, agentLabel]);
 
   return (
     <div
@@ -260,6 +592,223 @@ export function LivePaneWatchOverlay({
           </pre>
         )}
       </div>
+
+      {/* The write surfaces. Visually and structurally outside the screen
+          region above, which is what keeps "observe" and "control" separate:
+          nothing inside the terminal region is focusable or clickable, and
+          every write below is an explicit, labelled action. Absent once the
+          watch has ended — controls under a dead pane offer something that
+          cannot happen. */}
+      {(onSendMessage || onPaneInput) && !ended && (
+        <div
+          className="flex flex-shrink-0 flex-col gap-2 border-t border-border px-3 py-2"
+          data-testid="live-pane-watch-composer"
+        >
+          {/* Pane, agent kind, live state and delivery mechanism, in visible
+              text — every one of them is something a captain needs before
+              deciding whether to trust the send, and none of them is carried by
+              an icon alone. */}
+          <p className="text-[11px] leading-tight text-muted-foreground" data-testid="live-pane-watch-target">
+            <span className="font-medium text-foreground">Message this pane</span>
+            {` · ${paneLabel} · ${agentLabel} · ${watchStatusLabel(agentStatus)}`}
+            {sendCopy.note ? ` · ${sendCopy.note}` : ""}
+          </p>
+
+          {blockedReason ? (
+            <p className="text-[11px] leading-snug text-destructive" data-testid="live-pane-watch-blocked">
+              {blockedReason}
+            </p>
+          ) : sendCopy.caveat ? (
+            <p className="text-[11px] leading-snug text-muted-foreground" data-testid="live-pane-watch-caveat">
+              {sendCopy.caveat}
+            </p>
+          ) : null}
+
+          {/* One box, two destinations, and the box itself belongs to neither.
+              A kind with no delivery mechanism gets a textarea only if raw
+              typing is offered — otherwise it stays read-only in the literal
+              sense: told why, and given nothing to type into. Raw typing is
+              pane-scoped, not agent-kind-scoped, so an agent kind Plannotator
+              has never heard of can still be typed into. */}
+          {inputOffered && (
+            <>
+              <textarea
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                // ⌘/Ctrl+Enter sends; plain Enter is left entirely alone so it
+                // inserts a newline. This is prose, and prose has paragraphs.
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault();
+                    void submitMessage();
+                  }
+                }}
+                rows={3}
+                placeholder={`Type a message for ${agentLabel}…`}
+                aria-label={`Message ${paneLabel}`}
+                // `resize-none`: the footer is fixed, and a draggable handle here
+                // would take the terminal's height on the screen where it is
+                // scarcest. Longer messages scroll inside the box instead.
+                className="w-full resize-none rounded border border-border bg-background px-2 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                data-testid="live-pane-watch-input"
+              />
+
+              {/* Appears the moment a `/` or `$` is typed, not after a failed
+                  send: the captain should learn this before writing a message
+                  they cannot send, and the refusal names where to go instead —
+                  which, on this surface, is the typing row directly below. */}
+              {composerOffered && !blockedReason && draftBlockedReason && (
+                <p
+                  role="status"
+                  aria-live="polite"
+                  className="text-[11px] leading-snug text-destructive"
+                  data-testid="live-pane-watch-draft-blocked"
+                >
+                  {draftBlockedReason}
+                </p>
+              )}
+
+              {composerOffered && (
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] text-muted-foreground">
+                  ⌘/Ctrl+Enter to send · Enter adds a line
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void submitMessage()}
+                  // Disabled for the duration of its own request: a second click
+                  // during the round trip is a second message, and neither
+                  // mechanism can take one back.
+                  disabled={sending || Boolean(blockedReason) || Boolean(draftBlockedReason)}
+                  className="shrink-0 rounded border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted/40 disabled:opacity-50"
+                  data-testid="live-pane-watch-send"
+                >
+                  {sending ? "Sending…" : "Send message"}
+                </button>
+              </div>
+              )}
+
+              {result && (
+                <p
+                  role="status"
+                  aria-live="polite"
+                  className={`text-[11px] leading-snug ${RESULT_TONE_CLASS[result.tone]}`}
+                  data-testid="live-pane-watch-result"
+                >
+                  <span className="font-medium">{result.title}</span>
+                  {` — ${result.detail}`}
+                </p>
+              )}
+
+              {/* The raw-typing half. It is the OPPOSITE trade to Send message:
+                  no receipt, no busy gate, nothing pressed on the captain's
+                  behalf — which is precisely why it is the one path that can
+                  drive the agent's own completion popup. Both are offered
+                  because neither can do the other's job. */}
+              {onPaneInput && (
+                <div className="flex flex-col gap-1 border-t border-border/60 pt-2" data-testid="live-pane-watch-typing">
+                  <p className="text-[11px] leading-snug text-muted-foreground">
+                    <span className="font-medium text-foreground">Type into the pane</span>
+                    {" — puts the text in the agent's own composer and presses nothing. Its suggestions appear on the screen above; drive them with the keys below."}
+                  </p>
+                  <div className="flex flex-wrap items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => void typeIntoPane()}
+                      disabled={typing || !draft}
+                      className="rounded border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted/40 disabled:opacity-50"
+                      data-testid="live-pane-watch-type"
+                    >
+                      {typing ? "Typing…" : "Type into pane"}
+                    </button>
+                    {PANE_KEY_ROW.map((key) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => void pressKey(key)}
+                        // One press per click. Disabled in flight so a second
+                        // tap during the round trip cannot become a second key.
+                        disabled={typing}
+                        aria-label={`Press ${PANE_KEY_LABELS[key]} in ${paneLabel}`}
+                        className="rounded border border-border px-2 py-1 font-mono text-xs text-foreground hover:bg-muted/40 disabled:opacity-50"
+                        data-testid={`live-pane-watch-key-${key}`}
+                      >
+                        {PANE_KEY_LABELS[key]}
+                      </button>
+                    ))}
+                  </div>
+                  {typeResult && (
+                    <p
+                      role="status"
+                      aria-live="polite"
+                      className={`text-[11px] leading-snug ${RESULT_TONE_CLASS[typeResult.tone]}`}
+                      data-testid="live-pane-watch-type-result"
+                    >
+                      <span className="font-medium">{typeResult.title}</span>
+                      {` — ${typeResult.detail}`}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Commands are secondary, advertised-only and explicit. They are a
+                  separate control with a separate action and a separate boundary,
+                  precisely so that nothing typed above — including text that starts
+                  with `/` — can ever be interpreted as one. */}
+              {commandsOffered && (
+                <div className="flex flex-col gap-1 border-t border-border/60 pt-2" data-testid="live-pane-watch-commands">
+                  <label className="text-[11px] text-muted-foreground" htmlFor={`watch-command-${paneId}`}>
+                    Commands this pane advertises
+                  </label>
+                  {commandBlockedReason && (
+                    <p className="text-[11px] leading-snug text-destructive" data-testid="live-pane-watch-command-blocked">
+                      {commandBlockedReason}
+                    </p>
+                  )}
+                  <div className="flex items-center gap-2">
+                    <select
+                      id={`watch-command-${paneId}`}
+                      value={command}
+                      onChange={(event) => setCommand(event.target.value)}
+                      className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-xs text-foreground"
+                      data-testid="live-pane-watch-command-select"
+                    >
+                      <option value="">Choose a command…</option>
+                      {advertisedCommands.map((advertised) => (
+                        <option key={advertised.name} value={advertised.name}>
+                          {`/${advertised.name}`}
+                          {advertised.description ? ` — ${advertised.description}` : ""}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => void runCommand()}
+                      // Choosing a command never runs it; only this does.
+                      disabled={!command || runningCommand || Boolean(commandBlockedReason)}
+                      className="shrink-0 rounded border border-border px-2 py-1 text-xs font-medium text-foreground hover:bg-muted/40 disabled:opacity-50"
+                      data-testid="live-pane-watch-run-command"
+                    >
+                      {runningCommand ? "Running…" : command ? `Run /${command}` : "Run command"}
+                    </button>
+                  </div>
+                  {commandResult && (
+                    <p
+                      role="status"
+                      aria-live="polite"
+                      className={`text-[11px] leading-snug ${RESULT_TONE_CLASS[commandResult.tone]}`}
+                      data-testid="live-pane-watch-command-result"
+                    >
+                      <span className="font-medium">{commandResult.title}</span>
+                      {` — ${commandResult.detail}`}
+                    </p>
+                  )}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }

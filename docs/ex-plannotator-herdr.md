@@ -93,7 +93,15 @@ These user actions have distinct transports. Do not merge them or infer one from
 | --- | --- | --- | --- |
 | Feedback about an existing assistant response | `POST /api/feedback` | Matching Pi extension claims the batch and sends formatted follow-up feedback | Yes |
 | Raw message while a pane is waiting | `POST /api/instruction` | Matching Pi extension claims it and calls `pi.sendUserMessage` | No, text only |
+| Message typed in the **Watch live** footer | `POST /api/instruction` with the captured `sessionId` | Same delivery, pinned to the session captured when Watch opened | No, text only |
 | Explicit supported slash command | `POST /api/command` | `herdr pane run <paneId> /<command> [args]` | Not applicable |
+| **Type into pane** / key row in the **Watch live** footer | `POST /api/pane-input` | `herdr pane send-text <paneId> <text>` or `herdr pane send-keys <paneId> <key>`, serialised per pane | Not applicable |
+
+The Watch footer is the same message transport, addressed differently. Its target — pane, agent kind, session identity and advertised command list — is captured when the overlay opens and is never re-read from the current selection, so a send cannot follow the picker to another pane. Because it pins the session it saw, `instructionSessionRefusal()` refuses a replacement registration rather than queueing the captain's message to a session they never chose, and `commandDelivery()` applies the same check to any caller that sends a `sessionId`. Callers that deliberately resolve the current registration at click time (the Global Comment command palette, the handoff button) omit it and are unaffected.
+
+The footer's second half is the deliberate inverse of the first. **Send message** must press Enter to submit, so it refuses text starting with `/` or `$`: on a real Claude Code pane, sending `/model` walked its three Enter attempts through popup → submit → interactive-picker confirm, changing a setting the captain never saw. **Type into pane** puts the characters in the agent's own composer and presses nothing, so the agent's native completion popup opens on the streamed screen and the captain drives it with the Tab/Enter/Esc/arrow key row. Nothing on that path is delivery: no busy gate, no confirmation, no retry — the screen is the acknowledgement, which is exactly the trade that makes it work for commands. The browser sends only a pane id and a key from a closed enum; the host owns the Herdr key names, refuses control characters in text, re-authorizes the pane against a fresh snapshot per call, and serialises calls per pane so `text` then `key` cannot arrive out of order.
+
+`apps/herdr-process-service/pane-watch.ts` — the screen stream — is untouched by all of this and still has no send-text, send-keys, focus or resize verb. Writes live in `pane-input.ts`, a separate module behind a separate endpoint, so the observation transport stays one-way.
 
 ### Global Comment autocomplete
 
